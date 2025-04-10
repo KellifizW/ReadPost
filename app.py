@@ -11,7 +11,7 @@ LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 LIHKG_TOKEN = ""  # 如果有 token 可填入
 
 # HKG API 配置
-HKG_BASE_URL = "https://api.hkgolden.com/"  # 更新為新伺服器
+HKG_BASE_URL = "https://api.hkgolden.com/"
 HKG_USER_ID = "0"
 HKG_PASSWORD_HASH = ""
 
@@ -87,12 +87,18 @@ def get_hkg_topic_list(topic_type, page=1, retries=3):
                 st.warning(f"嘗試 {attempt+1}/{retries} - HKG API 錯誤: {response.status_code}")
         except requests.exceptions.RequestException as e:
             st.warning(f"嘗試 {attempt+1}/{retries} - 請求失敗: {e}")
-        time.sleep(2)  # 等待 2 秒後重試
+        time.sleep(2)
     return {"error": f"HKG API 錯誤: 多次嘗試後仍失敗"}
 
 # Streamlit 主程式
 def main():
     st.title("LIHKG 和 HKG 分類帖子抓取測試")
+
+    # 初始化 session_state
+    if "lihkg_posts" not in st.session_state:
+        st.session_state.lihkg_posts = None
+    if "lihkg_replies" not in st.session_state:
+        st.session_state.lihkg_replies = {}
 
     # LIHKG 測試區
     st.header("LIHKG 分類帖子與回覆")
@@ -103,25 +109,31 @@ def main():
         if "error" in data:
             st.error(data["error"])
         else:
-            st.json(data)
-            if "response" in data and "items" in data["response"]:
-                for item in data["response"]["items"]:
-                    st.write(f"標題: {item['title']}")
-                    st.write(f"帖子 ID: {item['thread_id']}")
-                    st.write(f"用戶: {item['user_nickname']}")
-                    # 抓取該帖子的回覆內容
-                    if st.button(f"查看帖子 {item['thread_id']} 的回覆"):
-                        thread_data = get_lihkg_thread_content(item["thread_id"], 1)
-                        if "error" in thread_data:
-                            st.error(thread_data["error"])
-                        else:
-                            st.json(thread_data)
-                            if "response" in thread_data and "items" in thread_data["response"]:
-                                for reply in thread_data["response"]["items"]:
-                                    st.write(f"回覆用戶: {reply['user_nickname']}")
-                                    st.write(f"回覆內容: {reply['msg']}")
-                                    st.write("---")
-                    st.write("---")
+            st.session_state.lihkg_posts = data  # 保存帖子列表到 session_state
+
+    # 顯示帖子列表
+    if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
+        for item in st.session_state.lihkg_posts["response"]["items"]:
+            st.write(f"標題: {item['title']}")
+            st.write(f"帖子 ID: {item['thread_id']}")
+            st.write(f"用戶: {item['user_nickname']}")
+            # 使用唯一 key 避免按鈕衝突
+            if st.button(f"查看帖子 {item['thread_id']} 的回覆", key=f"view_replies_{item['thread_id']}"):
+                thread_data = get_lihkg_thread_content(item["thread_id"], 1)
+                if "error" in thread_data:
+                    st.error(thread_data["error"])
+                else:
+                    st.session_state.lihkg_replies[item["thread_id"]] = thread_data  # 保存回覆數據
+            # 顯示已抓取的回覆
+            if item["thread_id"] in st.session_state.lihkg_replies:
+                thread_data = st.session_state.lihkg_replies[item["thread_id"]]
+                if "response" in thread_data and "items" in thread_data["response"]:
+                    st.subheader(f"帖子 {item['thread_id']} 的回覆")
+                    for reply in thread_data["response"]["items"]:
+                        st.write(f"回覆用戶: {reply['user_nickname']}")
+                        st.write(f"回覆內容: {reply['msg']}")
+                        st.write("---")
+            st.write("---")
 
     # HKG 測試區
     st.header("HKG 分類帖子")
