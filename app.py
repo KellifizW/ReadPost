@@ -30,6 +30,7 @@ def get_lihkg_topic_list(cat_id, page=1, count=30):
     }
     
     response = requests.get(url, headers=headers)
+    st.write(f"調試: 請求 LIHKG 分類帖子 URL: {url}, 狀態碼: {response.status_code}")
     if response.status_code == 200:
         return response.json()
     else:
@@ -49,11 +50,15 @@ def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
         "X-LI-DIGEST": digest
     }
     
+    st.write(f"調試: 請求 LIHKG 帖子回覆 URL: {url}")
     response = requests.get(url, headers=headers)
+    st.write(f"調試: LIHKG 回覆請求狀態碼: {response.status_code}")
     if response.status_code == 200:
-        return response.json()
+        data = response.json()
+        st.write(f"調試: LIHKG 回覆返回數據: {data}")
+        return data
     else:
-        return {"error": f"LIHKG API 錯誤: {response.status_code}"}
+        return {"error": f"LIHKG API 錯誤: {response.status_code}, 回應: {response.text}"}
 
 # HKG 抓取分類帖子列表（帶重試邏輯）
 def get_hkg_topic_list(topic_type, page=1, retries=3):
@@ -80,7 +85,9 @@ def get_hkg_topic_list(topic_type, page=1, retries=3):
             headers = {
                 "User-Agent": "Mozilla/5.0 (Linux; Android 10; Pixel XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Mobile Safari/537.36"
             }
+            st.write(f"調試: 請求 HKG 分類帖子 URL: {url}")
             response = requests.get(url, headers=headers, timeout=10)
+            st.write(f"調試: HKG 請求狀態碼: {response.status_code}")
             if response.status_code == 200:
                 return response.json()
             else:
@@ -109,7 +116,7 @@ def main():
         if "error" in data:
             st.error(data["error"])
         else:
-            st.session_state.lihkg_posts = data  # 保存帖子列表到 session_state
+            st.session_state.lihkg_posts = data
 
     # 顯示帖子列表
     if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
@@ -117,13 +124,12 @@ def main():
             st.write(f"標題: {item['title']}")
             st.write(f"帖子 ID: {item['thread_id']}")
             st.write(f"用戶: {item['user_nickname']}")
-            # 使用唯一 key 避免按鈕衝突
             if st.button(f"查看帖子 {item['thread_id']} 的回覆", key=f"view_replies_{item['thread_id']}"):
                 thread_data = get_lihkg_thread_content(item["thread_id"], 1)
                 if "error" in thread_data:
                     st.error(thread_data["error"])
                 else:
-                    st.session_state.lihkg_replies[item["thread_id"]] = thread_data  # 保存回覆數據
+                    st.session_state.lihkg_replies[item["thread_id"]] = thread_data
             # 顯示已抓取的回覆
             if item["thread_id"] in st.session_state.lihkg_replies:
                 thread_data = st.session_state.lihkg_replies[item["thread_id"]]
