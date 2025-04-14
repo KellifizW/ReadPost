@@ -136,6 +136,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
                 st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
             break
     
+    st.session_state.debug_log.append(f"元數據: {len(all_items)} 帖子, 標題示例: {[item['title'] for item in all_items[:3]]}")
     return all_items
 
 # 抓取帖子回覆
@@ -309,21 +310,16 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     
     call_id = f"select_{time.time()}"
     response = await summarize_with_grok3(prompt, call_id=call_id)
+    st.session_state.debug_log.append(f"ID 解析輸入: {response[:200]}...")
     
-    thread_ids = re.findall(r'(?:帖子\s*ID\s*[:：]?\s*|ID\s*)?(\d+)', response, re.MULTILINE)
+    thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
     valid_ids = [str(item["thread_id"]) for item in st.session_state.metadata]
     selected_ids = [tid for tid in thread_ids if tid in valid_ids]
     
     st.session_state.debug_log.append(f"ID 解析: 輸入='{response[:200]}...', 提取={thread_ids}, 有效={selected_ids}")
     if not selected_ids:
-        st.warning("無法解析帖子 ID，選擇回覆數最多的帖子")
-        selected_ids = [
-            str(item["thread_id"]) for item in sorted(
-                st.session_state.metadata,
-                key=lambda x: x["no_of_reply"],
-                reverse=True
-            )[:max_threads]
-        ]
+        st.warning("無法解析帖子 ID，請檢查問題或稍後重試")
+        return []
     
     return selected_ids[:max_threads]
 
