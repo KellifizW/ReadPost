@@ -88,12 +88,18 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
     all_items = []
     tasks = []
     
-    # 成人台嘗試多個子分類
-    sub_cat_ids = [0, 1, 2] if cat_id == 29 else [sub_cat_id]
+    # 熱門分類使用 /thread/hot，其他使用 /thread/category
+    endpoint = "thread/hot" if cat_id == 2 else "thread/category"
+    # 成人台嘗試多個子分類，熱門分類無子分類
+    sub_cat_ids = [0] if cat_id == 2 else ([0, 1, 2] if cat_id == 29 else [sub_cat_id])
     
     for sub_id in sub_cat_ids:
         for p in range(start_page, start_page + max_pages):
-            url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_id}&page={p}&count={count}&type=now"
+            # 熱門分類無 sub_cat_id 參數
+            if cat_id == 2:
+                url = f"{LIHKG_BASE_URL}{endpoint}?cat_id={cat_id}&page={p}&count={count}&type=now"
+            else:
+                url = f"{LIHKG_BASE_URL}{endpoint}?cat_id={cat_id}&sub_cat_id={sub_id}&page={p}&count={count}&type=now"
             timestamp = int(time.time())
             digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
             
@@ -267,7 +273,7 @@ async def summarize_with_grok3(text, call_id=None):
         return f"錯誤: {str(e)}"
 
 # 分析LIHKG元數據
-async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
     st.session_state.debug_log.append(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
     st.session_state.debug_log.append("清空 metadata")
