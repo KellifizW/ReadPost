@@ -273,7 +273,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題包含「膠post」或「得意野」，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如描述無厘頭情境、誇張故事或荒誕討論。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
+    請以繁體中文分析這些元數據，回答使用者的問題，並列出最多 3 個最相關的帖子（格式為「帖子 ID: <數字>, 標題: <標題>」）。若問題包含「膠post」「得意野」或類似詞，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如描述無厘頭情境、誇張故事或荒誕討論。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
     """
     
     call_id = f"metadata_{time.time()}"
@@ -287,15 +287,16 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     以下是對 LIHKG 帖子元數據的分析結果：
     {analysis_result}
     
-    請從中挑選最多 {max_threads} 個最相關的帖子，僅返回帖子 ID 列表，格式為純數字（一行一個），例如：
+    請僅返回帖子 ID 列表，每行一個純數字（無其他文字），例如：
     12345
     67890
+    若無相關帖子，返回空列表。
     """
     
     call_id = f"select_{time.time()}"
     response = await summarize_with_grok3(prompt, call_id=call_id)
     
-    thread_ids = re.findall(r'^\d+$', response, re.MULTILINE)
+    thread_ids = re.findall(r'(?:帖子\s*ID\s*[:：]?\s*|ID\s*)?(\d+)', response, re.MULTILINE)
     valid_ids = [str(item["thread_id"]) for item in st.session_state.metadata]
     selected_ids = [tid for tid in thread_ids if tid in valid_ids]
     
@@ -429,7 +430,7 @@ def main():
             role = "你" if chat["role"] == "user" else "Grok 3"
             st.markdown(f"**{role}**：{chat['content']}")
             if chat["role"] == "assistant":
-                call_id = f"metadata_{i//2}_{time.time()}"
+                call_id = f"metadata_{i//2}"
                 char_count = st.session_state.char_counts.get(call_id, 0)
                 st.write(f"**處理字元數**：{char_count} 字元")
             st.write("---")
