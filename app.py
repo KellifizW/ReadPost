@@ -52,25 +52,26 @@ def chunk_text(texts, max_chars=GROK3_TOKEN_LIMIT):
     return chunks
 
 # 非同步API調用（支援重試）
-async def async_request(method, url, headers=None, json=None, retries=1):
+async def async_request(method, url, headers=None, json=None, retries=2):
     for attempt in range(retries + 1):
         try:
             loop = asyncio.get_event_loop()
             if method == "get":
-                response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=10))
+                response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=15))
             elif method == "post":
-                response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json, timeout=10))
+                response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json, timeout=15))
             response.raise_for_status()
             return response
         except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
             if attempt < retries:
-                st.warning(f"API 請求失敗（{str(e)}），重試 {attempt + 1}/{retries}...")
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
+                continue
             else:
+                st.error(f"API 請求失敗（{str(e)}），已達最大重試次數")
                 raise e
 
 # 抓取LIHKG帖子列表（元數據）
-async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=50):
+async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=30):
     all_items = []
     tasks = []
     
@@ -179,6 +180,15 @@ async def summarize_with_grok3(text, call_id=None):
         st.session_state.char_counts[call_id] = char_count
     else:
         st.session_state.char_counts[f"temp_{time.time()}"] = char_count
+    
+    if len(text) > GROK3_TOKEN_LIMIT:
+        st.warning(f"輸入超過 {GROK3_TOKEN_LIMIT} 字元，自動分塊處理")
+        chunks = chunk_text([text], max_chars=GROK3_TOKEN_LIMIT // 2)
+        summaries = []
+        for i, chunk in enumerate(chunks):
+            summary = await summarize_with_grok3(chunk, call_id=f"{call_id}_sub_{i}")
+            summaries.append(summary)
+        return "\n".join(summaries)
     
     headers = {
         "Content-Type": "application/json",
@@ -292,12 +302,18 @@ async def summarize_thread(thread_id):
             f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
             call_id=f"{thread_id}_chunk_{i}"
         )
+        if summary.startswith("錯誤:"):
+            st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
+            return summary
         chunk_summaries.append(summary)
     
     final_summary = await summarize_with_grok3(
         f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
         call_id=f"{thread_id}_final"
     )
+    if final_summary.startswith("錯誤:"):
+        st.error(f"帖子 {thread_id} 最終總結失敗：{final_summary}")
+        return final_summary
     return final_summary
 
 # 手動抓取和總結
@@ -307,7 +323,8 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
     st.session_state.char_counts = {}
     all_items = []
     
-    sub_cat_ids = [0, 1, 2, 3, 4, 5] if auto_sub_cat else [sub_cat_id]
+    valid_sub_cat_ids = [0, 1, 2]  # 根據測試更新
+    sub_cat_ids = valid_sub_cat_ids if auto_sub_cat else [sub_cat_id]
     
     for sub_id in sub_cat_ids:
         items = await get_lihkg_topic_list(cat_id, sub_id, start_page, max_pages)
@@ -333,13 +350,18 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
                 f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
                 call_id=f"{thread_id}_chunk_{i}"
             )
+            if summary.startswith("錯誤:"):
+                st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
+                continue
             chunk_summaries.append(summary)
         
-        final_summary = await summarize_with_grok3(
-            f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
-            call_id=f"{thread_id}_final"
-        )
-        st.session_state.summaries[thread_id] = final_summary
+        if chunk_summaries:
+            final_summary = await summarize_with_grok3(
+                f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+                call_id=f"{thread_id}_final"
+            )
+            if not final_summary.startswith("錯誤:"):
+                st.session_state.summaries[thread_id] = final_summary
 
 # Streamlit主程式
 def main():
@@ -363,7 +385,8 @@ def main():
                 for thread_id in thread_ids:
                     if thread_id not in st.session_state.summaries:
                         summary = asyncio.run(summarize_thread(thread_id))
-                        st.session_state.summaries[thread_id] = summary
+                        if not summary.startswith("錯誤:"):
+                            st.session_state.summaries[thread_id] = summary
     
     if st.session_state.chat_history:
         st.subheader("聊天記錄")
@@ -397,7 +420,7 @@ def main():
         sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
         start_page = st.number_input("開始頁數", min_value=1, value=1)
         max_pages = st.number_input("最大頁數", min_value=1, value=5)
-        auto_sub_cat = st.checkbox("自動遍歷子分類 (0-5)", value=True)
+        auto_sub_cat = st.checkbox("自動遍歷子分類 (0-2)", value=True)
         submit_fetch = st.form_submit_button("抓取並總結")
     
     if submit_fetch:
