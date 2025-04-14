@@ -14,7 +14,7 @@ LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
 # Grok 3 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 4000
+GROK3_TOKEN_LIMIT = 8000
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -190,7 +190,7 @@ async def summarize_with_grok3(text, call_id=None):
             {"role": "system", "content": "你是 Grok 3，請使用繁體中文回答所有問題，並確保回覆清晰、簡潔、符合繁體中文語法規範。"},
             {"role": "user", "content": text}
         ],
-        "max_tokens": 300,
+        "max_tokens": 600,
         "temperature": 0.7
     }
     
@@ -236,7 +236,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「惡趣味」「on9」等意思或詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「怪女」「清零」「搞亂籠」等詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
     """
     
     call_id = f"metadata_{len(st.session_state.chat_history)}"
@@ -258,13 +258,13 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     response = await summarize_with_grok3(prompt, call_id=call_id)
     
     thread_ids = re.findall(r'^\d+$', response, re.MULTILINE)
-    valid_ids = [item["thread_id"] for item in st.session_state.metadata]
+    valid_ids = [str(item["thread_id"]) for item in st.session_state.metadata]
     selected_ids = [tid for tid in thread_ids if tid in valid_ids]
     
     if not selected_ids:
         st.warning("無法解析帖子 ID，選擇回覆數最多的帖子")
         selected_ids = [
-            item["thread_id"] for item in sorted(
+            str(item["thread_id"]) for item in sorted(
                 st.session_state.metadata,
                 key=lambda x: x["no_of_reply"],
                 reverse=True
@@ -275,8 +275,9 @@ async def select_relevant_threads(analysis_result, max_threads=3):
 
 # 總結帖子
 async def summarize_thread(thread_id):
-    post = next((item for item in st.session_state.metadata if item["thread_id"] == thread_id), None)
+    post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
+        st.error(f"找不到帖子 {thread_id}")
         return f"錯誤: 找不到帖子 {thread_id}"
     
     replies = await get_lihkg_thread_content(thread_id)
@@ -368,11 +369,11 @@ def main():
         st.subheader("聊天記錄")
         for i, chat in enumerate(st.session_state.chat_history):
             role = "你" if chat["role"] == "user" else "Grok 3"
-            st.write(f"**{role}**：{chat['content']}")
+            st.markdown(f"**{role}**：{chat['content']}")
             if chat["role"] == "assistant":
                 call_id = f"metadata_{i//2}"
-                char_count = st.session_state.char_counts.get(call_id, "處理中")
-                st.write(f"**處理字元數**：{char_count if isinstance(char_count, int) else char_count} 字元")
+                char_count = st.session_state.char_counts.get(call_id, 0)
+                st.write(f"**處理字元數**：{char_count} 字元")
             st.write("---")
 
     st.header("帖子總結")
