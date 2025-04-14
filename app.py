@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 import pytz
 import asyncio
+import json
 
 # LIHKG 配置（保留硬編碼）
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
@@ -87,56 +88,63 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
     all_items = []
     tasks = []
     
-    for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now"
-        timestamp = int(time.time())
-        digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+    # 成人台嘗試多個子分類
+    sub_cat_ids = [0, 1, 2] if cat_id == 29 else [sub_cat_id]
+    
+    for sub_id in sub_cat_ids:
+        for p in range(start_page, start_page + max_pages):
+            url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_id}&page={p}&count={count}&type=now"
+            timestamp = int(time.time())
+            digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+            
+            headers = {
+                "X-LI-DEVICE": LIHKG_DEVICE_ID,
+                "X-LI-DEVICE-TYPE": "android",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "X-LI-REQUEST-TIME": str(timestamp),
+                "X-LI-DIGEST": digest,
+                "Cookie": LIHKG_COOKIE,
+                "orginal": "https://lihkg.com",
+                "referer": f"https://lihkg.com/category/{cat_id}",
+                "accept": "application/json",
+            }
+            
+            tasks.append(async_request("get", url, headers=headers))
         
-        headers = {
-            "X-LI-DEVICE": LIHKG_DEVICE_ID,
-            "X-LI-DEVICE-TYPE": "android",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "X-LI-REQUEST-TIME": str(timestamp),
-            "X-LI-DIGEST": digest,
-            "Cookie": LIHKG_COOKIE,
-            "orginal": "https://lihkg.com",
-            "referer": f"https://lihkg.com/category/{cat_id}",
-            "accept": "application/json",
-        }
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = []
         
-        tasks.append(async_request("get", url, headers=headers))
-    
-    responses = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for response in responses:
-        if isinstance(response, Exception):
-            st.session_state.debug_log.append(f"LIHKG API 錯誤: {str(response)}")
-            st.error(f"LIHKG API 錯誤: {str(response)}")
-            continue
-        st.session_state.debug_log.append(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("success") == 0:
-                st.session_state.debug_log.append(f"LIHKG API 錯誤: {data.get('error_message', '無錯誤訊息')}")
-                st.error(f"抓取分類 {cat_id} 失敗: {data.get('error_message', '未知錯誤')}")
+        for response in responses:
+            if isinstance(response, Exception):
+                st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 錯誤: {str(response)}")
+                st.error(f"LIHKG API 錯誤: {str(response)}")
+                continue
+            st.session_state.debug_log.append(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
+            if response.status_code == 200:
+                data = response.json()
+                st.session_state.debug_log.append(f"LIHKG API 回應: cat_id={cat_id}, sub_cat_id={sub_id}, success={data.get('success')}, error={data.get('error_message', '無')}, items={len(data.get('response', {}).get('items', []))}")
+                if data.get("success") == 0:
+                    st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 訊息: {data.get('error_message', '無錯誤訊息')}")
+                    st.error(f"抓取分類 {cat_id} 失敗: {data.get('error_message', '未知錯誤')}")
+                    continue
+                items = data.get("response", {}).get("items", [])
+                filtered_items = [item for item in items if item.get("title")]
+                st.session_state.debug_log.append(f"LIHKG 過濾: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}, 原始帖子={len(items)}, 過濾後={len(filtered_items)}")
+                if filtered_items:
+                    st.session_state.debug_log.append(f"LIHKG 示例: cat_id={cat_id}, sub_cat_id={sub_id}, 標題={[item['title'] for item in filtered_items[:2]]}")
+                all_items.extend(filtered_items)
+                if not items:
+                    st.session_state.debug_log.append(f"LIHKG 無更多帖子: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}")
+                    break
+            else:
+                st.session_state.debug_log.append(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
+                st.error(f"抓取分類 {cat_id} 失敗: HTTP {response.status_code}")
+                if response.status_code == 403:
+                    st.session_state.debug_log.append(f"LIHKG 403 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, Cookie 可能無效")
+                    st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
                 break
-            items = data.get("response", {}).get("items", [])
-            filtered_items = [
-                item for item in items
-                if item.get("title") and len(item["title"]) <= 100
-            ]
-            st.session_state.debug_log.append(f"LIHKG 過濾: 分類 {cat_id}, 頁數 {p}, 原始帖子 {len(items)}, 過濾後 {len(filtered_items)}")
-            all_items.extend(filtered_items)
-            if not items:
-                break
-        else:
-            st.session_state.debug_log.append(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
-            st.error(f"抓取分類 {cat_id} 失敗: {response.status_code}")
-            if response.status_code == 403:
-                st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
-            break
     
-    st.session_state.debug_log.append(f"元數據: {len(all_items)} 帖子, 標題示例: {[item['title'] for item in all_items[:3]]}")
+    st.session_state.debug_log.append(f"元數據總計: cat_id={cat_id}, 帖子數={len(all_items)}, 標題示例={[item['title'] for item in all_items[:3]]}")
     return all_items
 
 # 抓取帖子回覆
@@ -170,11 +178,13 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
             replies.extend(page_replies)
             page += 1
             if not page_replies:
+                st.session_state.debug_log.append(f"LIHKG 帖子無更多回覆: thread_id={thread_id}, 頁數={page}")
                 break
         else:
             st.session_state.debug_log.append(f"LIHKG 帖子內容錯誤: {url}, 狀態: {response.status_code}")
             st.error(f"LIHKG API 錯誤: {response.status_code}")
             if response.status_code == 403:
+                st.session_state.debug_log.append(f"LIHKG 403 錯誤: thread_id={thread_id}, Cookie 可能無效")
                 st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
             break
     
@@ -273,8 +283,8 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     ]
     
     if not st.session_state.metadata:
-        st.session_state.debug_log.append(f"無有效帖子: 分類 {cat_id}")
-        return f"抱歉，分類（{cat_id}）暫無帖子，可能無內容或網路問題，請稍後重試。"
+        st.session_state.debug_log.append(f"無有效帖子: 分類={cat_id}, 原因=API 回應無項目或過濾後為空")
+        return f"抱歉，分類（{cat_id}）暫無帖子，可能無內容、需要登錄或網路問題，請檢查調錯日誌或稍後重試。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -310,8 +320,9 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     
     call_id = f"metadata_{time.time()}"
     st.session_state.last_user_query = user_query
+    st.session_state.debug_log.append(f"準備 Grok 3 分析: 分類={cat_id}, 元數據項目={len(st.session_state.metadata)}")
     response = await summarize_with_grok3(prompt, call_id=call_id)
-    st.session_state.debug_log.append(f"分析元數據: 問題='{user_query}', 帖子數={len(st.session_state.metadata)}, 回應長度={len(response)}")
+    st.session_state.debug_log.append(f"分析元數據: 分類={cat_id}, 問題='{user_query}', 帖子數={len(st.session_state.metadata)}, 回應長度={len(response)}")
     return response
 
 # 選擇相關帖子
@@ -336,6 +347,7 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     
     st.session_state.debug_log.append(f"ID 解析: 輸入='{response[:200]}...', 提取={thread_ids}, 有效={selected_ids}")
     if not selected_ids:
+        st.session_state.debug_log.append("ID 解析失敗: 無有效帖子 ID")
         st.warning("無法解析帖子 ID，請檢查問題或稍後重試")
         return []
     
@@ -345,7 +357,7 @@ async def select_relevant_threads(analysis_result, max_threads=3):
 async def summarize_thread(thread_id):
     post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
-        st.session_state.debug_log.append(f"找不到帖子: {thread_id}")
+        st.session_state.debug_log.append(f"找不到帖子: thread_id={thread_id}")
         st.error(f"找不到帖子 {thread_id}")
         return f"錯誤: 找不到帖子 {thread_id}"
     
@@ -378,22 +390,16 @@ async def summarize_thread(thread_id):
     return final_summary
 
 # 手動抓取和總結
-async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, auto_sub_cat):
+async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
     st.session_state.is_fetching = True
     st.session_state.lihkg_data = {}
     st.session_state.summaries = {}
     st.session_state.char_counts = {}
-    st.session_state.debug_log.append(f"手動抓取: 分類={cat_id}, 子分類={sub_cat_id}, 頁數={start_page}-{start_page+max_pages-1}")
+    st.session_state.debug_log.append(f"手動抓取: 分類={cat_id}, 頁數={start_page}-{start_page+max_pages-1}")
     all_items = []
     
-    valid_sub_cat_ids = [0, 1, 2]
-    sub_cat_ids = valid_sub_cat_ids if auto_sub_cat else [sub_cat_id]
-    
-    for sub_id in sub_cat_ids:
-        items = await get_lihkg_topic_list(cat_id, sub_id, start_page, max_pages)
-        existing_ids = {item["thread_id"] for item in all_items}
-        new_items = [item for item in items if item["thread_id"] not in existing_ids]
-        all_items.extend(new_items)
+    items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=start_page, max_pages=max_pages)
+    all_items.extend(items)
     
     filtered_items = [item for item in all_items if item.get("no_of_reply", 0) > 175]
     sorted_items = sorted(filtered_items, key=lambda x: x.get("last_reply_time", ""), reverse=True)
@@ -414,7 +420,7 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
                 call_id=f"{thread_id}_chunk_{i}"
             )
             if summary.startswith("錯誤:"):
-                st.session_state.debug_log.append(f"手動總結失敗: 帖子 {thread_id}, 分塊 {i}, 錯誤: {summary}")
+                st.session_state.debug_log.append(f"手動總結失敗: 帖子={thread_id}, 分塊={i}, 錯誤: {summary}")
                 st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
                 continue
             chunk_summaries.append(summary)
@@ -427,9 +433,10 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
             if not final_summary.startswith("錯誤:"):
                 st.session_state.summaries[thread_id] = final_summary
     
-    st.session_state.debug_log.append(f"抓取完成: 總結數={len(st.session_state.summaries)}")
+    st.session_state.debug_log.append(f"抓取完成: 分類={cat_id}, 總結數={len(st.session_state.summaries)}")
     st.session_state.is_fetching = False
     if not st.session_state.summaries:
+        st.session_state.debug_log.append(f"手動抓取無總結: 分類={cat_id}, 可能無符合條件帖子")
         st.warning("無總結結果，可能無符合條件的帖子，請檢查調錯日誌或調整參數。")
     st.rerun()
 
@@ -440,8 +447,8 @@ def main():
     st.header("與 Grok 3 聊天")
     chat_cat_id = st.selectbox(
         "聊天分類",
-        options=[1, 31, 5, 14, 15, 29],
-        format_func=lambda x: {1: "吹水台", 31: "創意台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台"}[x],
+        options=[1, 31, 5, 14, 15, 29, 2],
+        format_func=lambda x: {1: "吹水台", 31: "創意台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台(無法登入Fail)", 2: "熱門"}[x],
         key="chat_cat_id"
     )
     with st.form("chat_form", clear_on_submit=True):
@@ -479,7 +486,7 @@ def main():
         
         if st.session_state.debug_log:
             st.subheader("調錯日誌")
-            for log in st.session_state.debug_log[-5:]:
+            for log in st.session_state.debug_log[-10:]:
                 st.write(log)
 
     st.header("帖子總結")
@@ -488,9 +495,10 @@ def main():
             post = st.session_state.lihkg_data[thread_id]["post"]
             st.write(f"**標題**: {post['title']} (ID: {thread_id})")
             st.write(f"**總結**: {summary}")
+            st.write(f"**回覆數量**：{post['no_of_reply']} 條")
             chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(len(chunk_text([build_post_context(post, st.session_state.lihkg_data[thread_id]["replies"])])))]
             final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
-            st.write(f"**處理字元數**：分塊總結 {sum(chunk_counts)} 字元，最終總結 {final_count} 字元")
+            st.write(f"**處理字元數**：分塊總結={sum(chunk_counts)} 字元，最終總結={final_count} 字元")
             if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
                 st.write("**回覆內容**：")
                 for reply in st.session_state.lihkg_data[thread_id]["replies"]:
@@ -502,15 +510,13 @@ def main():
     st.header("手動抓取 LIHKG 帖子")
     with st.form("manual_fetch_form"):
         cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
-        sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
         start_page = st.number_input("開始頁數", min_value=1, value=1)
         max_pages = st.number_input("最大頁數", min_value=1, value=5)
-        auto_sub_cat = st.checkbox("自動遍歷子分類 (0-2)", value=True)
         submit_fetch = st.form_submit_button("抓取並總結", disabled=st.session_state.is_fetching)
     
     if submit_fetch:
         with st.spinner("正在抓取並總結..."):
-            asyncio.run(manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, auto_sub_cat))
+            asyncio.run(manual_fetch_and_summarize(cat_id, start_page, max_pages))
 
 if __name__ == "__main__":
     main()
