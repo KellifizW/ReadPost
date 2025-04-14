@@ -19,17 +19,16 @@ QUERY_TYPES = {
 
 # 清理 HTML 標籤的輔助函數
 def clean_html(text):
-    # 移除 HTML 標籤
     clean = re.compile(r'<[^>]+>')
     text = clean.sub('', text)
-    # 移除多餘的換行和空格
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# LIHKG 抓取分類帖子列表（添加 query_type 參數）
-def get_lihkg_topic_list(cat_id, page=1, count=30, query_type="now"):
-    url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&page={page}&count={count}&type={query_type}"
+# LIHKG 抓取分類帖子列表
+def get_lihkg_topic_list(cat_id, sub_cat_id=0, page=1, count=30, query_type="now"):
+    url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={page}&count={count}&type={query_type}"
     timestamp = int(time.time())
+    st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')}")
     digest = hashlib.sha1(f"jeams$get${url}${LIHKG_TOKEN}${timestamp}".encode()).hexdigest()
     
     headers = {
@@ -84,6 +83,7 @@ def main():
     # LIHKG 測試區
     st.header("LIHKG 分類帖子與回覆")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
+    lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_page = st.number_input("LIHKG 分類頁數", min_value=1, value=1)
     
     # 添加帖子類型選擇（模擬 QueryType）
@@ -91,15 +91,22 @@ def main():
     query_type = QUERY_TYPES[query_type_label]
 
     if st.button("抓取 LIHKG 分類帖子"):
-        data = get_lihkg_topic_list(lihkg_cat_id, lihkg_page, query_type=query_type)
+        # 清除舊數據
+        st.session_state.lihkg_posts = None
+        data = get_lihkg_topic_list(lihkg_cat_id, lihkg_sub_cat_id, lihkg_page, query_type=query_type)
         if "error" in data:
             st.error(data["error"])
         else:
             st.session_state.lihkg_posts = data
 
-    # 顯示 LIHKG 帖子列表
+    # 顯示 LIHKG 帖子列表並檢查最新帖子時間
     if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
-        for item in st.session_state.lihkg_posts["response"]["items"]:
+        items = st.session_state.lihkg_posts["response"]["items"]
+        if items:
+            latest_post = max(items, key=lambda x: x["last_reply_time"])
+            st.write(f"調試: 最新帖子的最後回覆時間: {datetime.fromtimestamp(latest_post['last_reply_time']).strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        for item in items:
             st.write(f"**標題**: {item['title']}")
             st.write(f"**帖子 ID**: {item['thread_id']}")
             st.write(f"**用戶**: {item['user_nickname']} (性別: {item['user_gender']})")
@@ -107,26 +114,5 @@ def main():
             st.write(f"**創建時間**: {datetime.fromtimestamp(item['create_time']).strftime('%Y-%m-%d %H:%M:%S')}")
             st.write(f"**最後回覆時間**: {datetime.fromtimestamp(item['last_reply_time']).strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # 選擇回覆頁數
             reply_page = st.number_input(f"選擇帖子 {item['thread_id']} 的回覆頁數", min_value=1, value=1, key=f"reply_page_{item['thread_id']}")
-            if st.button(f"查看帖子 {item['thread_id']} 的回覆", key=f"view_replies_{item['thread_id']}"):
-                thread_data = get_lihkg_thread_content(item["thread_id"], reply_page)
-                if "error" in thread_data:
-                    st.error(thread_data["error"])
-                else:
-                    st.session_state.lihkg_replies[item["thread_id"]] = thread_data
-            
-            # 顯示已抓取的回覆
-            if item["thread_id"] in st.session_state.lihkg_replies:
-                thread_data = st.session_state.lihkg_replies[item["thread_id"]]
-                if "response" in thread_data and "item_data" in thread_data["response"]:
-                    st.subheader(f"帖子 {item['thread_id']} 的回覆（第 {reply_page} 頁）")
-                    for reply in thread_data["response"]["item_data"]:
-                        st.write(f"**回覆用戶**: {reply['user_nickname']} (性別: {reply['user_gender']})")
-                        st.write(f"**回覆內容**: {clean_html(reply['msg'])}")
-                        st.write(f"**回覆時間**: {datetime.fromtimestamp(reply['reply_time']).strftime('%Y-%m-%d %H:%M:%S')}")
-                        st.write("---")
-            st.write("---")
-
-if __name__ == "__main__":
-    main()
+            if st.button(f"查看帖子 {item['thread_id']} 的回
