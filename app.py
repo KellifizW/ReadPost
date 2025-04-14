@@ -257,27 +257,21 @@ async def summarize_with_grok3(text, call_id=None):
 
 # 分析LIHKG元數據
 async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
-    if not st.session_state.metadata:
-        items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
-        if not items and cat_id == 1:
-            st.session_state.debug_log.append(f"吹水台無帖子，嘗試創意台")
-            items = await get_lihkg_topic_list(31, sub_cat_id=0, start_page=1, max_pages=1)
-        elif not items and cat_id == 31:
-            st.session_state.debug_log.append(f"創意台無帖子，嘗試吹水台")
-            items = await get_lihkg_topic_list(1, sub_cat_id=0, start_page=1, max_pages=1)
-        st.session_state.metadata = [
-            {
-                "thread_id": item["thread_id"],
-                "title": item["title"],
-                "no_of_reply": item.get("no_of_reply", 0),
-                "last_reply_time": item.get("last_reply_time", "")
-            }
-            for item in items
-        ]
+    st.session_state.metadata = []  # 清空舊數據
+    items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
+    st.session_state.metadata = [
+        {
+            "thread_id": item["thread_id"],
+            "title": item["title"],
+            "no_of_reply": item.get("no_of_reply", 0),
+            "last_reply_time": item.get("last_reply_time", "")
+        }
+        for item in items
+    ]
     
     if not st.session_state.metadata:
         st.session_state.debug_log.append(f"無有效帖子: 分類 {cat_id}")
-        return f"抱歉，吹水台和創意台暫無帖子，可能 Cookie 過期或無近期內容，請重試或更新 Cookie。"
+        return f"抱歉，分類（{cat_id}）暫無帖子，可能 Cookie 過期或無內容，請重試或檢查 Cookie。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -295,6 +289,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     
     call_id = f"metadata_{time.time()}"
     st.session_state.last_user_query = user_query
+    st.session_state.debug_log.append(f"抓取分類: {cat_id}, 問題='{user_query}'")
     response = await summarize_with_grok3(prompt, call_id=call_id)
     st.session_state.debug_log.append(f"分析元數據: 問題='{user_query}', 帖子數={len(st.session_state.metadata)}, 回應長度={len(response)}")
     return response
