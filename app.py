@@ -13,7 +13,7 @@ LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
 LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
 # Grok 3 配置
-GROK3_API_URL = "https://api.x.ai/v1/chat/completions"  # 正確的 xAI API 端點
+GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
 
 # 設置香港時區
@@ -26,6 +26,8 @@ if "summaries" not in st.session_state:
     st.session_state.summaries = {}
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "char_counts" not in st.session_state:
+    st.session_state.char_counts = {}  # 儲存每次總結的字元數
 
 # 清理HTML標籤
 def clean_html(text):
@@ -144,9 +146,9 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
 
 # 構建上下文
 def build_post_context(post, replies):
-    context = f"Title: {post['title']}\n"
+    context = f"標題: {post['title']}\n"
     if replies:
-        context += "Replies:\n"
+        context += "回覆:\n"
         for reply in replies:
             msg = clean_html(reply['msg'])
             if len(msg) > 10:
@@ -154,22 +156,27 @@ def build_post_context(post, replies):
     return context
 
 # 調用Grok 3 API
-async def summarize_with_grok3(text):
+async def summarize_with_grok3(text, call_id=None):
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
         st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3key]")
         return "錯誤: 缺少 API 密鑰"
     
+    # 計算字元數
+    char_count = len(text)
+    if call_id:
+        st.session_state.char_counts[call_id] = char_count
+    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {GROK3_API_KEY}"
     }
     payload = {
-        "model": "grok-3-beta",  # 假設模型名稱，需確認
+        "model": "grok-3-beta",
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": f"Summarize the following forum post and replies into 100-200 words, focusing on main themes and key opinions:\n\n{text}"}
+            {"role": "system", "content": "你是 Grok 3，請使用繁體中文回答所有問題，並確保回覆清晰、簡潔、符合繁體中文語法規範。"},
+            {"role": "user", "content": f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{text}"}
         ],
         "max_tokens": 300,
         "temperature": 0.7
@@ -208,6 +215,7 @@ def main():
     if st.button("抓取並總結"):
         st.session_state.lihkg_data = {}
         st.session_state.summaries = {}
+        st.session_state.char_counts = {}
         all_items = []
         
         sub_cat_ids = [0, 1, 2, 3, 4, 5] if auto_sub_cat else [sub_cat_id]
@@ -231,11 +239,11 @@ def main():
             chunks = chunk_text([context])
             
             chunk_summaries = []
-            for chunk in chunks:
-                summary = asyncio.run(summarize_with_grok3(chunk))
+            for i, chunk in enumerate(chunks):
+                summary = asyncio.run(summarize_with_grok3(chunk, call_id=f"{thread_id}_chunk_{i}"))
                 chunk_summaries.append(summary)
             
-            final_summary = asyncio.run(summarize_with_grok3("\n".join(chunk_summaries)))
+            final_summary = asyncio.run(summarize_with_grok3("\n".join(chunk_summaries), call_id=f"{thread_id}_final"))
             st.session_state.summaries[thread_id] = final_summary
 
     if st.session_state.summaries:
@@ -244,6 +252,10 @@ def main():
             post = st.session_state.lihkg_data[thread_id]["post"]
             st.write(f"**標題**: {post['title']} (ID: {thread_id})")
             st.write(f"**總結**: {summary}")
+            # 顯示字元數
+            chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(len(chunk_text([build_post_context(post, st.session_state.lihkg_data[thread_id]["replies"])])))]
+            final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
+            st.write(f"**處理字元數**：分塊總結 {sum(chunk_counts)} 字元，最終總結 {final_count} 字元")
             if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
                 st.write("**回覆內容**：")
                 for reply in st.session_state.lihkg_data[thread_id]["replies"]:
@@ -256,22 +268,30 @@ def main():
     if user_input:
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
-        context = "\n".join([f"Post {tid}: {summary}" for tid, summary in st.session_state.summaries.items()])
-        prompt = f"以下是LIHKG帖子總結：\n{context}\n\n用戶問題：{user_input}"
+        context = "\n".join([f"帖子 {tid}: {summary}" for tid, summary in st.session_state.summaries.items()])
+        prompt = f"以下是LIHKG帖子總結：\n{context}\n\n用戶問題：{user_input}\n請以繁體中文回答。"
         
         chunks = chunk_text([prompt])
         responses = []
-        for chunk in chunks:
-            response = asyncio.run(summarize_with_grok3(chunk))
+        chat_char_counts = []
+        for i, chunk in enumerate(chunks):
+            response = asyncio.run(summarize_with_grok3(chunk, call_id=f"chat_{len(st.session_state.chat_history)}_{i}"))
             responses.append(response)
+            chat_char_counts.append(st.session_state.char_counts.get(f"chat_{len(st.session_state.chat_history)}_{i}", 0))
         
         final_response = "\n".join(responses)
         st.session_state.chat_history.append({"role": "assistant", "content": final_response})
+        st.session_state.char_counts[f"chat_{len(st.session_state.chat_history)}_total"] = sum(chat_char_counts)
 
-    st.subheader("聊天記錄")
-    for chat in st.session_state.chat_history:
-        role = "你" if chat["role"] == "user" else "Grok 3"
-        st.write(f"**{role}**：{chat['content']}")
+    if st.session_state.chat_history:
+        st.subheader("聊天記錄")
+        for i, chat in enumerate(st.session_state.chat_history):
+            role = "你" if chat["role"] == "user" else "Grok 3"
+            st.write(f"**{role}**：{chat['content']}")
+            if chat["role"] == "assistant":
+                char_count = st.session_state.char_counts.get(f"chat_{i+1}_total", 0)
+                st.write(f"**處理字元數**：{char_count} 字元")
+            st.write("---")
 
 if __name__ == "__main__":
     main()
