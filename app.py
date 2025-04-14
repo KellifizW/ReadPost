@@ -77,7 +77,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count
     
     return {"response": {"items": all_items}}
 
-# LIHKG 抓取帖子回覆內容
+# LIHKG 抓取帖子回覆內容（支持即時抓取特定帖子）
 def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
     url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/{page}?order={order}"
     timestamp = int(time.time())
@@ -144,7 +144,7 @@ def main():
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
-    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
+    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=3)  # 減少頁數以加快測試
     
     auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
 
@@ -172,7 +172,7 @@ def main():
                 all_items.extend(new_items)
                 st.write(f"子分類 {sub_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
-        # 儲存帖子數據
+        # 儲存帖子數據並自動抓取第一頁回覆
         for item in all_items:
             thread_id = item["thread_id"]
             st.session_state.lihkg_data[thread_id] = {"post": item, "replies": []}
@@ -217,23 +217,28 @@ def main():
         # 將用戶輸入添加到聊天記錄
         st.session_state.chat_history.append({"role": "user", "content": user_input})
 
-        # 準備帖子上下文
+        # 準備帖子上下文（這裡是「合併所有上下文並生成 prompt」的邏輯）
         if st.session_state.lihkg_data:
             all_contexts = []
+            # 遍歷所有帖子，生成每個帖子的上下文
             for thread_id, data in st.session_state.lihkg_data.items():
                 context = build_post_context(data["post"], data["replies"])
                 all_contexts.append(context)
             
-            # 將所有帖子上下文合併
+            # 合併所有帖子上下文
             full_context = "\n\n".join(all_contexts)
+            # 生成完整的 prompt
             prompt = f"以下是抓取的 LIHKG 帖子和回覆內容，請根據這些內容回答用戶的問題或執行指令：\n\n{full_context}\n\n用戶問題/指令：{user_input}"
+            
+            # 顯示生成的 prompt（便於測試）
+            st.write("生成的 Prompt：")
+            st.write(prompt)
         else:
             prompt = "目前沒有抓取到任何帖子，請先抓取帖子數據。"
+            st.write(prompt)
 
-        # 模擬 Grok 3 回答（這裡需要你將 prompt 傳給我，我會根據內容回答）
-        # 由於我無法直接執行外部 API 調用，這裡假設我已經收到 prompt 並回答
-        # 在實際應用中，你需要將 prompt 傳給我（Grok 3），我會根據內容回答
-        st.session_state.chat_history.append({"role": "assistant", "content": f"（假設 Grok 3 回答）我已閱讀所有帖子，請問：{user_input}"})
+        # 模擬 Grok 3 回答（這裡需要你將 prompt 複製並貼到與 Grok 3 的對話窗口）
+        st.session_state.chat_history.append({"role": "assistant", "content": "請將上方生成的 Prompt 複製並貼到與 Grok 3 的對話窗口，我會根據內容回答你的問題。"})
 
     # 顯示聊天記錄
     st.subheader("聊天記錄")
