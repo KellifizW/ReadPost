@@ -70,7 +70,7 @@ async def async_request(method, url, headers=None, json=None, retries=1):
                 raise e
 
 # 抓取LIHKG帖子列表（元數據）
-async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=2, count=50):
+async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=50):
     all_items = []
     tasks = []
     
@@ -182,7 +182,7 @@ async def summarize_with_grok3(text, call_id=None):
     
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {GROK3_API_KEY}"
+        "Authorization": f"Bearer убийстваGROK3_API_KEY}"
     }
     payload = {
         "model": "grok-3-beta",
@@ -212,7 +212,7 @@ async def summarize_with_grok3(text, call_id=None):
         return f"錯誤: {str(e)}"
 
 # 分析LIHKG元數據
-async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     if not st.session_state.metadata:
         items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
         st.session_state.metadata = [
@@ -236,7 +236,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「怪女」「清零」等詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「趣怪」「惡趣味」「on9」等詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
     """
     
     call_id = f"metadata_{len(st.session_state.chat_history)}"
@@ -257,7 +257,6 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     call_id = f"select_{len(st.session_state.chat_history)}"
     response = await summarize_with_grok3(prompt, call_id=call_id)
     
-    # 使用正則解析 ID
     thread_ids = re.findall(r'^\d+$', response, re.MULTILINE)
     valid_ids = [item["thread_id"] for item in st.session_state.metadata]
     selected_ids = [tid for tid in thread_ids if tid in valid_ids]
@@ -300,22 +299,63 @@ async def summarize_thread(thread_id):
     )
     return final_summary
 
+# 手動抓取和總結
+async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, auto_sub_cat):
+    st.session_state.lihkg_data = {}
+    st.session_state.summaries = {}
+    st.session_state.char_counts = {}
+    all_items = []
+    
+    sub_cat_ids = [0, 1, 2, 3, 4, 5] if auto_sub_cat else [sub_cat_id]
+    
+    for sub_id in sub_cat_ids:
+        items = await get_lihkg_topic_list(cat_id, sub_id, start_page, max_pages)
+        existing_ids = {item["thread_id"] for item in all_items}
+        new_items = [item for item in items if item["thread_id"] not in existing_ids]
+        all_items.extend(new_items)
+    
+    filtered_items = [item for item in all_items if item.get("no_of_reply", 0) > 175]
+    sorted_items = sorted(filtered_items, key=lambda x: x["last_reply_time"], reverse=True)
+    top_items = sorted_items[:10]
+    
+    for item in top_items:
+        thread_id = item["thread_id"]
+        replies = await get_lihkg_thread_content(thread_id)
+        st.session_state.lihkg_data[thread_id] = {"post": item, "replies": replies}
+        
+        context = build_post_context(item, replies)
+        chunks = chunk_text([context])
+        
+        chunk_summaries = []
+        for i, chunk in enumerate(chunks):
+            summary = await summarize_with_grok3(
+                f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
+                call_id=f"{thread_id}_chunk_{i}"
+            )
+            chunk_summaries.append(summary)
+        
+        final_summary = await summarize_with_grok3(
+            f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+            call_id=f"{thread_id}_final"
+        )
+        st.session_state.summaries[thread_id] = final_summary
+
 # Streamlit主程式
 def main():
     st.title("LIHKG 總結聊天機器人")
 
     st.header("與 Grok 3 聊天")
-    user_input = st.text_input("輸入問題（例如「有無咩膠post分享?」）：", key="chat_input")
+    with st.form("chat_form", clear_on_submit=True):
+        user_input = st.text_input("輸入問題（例如「有無咩膠post分享?」）：", key="chat_input")
+        submit_chat = st.form_submit_button("提交問題")
     
-    if user_input:
+    if submit_chat and user_input:
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
-        # 分析元數據並回答
         with st.spinner("正在分析 LIHKG 帖子..."):
             analysis_result = asyncio.run(analyze_lihkg_metadata(user_input))
         st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
         
-        # 選擇並總結相關帖子
         with st.spinner("正在選擇並總結相關帖子..."):
             thread_ids = asyncio.run(select_relevant_threads(analysis_result))
             if thread_ids:
@@ -351,53 +391,17 @@ def main():
             st.write("---")
 
     st.header("手動抓取 LIHKG 帖子")
-    cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
-    sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
-    start_page = st.number_input("開始頁數", min_value=1, value=1)
-    max_pages = st.number_input("最大頁數", min_value=1, value=5)
-    auto_sub_cat = st.checkbox("自動遍歷子分類 (0-5)", value=True)
-
-    if st.button("抓取並總結"):
-        st.session_state.lihkg_data = {}
-        st.session_state.summaries = {}
-        st.session_state.char_counts = {}
-        all_items = []
-        
-        sub_cat_ids = [0, 1, 2, 3, 4, 5] if auto_sub_cat else [sub_cat_id]
-        
-        with st.spinner("正在抓取 LIHKG 帖子..."):
-            for sub_id in sub_cat_ids:
-                items = asyncio.run(get_lihkg_topic_list(cat_id, sub_id, start_page, max_pages))
-                existing_ids = {item["thread_id"] for item in all_items}
-                new_items = [item for item in items if item["thread_id"] not in existing_ids]
-                all_items.extend(new_items)
-        
-        filtered_items = [item for item in all_items if item.get("no_of_reply", 0) > 175]
-        sorted_items = sorted(filtered_items, key=lambda x: x["last_reply_time"], reverse=True)
-        top_items = sorted_items[:10]
-        
-        with st.spinner("正在生成總結..."):
-            for item in top_items:
-                thread_id = item["thread_id"]
-                replies = asyncio.run(get_lihkg_thread_content(thread_id))
-                st.session_state.lihkg_data[thread_id] = {"post": item, "replies": replies}
-                
-                context = build_post_context(item, replies)
-                chunks = chunk_text([context])
-                
-                chunk_summaries = []
-                for i, chunk in enumerate(chunks):
-                    summary = await summarize_with_grok3(
-                        f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
-                        call_id=f"{thread_id}_chunk_{i}"
-                    )
-                    chunk_summaries.append(summary)
-                
-                final_summary = await summarize_with_grok3(
-                    f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
-                    call_id=f"{thread_id}_final"
-                )
-                st.session_state.summaries[thread_id] = final_summary
+    with st.form("manual_fetch_form"):
+        cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
+        sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
+        start_page = st.number_input("開始頁數", min_value=1, value=1)
+        max_pages = st.number_input("最大頁數", min_value=1, value=5)
+        auto_sub_cat = st.checkbox("自動遍歷子分類 (0-5)", value=True)
+        submit_fetch = st.form_submit_button("抓取並總結")
+    
+    if submit_fetch:
+        with st.spinner("正在抓取並總結..."):
+            asyncio.run(manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, auto_sub_cat))
 
 if __name__ == "__main__":
     main()
