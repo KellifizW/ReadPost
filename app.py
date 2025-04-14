@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.logger
 import requests
 import hashlib
 import time
@@ -7,6 +8,9 @@ from datetime import datetime
 import pytz
 import asyncio
 import json
+
+# 獲取 streamlit.logger
+logger = streamlit.logger.get_logger(__name__)
 
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
@@ -27,8 +31,6 @@ if "char_counts" not in st.session_state:
     st.session_state.char_counts = {}
 if "metadata" not in st.session_state:
     st.session_state.metadata = []
-if "debug_log" not in st.session_state:
-    st.session_state.debug_log = []
 if "is_fetching" not in st.session_state:
     st.session_state.is_fetching = False
 
@@ -71,11 +73,11 @@ async def async_request(method, url, headers=None, json=None, retries=2):
                 await asyncio.sleep(3)
                 continue
             else:
-                st.session_state.debug_log.append(f"API 請求失敗: {url}, 錯誤: {str(e)}")
+                logger.error(f"API 請求失敗: {url}, 錯誤: {str(e)}")
                 st.error(f"API 請求失敗（{str(e)}），已達最大重試次數")
                 raise e
 
-async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=60):
+async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=2, count=60):
     all_items = []
     tasks = []
     
@@ -110,36 +112,35 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
         
         for response in responses:
             if isinstance(response, Exception):
-                st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 錯誤: {str(response)}")
+                logger.warning(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 錯誤: {str(response)}")
                 st.warning(f"LIHKG API 錯誤: {str(response)}")
                 continue
-            st.session_state.debug_log.append(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
+            logger.info(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
             if response.status_code == 200:
                 data = response.json()
-                st.session_state.debug_log.append(f"LIHKG API 回應: cat_id={cat_id}, sub_cat_id={sub_id}, success={data.get('success')}, error={data.get('error_message', '無')}, items={len(data.get('response', {}).get('items', []))}")
+                logger.debug(f"LIHKG API 回應: cat_id={cat_id}, sub_cat_id={sub_id}, success={data.get('success')}, error={data.get('error_message', '無')}, items={len(data.get('response', {}).get('items', []))}")
                 if data.get("success") == 0:
-                    st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 訊息: {data.get('error_message', '無錯誤訊息')}")
+                    logger.warning(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 訊息: {data.get('error_message', '無錯誤訊息')}")
                     st.warning(f"分類 {cat_id} 無帖子: {data.get('error_message', '未知錯誤')}")
                     continue
                 items = data.get("response", {}).get("items", [])
                 filtered_items = [item for item in items if item.get("title")]
-                st.session_state.debug_log.append(f"LIHKG 過濾: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}, 原始帖子={len(items)}, 過濾後={len(filtered_items)}")
+                logger.debug(f"LIHKG 過濾: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}, 原始帖子={len(items)}, 過濾後={len(filtered_items)}")
                 if filtered_items:
-                    st.session_state.debug_log.append(f"LIHKG 示例: cat_id={cat_id}, sub_cat_id={sub_id}, 標題={[item['title'] for item in filtered_items[:2]]}")
+                    logger.debug(f"LIHKG 示例: cat_id={cat_id}, sub_cat_id={sub_id}, 標題={[item['title'] for item in filtered_items[:2]]}")
                 all_items.extend(filtered_items)
                 if not items:
-                    st.session_state.debug_log.append(f"LIHKG 無更多帖子: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}")
+                    logger.info(f"LIHKG 無更多帖子: cat_id={cat_id}, sub_cat_id={sub_id}, 頁數={p}")
                     break
             else:
-                st.session_state.debug_log.append(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
+                logger.warning(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
                 st.warning(f"分類 {cat_id} 無帖子: HTTP {response.status_code}")
                 if response.status_code == 403:
-                    st.session_state.debug_log.append(f"LIHKG 403 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, Cookie 可能無效")
+                    logger.error(f"LIHKG 403 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, Cookie 可能無效")
                     st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
                 break
     
-    st.session_state.debug_log.append(f"元數據總計: cat_id={cat_id}, 帖子數={len(all_items)}, 標題示例={[item['title'] for item in all_items[:3]]}")
-    st.session_state.debug_log = st.session_state.debug_log[-50:]
+    logger.info(f"元數據總計: cat_id={cat_id}, 帖子數={len(all_items)}, 標題示例={[item['title'] for item in all_items[:3]]}")
     return all_items
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
@@ -167,20 +168,20 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
         }
         
         response = await async_request("get", url, headers=headers)
-        st.session_state.debug_log.append(f"LIHKG 帖子內容: {url}, 狀態: {response.status_code}")
+        logger.info(f"LIHKG 帖子內容: {url}, 狀態: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             page_replies = data.get("response", {}).get("item_data", [])
             replies.extend(page_replies)
             page += 1
             if not page_replies:
-                st.session_state.debug_log.append(f"LIHKG 帖子無更多回覆: thread_id={thread_id}, 頁數={page}")
+                logger.info(f"LIHKG 帖子無更多回覆: thread_id={thread_id}, 頁數={page}")
                 break
         else:
-            st.session_state.debug_log.append(f"LIHKG 帖子內容錯誤: {url}, 狀態: {response.status_code}")
+            logger.warning(f"LIHKG 帖子內容錯誤: {url}, 狀態: {response.status_code}")
             st.warning(f"LIHKG API 錯誤: {response.status_code}")
             if response.status_code == 403:
-                st.session_state.debug_log.append(f"LIHKG 403 錯誤: thread_id={thread_id}, Cookie 可能無效")
+                logger.error(f"LIHKG 403 錯誤: thread_id={thread_id}, Cookie 可能無效")
                 st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
             break
     
@@ -206,7 +207,7 @@ async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
-        st.session_state.debug_log.append("Grok 3 API 密鑰缺失")
+        logger.error("Grok 3 API 密鑰缺失")
         st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3key]")
         return "錯誤: 缺少 API 密鑰"
     
@@ -218,20 +219,20 @@ async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
     
     if len(text) > GROK3_TOKEN_LIMIT:
         if recursion_depth > 2:
-            st.session_state.debug_log.append(f"輸入超限: call_id={call_id}, 字元數={char_count}, 遞迴過深，停止分塊")
+            logger.error(f"輸入超限: call_id={call_id}, 字元數={char_count}, 遞迴過深，停止分塊")
             st.error(f"輸入過長（{char_count} 字元），無法分塊處理")
             return "錯誤: 輸入過長，無法分塊處理"
-        st.session_state.debug_log.append(f"輸入超限: call_id={call_id}, 字元數={char_count}, 內容前500: {text[:500]}...")
-        st.session_state.debug_log.append(f"輸入超限: call_id={call_id}, 字元數={char_count}, 內容後500: ...{text[-500:]}")
+        logger.warning(f"輸入超限: call_id={call_id}, 字元數={char_count}, 內容前500: {text[:500]}...")
+        logger.warning(f"輸入超限: call_id={call_id}, 字元數={char_count}, 內容後500: ...{text[-500:]}")
         st.warning(f"輸入超過 {GROK3_TOKEN_LIMIT} 字元（共 {char_count} 字元），內容預覽：\n前500: {text[:500]}...\n後500: ...{text[-500:]}")
         chunks = chunk_text([text], max_chars=GROK3_TOKEN_LIMIT // 2)
-        st.session_state.debug_log.append(f"分塊處理: call_id={call_id}, 分塊數={len(chunks)}")
+        logger.info(f"分塊處理: call_id={call_id}, 分塊數={len(chunks)}")
         summaries = []
         for i, chunk in enumerate(chunks):
             chunk_prompt = f"使用者問題：{st.session_state.get('last_user_query', '')}\n{chunk}"
             if len(chunk_prompt) > GROK3_TOKEN_LIMIT:
                 chunk_prompt = chunk_prompt[:GROK3_TOKEN_LIMIT - 100] + "\n[已截斷]"
-                st.session_state.debug_log.append(f"分塊超限: call_id={call_id}_sub_{i}, 字元數={len(chunk_prompt)}, 已截斷")
+                logger.warning(f"分塊超限: call_id={call_id}_sub_{i}, 字元數={len(chunk_prompt)}, 已截斷")
             summary = await summarize_with_grok3(chunk_prompt, call_id=f"{call_id}_sub_{i}", recursion_depth=recursion_depth + 1)
             summaries.append(summary)
         return "\n".join(summaries)
@@ -252,7 +253,7 @@ async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
     
     try:
         response = await async_request("post", GROK3_API_URL, headers=headers, json=payload)
-        st.session_state.debug_log.append(f"Grok 3 API: {call_id}, 輸入字元: {char_count}")
+        logger.info(f"Grok 3 API: {call_id}, 輸入字元: {char_count}")
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as e:
         error_msg = f"Grok 3 API 錯誤: {str(e)}"
@@ -266,19 +267,19 @@ async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
                 error_msg = f"Grok 3 API 端點無效：{GROK3_API_URL}，請確認 xAI API 文檔"
             elif status_code == 429:
                 error_msg = "Grok 3 API 請求超限，請稍後重試"
-        st.session_state.debug_log.append(f"Grok 3 錯誤: {call_id}, 狀態: {status_code}, 訊息: {error_msg}")
+        logger.error(f"Grok 3 錯誤: {call_id}, 狀態: {status_code}, 訊息: {error_msg}")
         st.error(error_msg)
         st.session_state.char_counts[f"error_{call_id}"] = f"失敗提示: {text[:200]}..."
         return f"錯誤: {error_msg}"
     except Exception as e:
-        st.session_state.debug_log.append(f"Grok 3 異常: {call_id}, 錯誤: {str(e)}")
+        logger.error(f"Grok 3 異常: {call_id}, 錯誤: {str(e)}")
         st.error(f"Grok 3 API 總結失敗: {str(e)}")
         return f"錯誤: {str(e)}"
 
 async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
-    st.session_state.debug_log.append(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
+    logger.info(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
-    st.session_state.debug_log.append("清空 metadata")
+    logger.debug("清空 metadata")
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
     st.session_state.metadata = [
         {
@@ -291,8 +292,8 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
     ]
     
     if not st.session_state.metadata:
-        st.session_state.debug_log.append(f"無有效帖子: 分類={cat_id}, 原因=API 回應無項目或過濾後為空")
-        return f"抱歉，分類（{cat_id}）暫無帖子，可能無內容、需要登錄或網路問題，請檢查調錯日誌或稍後重試。"
+        logger.warning(f"無有效帖子: 分類={cat_id}, 原因=API 回應無項目或過濾後為空")
+        return f"抱歉，分類（{cat_id}）暫無帖子，可能無內容、需要登錄或網路問題，請檢查後台日誌或稍後重試。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -314,7 +315,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
 以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
 {metadata_text}
 
-請以繁體中文分析這些元數據，回答使用者的問題，並列出最多 3 個最相關的帖子（格式為「帖子 ID: <數字>, 標題: <標題>」）。若問題包含「膠post」「得意野」或類似詞，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如「貓會畫畫」「太空船降落」。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
+請以繁體中文分析這些元數據，回答使用者的問題，並根據問題性質提供合適的回應。作為一般原則，優先選擇回覆數量 ≥125 的帖子，並確保標題與問題相關，列出最多 3 個最相關的帖子（格式為「帖子 ID: <數字>, 標題: <標題>」）。若問題包含「膠post」「得意野」或類似詞，則優先選擇標題看似荒唐、搞笑或誇張的帖子，且同樣要求回覆數 ≥125。若問題需要反映討論區的整體氛圍（例如探討普遍意見或趨勢），可靈活分析更多帖子並提供概括性回應，不受 3 個帖子的限制。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
 """
     else:
         prompt = f"""
@@ -323,14 +324,14 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=2):
 以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
 {metadata_text}
 
-請以繁體中文分析這些元數據，回答使用者的問題，並列出最多 3 個最相關的帖子（格式為「帖子 ID: <數字>, 標題: <標題>」）。若問題包含「膠post」「得意野」或類似詞，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如「貓會畫畫」「太空船降落」。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
+請以繁體中文分析這些元數據，回答使用者的問題，並根據問題性質提供合適的回應。作為一般原則，優先選擇回覆數量 ≥125 的帖子，並確保標題與問題相關，列出最多 3 個最相關的帖子（格式為「帖子 ID: <數字>, 標題: <標題>」）。若問題包含「膠post」「得意野」或類似詞，則優先選擇標題看似荒唐、搞笑或誇張的帖子，且同樣要求回覆數 ≥125。若問題需要反映討論區的整體氛圍（例如探討普遍意見或趨勢），可靈活分析更多帖子並提供概括性回應，不受 3 個帖子的限制。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
 """
     
     call_id = f"metadata_{time.time()}"
     st.session_state.last_user_query = user_query
-    st.session_state.debug_log.append(f"準備 Grok 3 分析: 分類={cat_id}, 元數據項目={len(st.session_state.metadata)}")
+    logger.info(f"準備 Grok 3 分析: 分類={cat_id}, 元數據項目={len(st.session_state.metadata)}")
     response = await summarize_with_grok3(prompt, call_id=call_id)
-    st.session_state.debug_log.append(f"分析元數據: 分類={cat_id}, 問題='{user_query}', 帖子數={len(st.session_state.metadata)}, 回應長度={len(response)}")
+    logger.debug(f"分析元數據: 分類={cat_id}, 問題='{user_query}', 帖子數={len(st.session_state.metadata)}, 回應長度={len(response)}")
     return response
 
 async def select_relevant_threads(analysis_result, max_threads=3):
@@ -346,15 +347,15 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     
     call_id = f"select_{time.time()}"
     response = await summarize_with_grok3(prompt, call_id=call_id)
-    st.session_state.debug_log.append(f"ID 解析輸入: {response[:200]}...")
+    logger.debug(f"ID 解析輸入: {response[:200]}...")
     
     thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
     valid_ids = [str(item["thread_id"]) for item in st.session_state.metadata]
     selected_ids = [tid for tid in thread_ids if tid in valid_ids]
     
-    st.session_state.debug_log.append(f"ID 解析: 輸入='{response[:200]}...', 提取={thread_ids}, 有效={selected_ids}")
+    logger.debug(f"ID 解析: 輸入='{response[:200]}...', 提取={thread_ids}, 有效={selected_ids}")
     if not selected_ids:
-        st.session_state.debug_log.append("ID 解析失敗: 無有效帖子 ID")
+        logger.warning("ID 解析失敗: 無有效帖子 ID")
         st.warning("無法解析帖子 ID，請檢查問題或稍後重試")
         return []
     
@@ -363,7 +364,7 @@ async def select_relevant_threads(analysis_result, max_threads=3):
 async def summarize_thread(thread_id, cat_id=None):
     post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
-        st.session_state.debug_log.append(f"找不到帖子: thread_id={thread_id}")
+        logger.error(f"找不到帖子: thread_id={thread_id}")
         st.error(f"找不到帖子 {thread_id}")
         return f"錯誤: 找不到帖子 {thread_id}"
     
@@ -373,7 +374,7 @@ async def summarize_thread(thread_id, cat_id=None):
     context = build_post_context(post, replies)
     chunks = chunk_text([context])
     
-    st.session_state.debug_log.append(f"總結帖子 {thread_id}: 回覆數={len(replies)}, 分塊數={len(chunks)}")
+    logger.info(f"總結帖子 {thread_id}: 回覆數={len(replies)}, 分塊數={len(chunks)}")
     chunk_summaries = []
     for i, chunk in enumerate(chunks):
         summary = await summarize_with_grok3(
@@ -381,7 +382,7 @@ async def summarize_thread(thread_id, cat_id=None):
             call_id=f"{thread_id}_chunk_{i}"
         )
         if summary.startswith("錯誤:"):
-            st.session_state.debug_log.append(f"帖子 {thread_id} 分塊 {i} 總結失敗: {summary}")
+            logger.error(f"帖子 {thread_id} 分塊 {i} 總結失敗: {summary}")
             st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
             return summary
         chunk_summaries.append(summary)
@@ -393,7 +394,7 @@ async def summarize_thread(thread_id, cat_id=None):
         call_id=f"{thread_id}_final"
     )
     if final_summary.startswith("錯誤:"):
-        st.session_state.debug_log.append(f"帖子 {thread_id} 最終總結失敗: {final_summary}")
+        logger.error(f"帖子 {thread_id} 最終總結失敗: {final_summary}")
         st.error(f"帖子 {thread_id} 最終總結失敗：{final_summary}")
         return final_summary
     return final_summary
@@ -403,7 +404,7 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
     st.session_state.lihkg_data = {}
     st.session_state.summaries = {}
     st.session_state.char_counts = {}
-    st.session_state.debug_log.append(f"手動抓取: 分類={cat_id}, 頁數={start_page}-{start_page+max_pages-1}")
+    logger.info(f"手動抓取: 分類={cat_id}, 頁數={start_page}-{start_page+max_pages-1}")
     all_items = []
     
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=start_page, max_pages=max_pages)
@@ -421,7 +422,7 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
         context = build_post_context(item, replies)
         chunks = chunk_text([context])
         
-        st.session_state.debug_log.append(f"手動總結帖子 {thread_id}: 回覆數={len(replies)}, 分塊數={len(chunks)}")
+        logger.info(f"手動總結帖子 {thread_id}: 回覆數={len(replies)}, 分塊數={len(chunks)}")
         chunk_summaries = []
         for i, chunk in enumerate(chunks):
             summary = await summarize_with_grok3(
@@ -429,7 +430,7 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
                 call_id=f"{thread_id}_chunk_{i}"
             )
             if summary.startswith("錯誤:"):
-                st.session_state.debug_log.append(f"手動總結失敗: 帖子={thread_id}, 分塊={i}, 錯誤: {summary}")
+                logger.error(f"手動總結失敗: 帖子={thread_id}, 分塊={i}, 錯誤: {summary}")
                 st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
                 continue
             chunk_summaries.append(summary)
@@ -444,12 +445,11 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
             if not final_summary.startswith("錯誤:"):
                 st.session_state.summaries[thread_id] = final_summary
     
-    st.session_state.debug_log.append(f"抓取完成: 分類={cat_id}, 總結數={len(st.session_state.summaries)}")
-    st.session_state.debug_log = st.session_state.debug_log[-50:]
+    logger.info(f"抓取完成: 分類={cat_id}, 總結數={len(st.session_state.summaries)}")
     st.session_state.is_fetching = False
     if not st.session_state.summaries:
-        st.session_state.debug_log.append(f"手動抓取無總結: 分類={cat_id}, 可能無符合條件帖子")
-        st.warning("無總結結果，可能無符合條件的帖子，請檢查調錯日誌或調整參數。")
+        logger.warning(f"手動抓取無總結: 分類={cat_id}, 可能無符合條件帖子")
+        st.warning("無總結結果，可能無符合條件的帖子，請檢查後台日誌或調整參數。")
     st.rerun()
 
 def main():
@@ -471,7 +471,7 @@ def main():
         st.session_state.metadata = []
         st.session_state.char_counts = {}
         st.session_state.summaries = {}
-        st.session_state.debug_log.append(f"開始新提問: 問題='{user_input}', 分類={chat_cat_id}")
+        logger.info(f"開始新提問: 問題='{user_input}', 分類={chat_cat_id}")
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
         with st.spinner("正在分析 LIHKG 帖子..."):
@@ -497,12 +497,7 @@ def main():
                 char_count = st.session_state.char_counts.get(call_id, 0)
                 st.write(f"**處理字元數**：{char_count} 字元")
             st.write("---")
-        
-        if st.session_state.debug_log:
-            st.subheader("調錯日誌")
-            for log in st.session_state.debug_log[-10:]:
-                st.write(log)
-
+    
     st.header("帖子總結")
     if st.session_state.summaries:
         for thread_id, summary in st.session_state.summaries.items():
