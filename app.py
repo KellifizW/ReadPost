@@ -3,12 +3,19 @@ import requests
 import hashlib
 import time
 import re
-from datetime import datetime  # 新增這一行來導入 datetime
+from datetime import datetime
 
 # LIHKG API 配置
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 LIHKG_TOKEN = ""  # 如果有 token 可填入
+
+# 帖子類型選項（模擬原作者的 QueryType）
+QUERY_TYPES = {
+    "最新 (Now)": "now",
+    "每日熱門 (Daily)": "daily",
+    "每週熱門 (Weekly)": "weekly"
+}
 
 # 清理 HTML 標籤的輔助函數
 def clean_html(text):
@@ -19,9 +26,9 @@ def clean_html(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# LIHKG 抓取分類帖子列表
-def get_lihkg_topic_list(cat_id, page=1, count=30):
-    url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&page={page}&count={count}&type=now"
+# LIHKG 抓取分類帖子列表（添加 query_type 參數）
+def get_lihkg_topic_list(cat_id, page=1, count=30, query_type="now"):
+    url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&page={page}&count={count}&type={query_type}"
     timestamp = int(time.time())
     digest = hashlib.sha1(f"jeams$get${url}${LIHKG_TOKEN}${timestamp}".encode()).hexdigest()
     
@@ -78,8 +85,13 @@ def main():
     st.header("LIHKG 分類帖子與回覆")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_page = st.number_input("LIHKG 分類頁數", min_value=1, value=1)
+    
+    # 添加帖子類型選擇（模擬 QueryType）
+    query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
+    query_type = QUERY_TYPES[query_type_label]
+
     if st.button("抓取 LIHKG 分類帖子"):
-        data = get_lihkg_topic_list(lihkg_cat_id, lihkg_page)
+        data = get_lihkg_topic_list(lihkg_cat_id, lihkg_page, query_type=query_type)
         if "error" in data:
             st.error(data["error"])
         else:
@@ -93,6 +105,7 @@ def main():
             st.write(f"**用戶**: {item['user_nickname']} (性別: {item['user_gender']})")
             st.write(f"**回覆數**: {item['no_of_reply']}, **點讚數**: {item['like_count']}, **負評數**: {item['dislike_count']}")
             st.write(f"**創建時間**: {datetime.fromtimestamp(item['create_time']).strftime('%Y-%m-%d %H:%M:%S')}")
+            st.write(f"**最後回覆時間**: {datetime.fromtimestamp(item['last_reply_time']).strftime('%Y-%m-%d %H:%M:%S')}")
             
             # 選擇回覆頁數
             reply_page = st.number_input(f"選擇帖子 {item['thread_id']} 的回覆頁數", min_value=1, value=1, key=f"reply_page_{item['thread_id']}")
