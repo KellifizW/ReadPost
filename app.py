@@ -10,23 +10,6 @@ import pytz
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 
-# 帖子類型選項
-QUERY_TYPES = {
-    "最新 (Now)": "now",
-    "每日熱門 (Daily)": "daily",
-    "每週熱門 (Weekly)": "weekly",
-    "最新回覆 (Latest)": "latest",
-    "最近 (Recent)": "recent"
-}
-
-# 排序選項
-ORDER_TYPES = {
-    "現在 (Now)": "now",
-    "按回覆時間 (Reply Time)": "reply_time",
-    "最新 (New)": "new",
-    "最新排序 (Latest)": "latest"
-}
-
 # 設置香港時區 (UTC+8)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
@@ -38,11 +21,11 @@ def clean_html(text):
     return text
 
 # LIHKG 抓取最新帖子列表（使用 thread/latest 端點）
-def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count=100, query_type="now", order="now"):
+def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count=100):
     all_items = []
     
     for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type={query_type}&order={order}"
+        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=reply_time"
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -56,7 +39,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
             "orginal": "https://lihkg.com",
-            "referer": f"https://lihkg.com/category/{cat_id}?order={order}",
+            "referer": f"https://lihkg.com/category/{cat_id}?order=reply_time",
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
             "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
@@ -142,14 +125,6 @@ def main():
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
     lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
     
-    # 添加帖子類型選擇
-    query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
-    query_type = QUERY_TYPES[query_type_label]
-
-    # 添加排序方式選擇
-    order_type_label = st.selectbox("選擇排序方式", list(ORDER_TYPES.keys()), index=0)
-    order_type = ORDER_TYPES[order_type_label]
-
     # 添加遍歷子分類選項
     auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
 
@@ -163,21 +138,19 @@ def main():
         else:
             sub_cat_ids = [lihkg_sub_cat_id]
         
-        # 遍歷每個子分類、帖子類型和排序方式
+        # 遍歷每個子分類
         for sub_id in sub_cat_ids:
-            for qt in QUERY_TYPES.values():
-                for ot in ORDER_TYPES.values():
-                    st.write(f"正在抓取子分類 ID: {sub_id}, 帖子類型: {qt}, 排序方式: {ot}")
-                    data = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=qt, order=ot)
-                    if "error" in data:
-                        st.error(data["error"])
-                    elif "response" in data and "items" in data["response"]:
-                        items = data["response"]["items"]
-                        # 避免重複帖子（根據 thread_id 去重）
-                        existing_ids = {item["thread_id"] for item in all_items}
-                        new_items = [item for item in items if item["thread_id"] not in existing_ids]
-                        all_items.extend(new_items)
-                        st.write(f"子分類 {sub_id} (類型: {qt}, 排序: {ot}) 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
+            st.write(f"正在抓取子分類 ID: {sub_id}")
+            data = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages)
+            if "error" in data:
+                st.error(data["error"])
+            elif "response" in data and "items" in data["response"]:
+                items = data["response"]["items"]
+                # 避免重複帖子（根據 thread_id 去重）
+                existing_ids = {item["thread_id"] for item in all_items}
+                new_items = [item for item in items if item["thread_id"] not in existing_ids]
+                all_items.extend(new_items)
+                st.write(f"子分類 {sub_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
         st.session_state.lihkg_posts = {"response": {"items": all_items}}
 
