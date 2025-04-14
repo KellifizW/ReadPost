@@ -7,15 +7,17 @@ from datetime import datetime
 import pytz
 import asyncio
 
+# LIHKG 配置（公開，硬編碼）
+LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
+LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"  # 你的硬編碼值
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
+
+# Grok 3 配置（假設需秘密管理）
+GROK3_API_URL = "https://api.x.ai/grok3"  # 待確認的端點
+GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
+
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
-
-# 從 st.secrets 獲取配置
-LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
-LIHKG_DEVICE_ID = st.secrets["lihkg"]["device_id"]
-GROK3_API_URL = "https://api.x.ai/grok3"  # 待確認的 xAI API 端點
-GROK3_API_KEY = st.secrets["grok3"]["api_key"]  # 你的字串密鑰，例如 xai-E6c399pt...
-GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
 
 # 儲存數據的全局變量
 if "lihkg_data" not in st.session_state:
@@ -54,7 +56,7 @@ async def async_request(method, url, headers=None, json=None):
         response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json))
     return response
 
-# 抓取LIHKG帖子列表（簡化展示）
+# 抓取LIHKG帖子列表
 async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100):
     all_items = []
     tasks = []
@@ -70,6 +72,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, 
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
+            "Cookie": LIHKG_COOKIE,
             "orginal": "https://lihkg.com",
             "referer": f"https://lihkg.com/category/{cat_id}?order=reply_time",
             "accept": "application/json",
@@ -98,7 +101,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, 
     
     return all_items
 
-# 抓取帖子回覆（簡化展示）
+# 抓取帖子回覆
 async def get_lihkg_thread_content(thread_id, max_replies=100):
     replies = []
     page = 1
@@ -115,6 +118,7 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
+            "Cookie": LIHKG_COOKIE,
             "orginal": "https://lihkg.com",
             "referer": f"https://lihkg.com/thread/{thread_id}",
             "accept": "application/json",
@@ -145,11 +149,17 @@ def build_post_context(post, replies):
                 context += f"- {msg}\n"
     return context
 
-# 調用Grok 3 API（使用你的字串密鑰）
+# 調用Grok 3 API
 async def summarize_with_grok3(text):
+    try:
+        GROK3_API_KEY = st.secrets["grok3"]["api_key"]  # 從秘密管理讀取
+    except KeyError:
+        st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3][api_key]")
+        return "錯誤: 缺少 API 密鑰"
+    
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {GROK3_API_KEY}"  # 使用你的 xai- 開頭密鑰
+        "Authorization": f"Bearer {GROK3_API_KEY}"
     }
     payload = {
         "text": text,
@@ -164,7 +174,7 @@ async def summarize_with_grok3(text):
         st.error(f"Grok 3 API 總結失敗: {str(e)}")
         return f"錯誤: {str(e)}"
 
-# Streamlit主程式（簡化展示）
+# Streamlit主程式
 def main():
     st.title("LIHKG 總結聊天機器人")
 
