@@ -37,6 +37,13 @@ def clean_html(text):
     text = clean.sub('', text)
     return re.sub(r'\s+', ' ', text).strip()
 
+# 安全解析日期
+def try_parse_date(date_str):
+    try:
+        return datetime.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return None
+
 # 分塊文字
 def chunk_text(texts, max_chars=GROK3_TOKEN_LIMIT):
     chunks = []
@@ -110,7 +117,10 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
             filtered_items = [
                 item for item in items
                 if "last_reply_time" in item and 
-                datetime.fromisoformat(item["last_reply_time"]).date() == today and
+                isinstance(item["last_reply_time"], str) and 
+                item["last_reply_time"] and
+                try_parse_date(item["last_reply_time"]) is not None and
+                try_parse_date(item["last_reply_time"]).date() == today and
                 item.get("title") and len(item["title"]) <= 100 and
                 re.match(r'^[\w\s\!\@\#\$\%\^\&\*\(\)\-\+\=\[\]\{\}\|\;\:\'\"\,\<\.\>\/\?]*$', item["title"])
             ]
@@ -249,6 +259,9 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
             for item in items
         ]
     
+    if not st.session_state.metadata:
+        return f"抱歉，當前分類（{'創意台' if cat_id == 31 else '吹水台'}）暫無符合條件的帖子，建議試試{'吹水台' if cat_id == 31 else '創意台'}。"
+    
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
         for item in st.session_state.metadata
@@ -260,7 +273,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如描述無厘頭情境、誇張故事或荒誕討論。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題包含「膠post」或「得意野」，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如描述無厘頭情境、誇張故事或荒誕討論。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
     """
     
     call_id = f"metadata_{time.time()}"
@@ -390,11 +403,11 @@ def main():
         key="chat_cat_id"
     )
     with st.form("chat_form", clear_on_submit=True):
-        user_input = st.text_input("輸入問題（例如「有咩膠post?」）：", key="chat_input")
+        user_input = st.text_input("輸入問題（例如「有咩膠post?」或「有咩得意野?」）：", key="chat_input")
         submit_chat = st.form_submit_button("提交問題")
     
     if submit_chat and user_input:
-        st.session_state.chat_history = []  # 清空歷史
+        st.session_state.chat_history = []
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
         with st.spinner("正在分析 LIHKG 帖子..."):
