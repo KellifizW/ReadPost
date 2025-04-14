@@ -2,18 +2,21 @@ import streamlit as st
 import requests
 import hashlib
 import time
-from urllib.parse import urlencode
-from datetime import datetime
+import re
 
 # LIHKG API 配置
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 LIHKG_TOKEN = ""  # 如果有 token 可填入
 
-# HKG API 配置
-HKG_BASE_URL = "https://api.hkgolden.com/"
-HKG_USER_ID = "0"
-HKG_PASSWORD_HASH = ""
+# 清理 HTML 標籤的輔助函數
+def clean_html(text):
+    # 移除 HTML 標籤
+    clean = re.compile(r'<[^>]+>')
+    text = clean.sub('', text)
+    # 移除多餘的換行和空格
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 # LIHKG 抓取分類帖子列表
 def get_lihkg_topic_list(cat_id, page=1, count=30):
@@ -60,46 +63,9 @@ def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
     else:
         return {"error": f"LIHKG API 錯誤: {response.status_code}, 回應: {response.text}"}
 
-# HKG 抓取分類帖子列表（帶重試邏輯）
-def get_hkg_topic_list(topic_type, page=1, retries=3):
-    for attempt in range(retries):
-        date_str = datetime.now().strftime("%Y%m%d")
-        key = hashlib.md5(f"{date_str}_HKGOLDEN_{HKG_USER_ID}_$API#Android_1_2^{topic_type}_{page}_N_N".encode()).hexdigest()
-        
-        params = {
-            "s": key,
-            "type": topic_type,
-            "page": page,
-            "pagesize": "50",
-            "user_id": HKG_USER_ID,
-            "pass": HKG_PASSWORD_HASH,
-            "block": "Y",
-            "sensormode": "N",
-            "filterMode": "N",
-            "hotOnly": "N",
-            "returntype": "json"
-        }
-        url = f"{HKG_BASE_URL}topics.aspx?{urlencode(params)}"
-        
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 10; Pixel XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Mobile Safari/537.36"
-            }
-            st.write(f"調試: 請求 HKG 分類帖子 URL: {url}")
-            response = requests.get(url, headers=headers, timeout=10)
-            st.write(f"調試: HKG 請求狀態碼: {response.status_code}")
-            if response.status_code == 200:
-                return response.json()
-            else:
-                st.warning(f"嘗試 {attempt+1}/{retries} - HKG API 錯誤: {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            st.warning(f"嘗試 {attempt+1}/{retries} - 請求失敗: {e}")
-        time.sleep(2)
-    return {"error": f"HKG API 錯誤: 多次嘗試後仍失敗"}
-
 # Streamlit 主程式
 def main():
-    st.title("LIHKG 和 HKG 分類帖子抓取測試")
+    st.title("LIHKG 分類帖子抓取工具")
 
     # 初始化 session_state
     if "lihkg_posts" not in st.session_state:
@@ -109,8 +75,8 @@ def main():
 
     # LIHKG 測試區
     st.header("LIHKG 分類帖子與回覆")
-    lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示最新)", "1")
-    lihkg_page = st.number_input("LIHKG 頁數", min_value=1, value=1)
+    lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
+    lihkg_page = st.number_input("LIHKG 分類頁數", min_value=1, value=1)
     if st.button("抓取 LIHKG 分類帖子"):
         data = get_lihkg_topic_list(lihkg_cat_id, lihkg_page)
         if "error" in data:
@@ -118,45 +84,35 @@ def main():
         else:
             st.session_state.lihkg_posts = data
 
-    # 顯示帖子列表
+    # 顯示 LIHKG 帖子列表
     if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
         for item in st.session_state.lihkg_posts["response"]["items"]:
-            st.write(f"標題: {item['title']}")
-            st.write(f"帖子 ID: {item['thread_id']}")
-            st.write(f"用戶: {item['user_nickname']}")
+            st.write(f"**標題**: {item['title']}")
+            st.write(f"**帖子 ID**: {item['thread_id']}")
+            st.write(f"**用戶**: {item['user_nickname']} (性別: {item['user_gender']})")
+            st.write(f"**回覆數**: {item['no_of_reply']}, **點讚數**: {item['like_count']}, **負評數**: {item['dislike_count']}")
+            st.write(f"**創建時間**: {datetime.fromtimestamp(item['create_time']).strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # 選擇回覆頁數
+            reply_page = st.number_input(f"選擇帖子 {item['thread_id']} 的回覆頁數", min_value=1, value=1, key=f"reply_page_{item['thread_id']}")
             if st.button(f"查看帖子 {item['thread_id']} 的回覆", key=f"view_replies_{item['thread_id']}"):
-                thread_data = get_lihkg_thread_content(item["thread_id"], 1)
+                thread_data = get_lihkg_thread_content(item["thread_id"], reply_page)
                 if "error" in thread_data:
                     st.error(thread_data["error"])
                 else:
                     st.session_state.lihkg_replies[item["thread_id"]] = thread_data
+            
             # 顯示已抓取的回覆
             if item["thread_id"] in st.session_state.lihkg_replies:
                 thread_data = st.session_state.lihkg_replies[item["thread_id"]]
-                if "response" in thread_data and "items" in thread_data["response"]:
-                    st.subheader(f"帖子 {item['thread_id']} 的回覆")
-                    for reply in thread_data["response"]["items"]:
-                        st.write(f"回覆用戶: {reply['user_nickname']}")
-                        st.write(f"回覆內容: {reply['msg']}")
+                if "response" in thread_data and "item_data" in thread_data["response"]:
+                    st.subheader(f"帖子 {item['thread_id']} 的回覆（第 {reply_page} 頁）")
+                    for reply in thread_data["response"]["item_data"]:
+                        st.write(f"**回覆用戶**: {reply['user_nickname']} (性別: {reply['user_gender']})")
+                        st.write(f"**回覆內容**: {clean_html(reply['msg'])}")
+                        st.write(f"**回覆時間**: {datetime.fromtimestamp(reply['reply_time']).strftime('%Y-%m-%d %H:%M:%S')}")
                         st.write("---")
             st.write("---")
-
-    # HKG 測試區
-    st.header("HKG 分類帖子")
-    hkg_type = st.text_input("輸入 HKG 分類類型 (例如 BW 表示吹水台)", "BW")
-    hkg_page = st.number_input("HKG 頁數", min_value=1, value=1)
-    if st.button("抓取 HKG 分類帖子"):
-        data = get_hkg_topic_list(hkg_type, hkg_page)
-        if "error" in data:
-            st.error(data["error"])
-        else:
-            st.json(data)
-            if "Topics" in data:
-                for topic in data["Topics"]:
-                    st.write(f"標題: {topic['Title']}")
-                    st.write(f"帖子 ID: {topic['Message']}")
-                    st.write(f"用戶: {topic['Author']}")
-                    st.write("---")
 
 if __name__ == "__main__":
     main()
