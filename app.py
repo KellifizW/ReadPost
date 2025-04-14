@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import cloudscraper
 import hashlib
 import time
 import re
@@ -30,9 +31,10 @@ def clean_html(text):
 # LIHKG 抓取帖子列表（按熱門排序）
 def get_lihkg_topic_list(cat_id, start_page=1, max_pages=10, count=60):
     all_items = []
+    scraper = cloudscraper.create_scraper()  # 使用 cloudscraper 繞過 Cloudflare
     
     for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&page={p}&count={count}&order=hot"
+        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&page={p}&count={count}&type=now&order=hot"
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -59,11 +61,14 @@ def get_lihkg_topic_list(cat_id, start_page=1, max_pages=10, count=60):
             "sec-fetch-site": "same-origin",
         }
         
-        response = requests.get(url, headers=headers)
+        response = scraper.get(url, headers=headers)
         st.write(f"調試: 請求 LIHKG 最新帖子 URL: {url}, 狀態碼: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
+            if "success" in data and data["success"] == 0:
+                st.write(f"調試: API 錯誤: {data}")
+                break
             if "response" in data and "items" in data["response"]:
                 items = data["response"]["items"]
                 all_items.extend(items)
@@ -86,6 +91,7 @@ def get_lihkg_thread_content(thread_id, max_replies=100):
     replies = []
     page = 1
     per_page = 50  # LIHKG API 每頁最多 50 條回覆
+    scraper = cloudscraper.create_scraper()  # 使用 cloudscraper 繞過 Cloudflare
     
     while len(replies) < max_replies:
         url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/{page}?order=reply_time"
@@ -112,7 +118,7 @@ def get_lihkg_thread_content(thread_id, max_replies=100):
             "sec-fetch-site": "same-origin",
         }
         
-        response = requests.get(url, headers=headers)
+        response = scraper.get(url, headers=headers)
         st.write(f"調試: 請求 LIHKG 帖子回覆 URL: {url}, 狀態碼: {response.status_code}")
         
         if response.status_code == 200:
@@ -146,6 +152,9 @@ def build_post_context(post, replies):
 def main():
     st.title("LIHKG 篩選帖子聊天機器人")
 
+    # 提示用戶更新 cookie
+    st.warning("如果抓取失敗，可能是 cookie 已過期。請從瀏覽器獲取最新的 cookie（包含 cf_clearance），並更新程式碼中的 LIHKG_COOKIE。")
+
     # 抓取帖子區域
     st.header("抓取 LIHKG 熱門帖子")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
@@ -157,7 +166,7 @@ def main():
         st.session_state.lihkg_data = {}
         all_items = []
         
-        # 直接抓取主分類，不指定子分類
+        # 直接抓取主分類
         st.write(f"正在抓取分類 ID: {lihkg_cat_id}")
         items = get_lihkg_topic_list(lihkg_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages)
         # 避免重複帖子（根據 thread_id 去重）
