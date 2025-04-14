@@ -9,10 +9,10 @@ import asyncio
 
 # LIHKG 配置（公開，硬編碼）
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
-LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"  # 你的硬編碼值
+LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
 LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
-# Grok 3 配置（假設需秘密管理）
+# Grok 3 配置
 GROK3_API_URL = "https://api.x.ai/grok3"  # 待確認的端點
 GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
 
@@ -152,9 +152,9 @@ def build_post_context(post, replies):
 # 調用Grok 3 API
 async def summarize_with_grok3(text):
     try:
-        GROK3_API_KEY = st.secrets["grok3"]["api_key"]  # 從秘密管理讀取
+        GROK3_API_KEY = st.secrets["grok3key"]  # 改用簡化的鍵名
     except KeyError:
-        st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3][api_key]")
+        st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3key]")
         return "錯誤: 缺少 API 密鑰"
     
     headers = {
