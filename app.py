@@ -106,7 +106,15 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
                 st.write(f"API 錯誤: {data}")
                 break
             items = data.get("response", {}).get("items", [])
-            all_items.extend(items)
+            today = datetime.now(HONG_KONG_TZ).date()
+            filtered_items = [
+                item for item in items
+                if "last_reply_time" in item and 
+                datetime.fromisoformat(item["last_reply_time"]).date() == today and
+                item.get("title") and len(item["title"]) <= 100 and
+                re.match(r'^[\w\s\!\@\#\$\%\^\&\*\(\)\-\+\=\[\]\{\}\|\;\:\'\"\,\<\.\>\/\?]*$', item["title"])
+            ]
+            all_items.extend(filtered_items)
             if not items:
                 break
         else:
@@ -186,7 +194,8 @@ async def summarize_with_grok3(text, call_id=None):
         chunks = chunk_text([text], max_chars=GROK3_TOKEN_LIMIT // 2)
         summaries = []
         for i, chunk in enumerate(chunks):
-            summary = await summarize_with_grok3(chunk, call_id=f"{call_id}_sub_{i}")
+            chunk_prompt = f"使用者問題：{st.session_state.get('last_user_query', '')}\n{chunk}"
+            summary = await summarize_with_grok3(chunk_prompt, call_id=f"{call_id}_sub_{i}")
             summaries.append(summary)
         return "\n".join(summaries)
     
@@ -208,15 +217,20 @@ async def summarize_with_grok3(text, call_id=None):
         response = await async_request("post", GROK3_API_URL, headers=headers, json=payload)
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as e:
-        if response.status_code == 401:
-            st.error("Grok 3 API 認證失敗：請檢查 [grok3key] 是否正確")
-        elif response.status_code == 404:
-            st.error(f"Grok 3 API 端點無效：{GROK3_API_URL}，請確認 xAI API 文檔")
-        elif response.status_code == 429:
-            st.error("Grok 3 API 請求超限，請稍後重試")
-        else:
-            st.error(f"Grok 3 API 錯誤: {str(e)}")
-        return f"錯誤: {str(e)}"
+        error_msg = f"Grok 3 API 錯誤: {str(e)}"
+        if hasattr(e, 'response') and e.response:
+            status_code = e.response.status_code
+            if status_code == 400:
+                error_msg = "Grok 3 API 請求無效，可能因帖子數據異常，請重試或聯繫支持"
+            elif status_code == 401:
+                error_msg = "Grok 3 API 認證失敗：請檢查 [grok3key] 是否正確"
+            elif status_code == 404:
+                error_msg = f"Grok 3 API 端點無效：{GROK3_API_URL}，請確認 xAI API 文檔"
+            elif status_code == 429:
+                error_msg = "Grok 3 API 請求超限，請稍後重試"
+        st.error(error_msg)
+        st.session_state.char_counts[f"error_{call_id}"] = f"失敗提示: {text[:200]}..."
+        return f"錯誤: {error_msg}"
     except Exception as e:
         st.error(f"Grok 3 API 總結失敗: {str(e)}")
         return f"錯誤: {str(e)}"
@@ -246,10 +260,11 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「怪女」「清零」「搞亂籠」等詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題看似荒唐、搞笑、誇張或非現實的帖子，例如描述無厘頭情境、誇張故事或荒誕討論。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。若無相關帖子，說明原因並建議其他分類。
     """
     
-    call_id = f"metadata_{len(st.session_state.chat_history)}"
+    call_id = f"metadata_{time.time()}"
+    st.session_state.last_user_query = user_query
     response = await summarize_with_grok3(prompt, call_id=call_id)
     return response
 
@@ -264,7 +279,7 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     67890
     """
     
-    call_id = f"select_{len(st.session_state.chat_history)}"
+    call_id = f"select_{time.time()}"
     response = await summarize_with_grok3(prompt, call_id=call_id)
     
     thread_ids = re.findall(r'^\d+$', response, re.MULTILINE)
@@ -323,7 +338,7 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
     st.session_state.char_counts = {}
     all_items = []
     
-    valid_sub_cat_ids = [0, 1, 2]  # 根據測試更新
+    valid_sub_cat_ids = [0, 1, 2]
     sub_cat_ids = valid_sub_cat_ids if auto_sub_cat else [sub_cat_id]
     
     for sub_id in sub_cat_ids:
@@ -368,15 +383,22 @@ def main():
     st.title("LIHKG 總結聊天機器人")
 
     st.header("與 Grok 3 聊天")
+    chat_cat_id = st.selectbox(
+        "聊天分類",
+        options=[1, 31],
+        format_func=lambda x: {1: "吹水台", 31: "創意台"}[x],
+        key="chat_cat_id"
+    )
     with st.form("chat_form", clear_on_submit=True):
-        user_input = st.text_input("輸入問題（例如「有無咩膠post分享?」）：", key="chat_input")
+        user_input = st.text_input("輸入問題（例如「有咩膠post?」）：", key="chat_input")
         submit_chat = st.form_submit_button("提交問題")
     
     if submit_chat and user_input:
+        st.session_state.chat_history = []  # 清空歷史
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
         with st.spinner("正在分析 LIHKG 帖子..."):
-            analysis_result = asyncio.run(analyze_lihkg_metadata(user_input))
+            analysis_result = asyncio.run(analyze_lihkg_metadata(user_input, cat_id=chat_cat_id))
         st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
         
         with st.spinner("正在選擇並總結相關帖子..."):
@@ -394,7 +416,7 @@ def main():
             role = "你" if chat["role"] == "user" else "Grok 3"
             st.markdown(f"**{role}**：{chat['content']}")
             if chat["role"] == "assistant":
-                call_id = f"metadata_{i//2}"
+                call_id = f"metadata_{i//2}_{time.time()}"
                 char_count = st.session_state.char_counts.get(call_id, 0)
                 st.write(f"**處理字元數**：{char_count} 字元")
             st.write("---")
