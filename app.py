@@ -36,6 +36,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
         digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
         
         headers = {
@@ -50,9 +51,9 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count
         
         response = requests.get(url, headers=headers)
         st.write(f"調試: 請求 LIHKG 分類帖子 URL: {url}, 狀態碼: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
-            st.write(f"調試: 第 {p} 頁返回數據: {data}")
             if "response" in data and "items" in data["response"]:
                 items = data["response"]["items"]
                 all_items.extend(items)
@@ -76,6 +77,7 @@ def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
     timestamp = int(time.time())
     hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
     st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
     digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
     
     headers = {
@@ -91,9 +93,9 @@ def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
     st.write(f"調試: 請求 LIHKG 帖子回覆 URL: {url}")
     response = requests.get(url, headers=headers)
     st.write(f"調試: LIHKG 回覆請求狀態碼: {response.status_code}")
+    
     if response.status_code == 200:
         data = response.json()
-        st.write(f"調試: LIHKG 回覆返回數據: {data}")
         return data
     else:
         return {"error": f"LIHKG API 錯誤: {response.status_code}, 回應: {response.text}"}
