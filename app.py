@@ -3,6 +3,7 @@ import requests
 import hashlib
 import time
 import re
+from datetime import datetime  # 新增這一行來導入 datetime
 
 # LIHKG API 配置
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
