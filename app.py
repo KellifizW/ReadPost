@@ -26,12 +26,12 @@ def clean_html(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# LIHKG 抓取帖子列表（按回覆時間排序）
+# LIHKG 抓取帖子列表（按熱門排序）
 def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=60):
     all_items = []
     
     for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=reply_time"
+        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=hot"
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -46,7 +46,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
             "X-LI-DIGEST": digest,
             "X-LI-USER": "130972",
             "X-LI-PLUS": "f159171fd79451e447d82db2b64474ebea8ae06b",
-            "referer": f"https://lihkg.com/category/{cat_id}?order=reply_time",
+            "referer": f"https://lihkg.com/category/{cat_id}?order=hot",
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
             "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
@@ -143,7 +143,7 @@ def main():
     st.title("LIHKG 篩選帖子聊天機器人")
 
     # 抓取帖子區域
-    st.header("抓取 LIHKG 最新帖子")
+    st.header("抓取 LIHKG 熱門帖子")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
@@ -151,7 +151,7 @@ def main():
     
     auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
 
-    if st.button("抓取 LIHKG 最新帖子"):
+    if st.button("抓取 LIHKG 熱門帖子"):
         # 清除舊數據
         st.session_state.lihkg_data = {}
         all_items = []
