@@ -5,75 +5,92 @@ import time
 import re
 from datetime import datetime
 import pytz
+import asyncio
 
-# LIHKG API 配置
-LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
-LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()  # 動態生成設備 ID
-
-# 設置香港時區 (UTC+8)
+# 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 儲存所有帖子和回覆的全局變量
-if "lihkg_data" not in st.session_state:
-    st.session_state.lihkg_data = {}  # 儲存篩選後的帖子和回覆
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # 儲存聊天記錄
+# 從 st.secrets 獲取配置
+LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
+LIHKG_DEVICE_ID = st.secrets["lihkg"]["device_id"]
+GROK3_API_URL = "https://api.x.ai/grok3"  # 待確認的 xAI API 端點
+GROK3_API_KEY = st.secrets["grok3"]["api_key"]  # 你的字串密鑰，例如 xai-E6c399pt...
+GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
 
-# 清理 HTML 標籤的輔助函數
+# 儲存數據的全局變量
+if "lihkg_data" not in st.session_state:
+    st.session_state.lihkg_data = {}
+if "summaries" not in st.session_state:
+    st.session_state.summaries = {}
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# 清理HTML標籤
 def clean_html(text):
     clean = re.compile(r'<[^>]+>')
     text = clean.sub('', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
-# LIHKG 抓取帖子列表（模仿原始腳本）
-def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count=100):
+# 分塊文字
+def chunk_text(texts, max_chars=GROK3_TOKEN_LIMIT):
+    chunks = []
+    current_chunk = ""
+    for text in texts:
+        if len(current_chunk) + len(text) + 1 < max_chars:
+            current_chunk += text + "\n"
+        else:
+            chunks.append(current_chunk)
+            current_chunk = text + "\n"
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+# 非同步API調用
+async def async_request(method, url, headers=None, json=None):
+    loop = asyncio.get_event_loop()
+    if method == "get":
+        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers))
+    elif method == "post":
+        response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json))
+    return response
+
+# 抓取LIHKG帖子列表（簡化展示）
+async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100):
     all_items = []
+    tasks = []
     
     for p in range(start_page, start_page + max_pages):
         url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=reply_time"
         timestamp = int(time.time())
-        hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
         digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
         
         headers = {
             "X-LI-DEVICE": LIHKG_DEVICE_ID,
-            "X-LI-DEVICE-TYPE": "android",  # 模仿移動端
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "X-LI-DEVICE-TYPE": "android",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
-            "orginal": "https://lihkg.com",  # 添加原始腳本的字段
+            "orginal": "https://lihkg.com",
             "referer": f"https://lihkg.com/category/{cat_id}?order=reply_time",
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
-            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
+            "accept": "application/json",
         }
         
-        response = requests.get(url, headers=headers)
-        st.write(f"調試: 請求 LIHKG 最新帖子 URL: {url}, 狀態碼: {response.status_code}")
-        
+        tasks.append(async_request("get", url, headers=headers))
+    
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for response in responses:
+        if isinstance(response, requests.RequestException):
+            st.error(f"LIHKG API 錯誤: {str(response)}")
+            continue
         if response.status_code == 200:
             data = response.json()
-            if "success" in data and data["success"] == 0:
-                st.write(f"調試: API 錯誤: {data}")
+            if data.get("success") == 0:
+                st.write(f"API 錯誤: {data}")
                 break
-            if "response" in data and "items" in data["response"]:
-                items = data["response"]["items"]
-                all_items.extend(items)
-                st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
-                if not items:
-                    st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
-                    break
-            else:
-                st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
-                st.write(f"調試: API 響應: {data}")
+            items = data.get("response", {}).get("items", [])
+            all_items.extend(items)
+            if not items:
                 break
         else:
             st.error(f"LIHKG API 錯誤: {response.status_code}")
@@ -81,11 +98,11 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count
     
     return all_items
 
-# LIHKG 抓取帖子回覆內容（只抓取前 100 個回覆）
-def get_lihkg_thread_content(thread_id, max_replies=100):
+# 抓取帖子回覆（簡化展示）
+async def get_lihkg_thread_content(thread_id, max_replies=100):
     replies = []
     page = 1
-    per_page = 50  # LIHKG API 每頁最多 50 條回覆
+    per_page = 50
     
     while len(replies) < max_replies:
         url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/{page}?order=reply_time"
@@ -94,157 +111,137 @@ def get_lihkg_thread_content(thread_id, max_replies=100):
         
         headers = {
             "X-LI-DEVICE": LIHKG_DEVICE_ID,
-            "X-LI-DEVICE-TYPE": "android",  # 模仿移動端
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "X-LI-DEVICE-TYPE": "android",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
-            "orginal": "https://lihkg.com",  # 添加原始腳本的字段
+            "orginal": "https://lihkg.com",
             "referer": f"https://lihkg.com/thread/{thread_id}",
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
-            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
+            "accept": "application/json",
         }
         
-        response = requests.get(url, headers=headers)
-        st.write(f"調試: 請求 LIHKG 帖子回覆 URL: {url}, 狀態碼: {response.status_code}")
-        
+        response = await async_request("get", url, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "response" in data and "item_data" in data["response"]:
-                page_replies = data["response"]["item_data"]
-                replies.extend(page_replies)
-                page += 1
-                if not page_replies:
-                    break
-            else:
+            page_replies = data.get("response", {}).get("item_data", [])
+            replies.extend(page_replies)
+            page += 1
+            if not page_replies:
                 break
         else:
             st.error(f"LIHKG API 錯誤: {response.status_code}")
             break
     
-    return replies[:max_replies]  # 確保只返回前 100 個回覆
+    return replies[:max_replies]
 
-# 將帖子和回覆數據整合為簡化上下文
+# 構建上下文
 def build_post_context(post, replies):
-    context = f"H: {post['title']}\n"  # 標題使用 "H"
-    
+    context = f"Title: {post['title']}\n"
     if replies:
-        context += "R:\n"  # 回覆內容使用 "R"
+        context += "Replies:\n"
         for reply in replies:
-            context += f"- {clean_html(reply['msg'])}\n"  # 只顯示回覆內容，忽略用戶名稱、性別、時間
-    
+            msg = clean_html(reply['msg'])
+            if len(msg) > 10:
+                context += f"- {msg}\n"
     return context
 
-# Streamlit 主程式
-def main():
-    st.title("LIHKG 篩選帖子聊天機器人")
-
-    # 抓取帖子區域
-    st.header("抓取 LIHKG 最新帖子")
-    lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
-    lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
-    lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
-    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
+# 調用Grok 3 API（使用你的字串密鑰）
+async def summarize_with_grok3(text):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROK3_API_KEY}"  # 使用你的 xai- 開頭密鑰
+    }
+    payload = {
+        "text": text,
+        "instruction": "Summarize the provided forum post and replies into 100-200 words, focusing on main themes and key opinions."
+    }
     
-    auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
+    try:
+        response = await async_request("post", GROK3_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json().get("summary", "無法生成總結")
+    except Exception as e:
+        st.error(f"Grok 3 API 總結失敗: {str(e)}")
+        return f"錯誤: {str(e)}"
 
-    if st.button("抓取 LIHKG 最新帖子"):
-        # 清除舊數據
+# Streamlit主程式（簡化展示）
+def main():
+    st.title("LIHKG 總結聊天機器人")
+
+    st.header("抓取 LIHKG 帖子")
+    cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
+    sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
+    start_page = st.number_input("開始頁數", min_value=1, value=1)
+    max_pages = st.number_input("最大頁數", min_value=1, value=5)
+    auto_sub_cat = st.checkbox("自動遍歷子分類 (0-5)", value=True)
+
+    if st.button("抓取並總結"):
         st.session_state.lihkg_data = {}
+        st.session_state.summaries = {}
         all_items = []
         
-        if auto_sub_cat:
-            sub_cat_ids = [0, 1, 2, 3, 4, 5]
-        else:
-            sub_cat_ids = [lihkg_sub_cat_id]
+        sub_cat_ids = [0, 1, 2, 3, 4, 5] if auto_sub_cat else [sub_cat_id]
         
-        # 遍歷每個子分類
         for sub_id in sub_cat_ids:
-            st.write(f"正在抓取子分類 ID: {sub_id}")
-            items = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages)
-            # 避免重複帖子（根據 thread_id 去重）
+            items = asyncio.run(get_lihkg_topic_list(cat_id, sub_id, start_page, max_pages))
             existing_ids = {item["thread_id"] for item in all_items}
             new_items = [item for item in items if item["thread_id"] not in existing_ids]
             all_items.extend(new_items)
-            st.write(f"子分類 {sub_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
-        # 篩選回覆數超過 175 的帖子，按回覆時間排序，取最新 10 個
-        filtered_items = [item for item in all_items if item["no_of_reply"] > 175]
+        filtered_items = [item for item in all_items if item.get("no_of_reply", 0) > 175]
         sorted_items = sorted(filtered_items, key=lambda x: x["last_reply_time"], reverse=True)
-        top_items = sorted_items[:10]  # 取最新 10 個
+        top_items = sorted_items[:10]
         
-        # 儲存篩選後的帖子並抓取前 100 個回覆
         for item in top_items:
             thread_id = item["thread_id"]
-            st.session_state.lihkg_data[thread_id] = {"post": item, "replies": []}
+            replies = asyncio.run(get_lihkg_thread_content(thread_id))
+            st.session_state.lihkg_data[thread_id] = {"post": item, "replies": replies}
             
-            # 抓取前 100 個回覆
-            thread_replies = get_lihkg_thread_content(thread_id, max_replies=100)
-            st.session_state.lihkg_data[thread_id]["replies"] = thread_replies
-            st.write(f"帖子 {thread_id} 抓取到 {len(thread_replies)} 條回覆")
+            context = build_post_context(item, replies)
+            chunks = chunk_text([context])
+            
+            chunk_summaries = []
+            for chunk in chunks:
+                summary = asyncio.run(summarize_with_grok3(chunk))
+                chunk_summaries.append(summary)
+            
+            final_summary = asyncio.run(summarize_with_grok3("\n".join(chunk_summaries)))
+            st.session_state.summaries[thread_id] = final_summary
 
-    # 顯示篩選後的帖子列表
-    if st.session_state.lihkg_data:
-        st.write(f"篩選後共 {len(st.session_state.lihkg_data)} 個帖子（回覆數 > 175，按回覆時間排序，取最新 10 個）")
-        for thread_id, data in st.session_state.lihkg_data.items():
-            item = data["post"]
-            st.write(f"**H**: {item['title']}")
-            st.write(f"**帖子 ID**: {item['thread_id']}")
-            st.write(f"**回覆數**: {item['no_of_reply']}, **點讚數**: {item['like_count']}, **負評數**: {item['dislike_count']}")
-            create_time = datetime.fromtimestamp(item['create_time'], tz=HONG_KONG_TZ)
-            last_reply_time = datetime.fromtimestamp(item['last_reply_time'], tz=HONG_KONG_TZ)
-            st.write(f"**創建時間**: {create_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            st.write(f"**最後回覆時間**: {last_reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            if data["replies"]:
-                st.subheader(f"帖子 {thread_id} 的回覆（前 100 個）")
-                for reply in data["replies"]:
-                    st.write(f"**R**: {clean_html(reply['msg'])}")
-                    st.write("---")
+    if st.session_state.summaries:
+        st.header("帖子總結")
+        for thread_id, summary in st.session_state.summaries.items():
+            post = st.session_state.lihkg_data[thread_id]["post"]
+            st.write(f"**標題**: {post['title']} (ID: {thread_id})")
+            st.write(f"**總結**: {summary}")
+            if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
+                st.write("**回覆內容**：")
+                for reply in st.session_state.lihkg_data[thread_id]["replies"]:
+                    st.write(f"- {clean_html(reply['msg'])}")
             st.write("---")
 
-    # 聊天區域
-    st.header("與 Grok 3 互動聊天")
-    user_input = st.text_input("輸入你的問題或指令（例如：總結帖子內容、討論某個帖子）：", key="chat_input")
-
+    st.header("與 Grok 3 互動")
+    user_input = st.text_input("輸入問題或指令：", key="chat_input")
+    
     if user_input:
-        # 將用戶輸入添加到聊天記錄
         st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        context = "\n".join([f"Post {tid}: {summary}" for tid, summary in st.session_state.summaries.items()])
+        prompt = f"以下是LIHKG帖子總結：\n{context}\n\n用戶問題：{user_input}"
+        
+        chunks = chunk_text([prompt])
+        responses = []
+        for chunk in chunks:
+            response = asyncio.run(summarize_with_grok3(chunk))
+            responses.append(response)
+        
+        final_response = "\n".join(responses)
+        st.session_state.chat_history.append({"role": "assistant", "content": final_response})
 
-        # 準備帖子上下文
-        if st.session_state.lihkg_data:
-            all_contexts = []
-            for thread_id, data in st.session_state.lihkg_data.items():
-                context = build_post_context(data["post"], data["replies"])
-                all_contexts.append(context)
-            
-            # 合併所有帖子上下文
-            full_context = "\n\n".join(all_contexts)
-            prompt = f"以下是抓取的 LIHKG 帖子和回覆內容，請根據這些內容回答用戶的問題或執行指令：\n\n{full_context}\n\n用戶問題/指令：{user_input}"
-            
-            # 顯示生成的 prompt 及長度
-            st.write("生成的 Prompt：")
-            st.write(prompt)
-            st.write(f"Prompt 長度：{len(prompt)} 字符")
-        else:
-            prompt = "目前沒有抓取到任何帖子，請先抓取帖子數據。"
-            st.write(prompt)
-
-        # 模擬 Grok 3 回答
-        st.session_state.chat_history.append({"role": "assistant", "content": "請將上方生成的 Prompt 複製並貼到與 Grok 3 的對話窗口，我會根據內容回答你的問題。"})
-
-    # 顯示聊天記錄
     st.subheader("聊天記錄")
     for chat in st.session_state.chat_history:
-        if chat["role"] == "user":
-            st.write(f"**你**：{chat['content']}")
-        else:
-            st.write(f"**Grok 3**：{chat['content']}")
+        role = "你" if chat["role"] == "user" else "Grok 3"
+        st.write(f"**{role}**：{chat['content']}")
 
 if __name__ == "__main__":
     main()
