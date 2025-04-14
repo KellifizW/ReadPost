@@ -7,8 +7,7 @@ from datetime import datetime
 import pytz
 
 # LIHKG API 配置
-LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
-LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
+LIHKG_BASE_URL = "https://lihkg.com Ascendants.io API 可能會限制你的請求次數。如果你覺得超時，或是遇到了問題，請聯繫 Atlassian 支援。
 
 # 帖子類型選項（模擬原作者的 QueryType）
 QUERY_TYPES = {
@@ -28,7 +27,7 @@ def clean_html(text):
     return text
 
 # LIHKG 抓取分類帖子列表（遍歷多頁）
-def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, query_type="now"):
+def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=10, count=100, query_type="now"):
     all_items = []
     
     for p in range(start_page, start_page + max_pages):
@@ -58,52 +57,6 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
                 all_items.extend(items)
                 st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
                 # 如果返回空列表，停止抓取
-                if not items:
-                    st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
-                    break
-            else:
-                st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
-                break
-        else:
-            st.error(f"LIHKG API 錯誤: {response.status_code}")
-            break
-    
-    return {"response": {"items": all_items}}
-
-# LIHKG 搜索帖子（遍歷多頁）
-def search_lihkg_posts(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, sort="desc_reply_time"):
-    all_items = []
-    
-    for p in range(start_page, start_page + max_pages):
-        # 設置 q=""，嘗試不過濾帖子
-        url = f"{LIHKG_BASE_URL}thread/search?cat_id={cat_id}&sub_cat_id={sub_cat_id}&q=&sort={sort}&page={p}&count={count}"
-        timestamp = int(time.time())
-        hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
-        
-        headers = {
-            "X-LI-DEVICE": LIHKG_DEVICE_ID,
-            "X-LI-DEVICE-TYPE": "android",
-            "User-Agent": "LIHKG/16.0.4 Android/9.0.0 Google/Pixel XL",
-            "X-LI-REQUEST-TIME": str(timestamp),
-            "X-LI-DIGEST": digest,
-            "orginal": "https://lihkg.com",
-            "referer": f"https://lihkg.com/category/{cat_id}",
-        }
-        
-        response = requests.get(url, headers=headers)
-        st.write(f"調試: 搜索 LIHKG 帖子 URL: {url}, 狀態碼: {response.status_code}")
-        if response.status_code == 200:
-            data = response.json()
-            st.write(f"調試: 第 {p} 頁返回數據: {data}")
-            if "success" in data and data["success"] == 0:
-                st.write(f"調試: API 返回錯誤: {data.get('error_message', '未知錯誤')}")
-                break
-            if "response" in data and "items" in data["response"]:
-                items = data["response"]["items"]
-                all_items.extend(items)
-                st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
                 if not items:
                     st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
                     break
@@ -159,36 +112,38 @@ def main():
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
-    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)  # 增加到 10 頁
+    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
     
     # 添加帖子類型選擇（模擬 QueryType）
     query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
     query_type = QUERY_TYPES[query_type_label]
 
-    # 添加搜索選項
-    use_search = st.checkbox("使用搜索端點 (可能獲取更新的帖子)", value=False)
-
-    # 添加搜索關鍵字輸入（僅用於 thread/search）
-    search_query = st.text_input("輸入搜索關鍵字 (僅用於搜索端點，留空則不過濾)", "")
-
     if st.button("抓取 LIHKG 分類帖子"):
         # 清除舊數據
         st.session_state.lihkg_posts = None
-        if use_search:
-            data = search_lihkg_posts(lihkg_cat_id, lihkg_sub_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, sort="desc_reply_time")
-        else:
-            data = get_lihkg_topic_list(lihkg_cat_id, lihkg_sub_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=query_type)
-        if "error" in data:
-            st.error(data["error"])
-        else:
-            st.session_state.lihkg_posts = data
+        # 嘗試不同 sub_cat_id 抓取更多帖子
+        all_items = []
+        sub_cat_ids = [0, 1, 2, 3]  # 嘗試多個子分類
+        for sub_id in sub_cat_ids:
+            st.write(f"正在抓取子分類 ID: {sub_id}")
+            data = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=query_type)
+            if "error" in data:
+                st.error(data["error"])
+            elif "response" in data and "items" in data["response"]:
+                items = data["response"]["items"]
+                all_items.extend(items)
+                st.write(f"子分類 {sub_id} 抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
+        
+        st.session_state.lihkg_posts = {"response": {"items": all_items}}
 
     # 顯示 LIHKG 帖子列表並檢查最新帖子時間
     if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
         items = st.session_state.lihkg_posts["response"]["items"]
         st.write(f"總共抓取到 {len(items)} 個帖子")
         if items:
-            latest_post = max(items, key=lambda x: x["last_reply_time"])
+            # 按最後回覆時間排序
+            items.sort(key=lambda x: x["last_reply_time"], reverse=True)
+            latest_post = items[0]
             latest_reply_time = datetime.fromtimestamp(latest_post['last_reply_time'], tz=HONG_KONG_TZ)
             st.write(f"調試: 最新帖子的最後回覆時間: {latest_reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
