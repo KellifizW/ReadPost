@@ -182,7 +182,7 @@ async def summarize_with_grok3(text, call_id=None):
     
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer убийстваGROK3_API_KEY}"
+        "Authorization": f"Bearer {GROK3_API_KEY}"
     }
     payload = {
         "model": "grok-3-beta",
@@ -199,9 +199,9 @@ async def summarize_with_grok3(text, call_id=None):
         return response.json()["choices"][0]["message"]["content"]
     except requests.exceptions.HTTPError as e:
         if response.status_code == 401:
-            st.error("Grok 3 API 認證失敗：無效的 API 密鑰，請檢查 [grok3key]")
+            st.error("Grok 3 API 認證失敗：請檢查 [grok3key] 是否正確")
         elif response.status_code == 404:
-            st.error(f"Grok 3 API 端點無效：{GROK3_API_URL}")
+            st.error(f"Grok 3 API 端點無效：{GROK3_API_URL}，請確認 xAI API 文檔")
         elif response.status_code == 429:
             st.error("Grok 3 API 請求超限，請稍後重試")
         else:
@@ -236,7 +236,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
     {metadata_text}
     
-    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「趣怪」「惡趣味」「on9」等詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題提到「膠post」，請優先選擇標題或內容看似荒唐、搞笑、誇張或非現實的帖子（例如包含「無厘頭」「惡趣味」「on9」等意思或詞語，或描述不合常理的情境）。若問題涉及「熱門」，則考慮回覆數最多或最近更新的帖子。請確保回覆簡潔，包含具體的帖子 ID 和標題。
     """
     
     call_id = f"metadata_{len(st.session_state.chat_history)}"
