@@ -13,7 +13,7 @@ LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
 LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
 # Grok 3 配置
-GROK3_API_URL = "https://api.x.ai/grok3"  # 待確認的端點
+GROK3_API_URL = "https://api.x.ai/v1/chat/completions"  # 正確的 xAI API 端點
 GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
 
 # 設置香港時區
@@ -97,6 +97,8 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, 
                 break
         else:
             st.error(f"LIHKG API 錯誤: {response.status_code}")
+            if response.status_code == 403:
+                st.warning("LIHKG Cookie 可能過期，請更新 PHPSESSID")
             break
     
     return all_items
@@ -134,6 +136,8 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
                 break
         else:
             st.error(f"LIHKG API 錯誤: {response.status_code}")
+            if response.status_code == 403:
+                st.warning("LIHKG Cookie 可能過期，請更新 PHPSESSID")
             break
     
     return replies[:max_replies]
@@ -152,7 +156,7 @@ def build_post_context(post, replies):
 # 調用Grok 3 API
 async def summarize_with_grok3(text):
     try:
-        GROK3_API_KEY = st.secrets["grok3key"]  # 改用簡化的鍵名
+        GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
         st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3key]")
         return "錯誤: 缺少 API 密鑰"
@@ -162,14 +166,30 @@ async def summarize_with_grok3(text):
         "Authorization": f"Bearer {GROK3_API_KEY}"
     }
     payload = {
-        "text": text,
-        "instruction": "Summarize the provided forum post and replies into 100-200 words, focusing on main themes and key opinions."
+        "model": "grok-3-beta",  # 假設模型名稱，需確認
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": f"Summarize the following forum post and replies into 100-200 words, focusing on main themes and key opinions:\n\n{text}"}
+        ],
+        "max_tokens": 300,
+        "temperature": 0.7
     }
     
     try:
         response = await async_request("post", GROK3_API_URL, headers=headers, json=payload)
         response.raise_for_status()
-        return response.json().get("summary", "無法生成總結")
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 401:
+            st.error("Grok 3 API 認證失敗：無效的 API 密鑰，請檢查 [grok3key]")
+        elif response.status_code == 404:
+            st.error(f"Grok 3 API 端點無效：{GROK3_API_URL}，請確認 xAI API 文檔")
+        elif response.status_code == 429:
+            st.error("Grok 3 API 請求超限，請稍後重試")
+        else:
+            st.error(f"Grok 3 API 錯誤: {str(e)}")
+        return f"錯誤: {str(e)}"
     except Exception as e:
         st.error(f"Grok 3 API 總結失敗: {str(e)}")
         return f"錯誤: {str(e)}"
