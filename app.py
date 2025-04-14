@@ -7,7 +7,8 @@ from datetime import datetime
 import pytz
 
 # LIHKG API 配置
-LIHKG_BASE_URL = "https://lihkg.com Ascendants.io API 可能會限制你的請求次數。如果你覺得超時，或是遇到了問題，請聯繫 Atlassian 支援。
+LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
+LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 
 # 帖子類型選項（模擬原作者的 QueryType）
 QUERY_TYPES = {
@@ -118,21 +119,33 @@ def main():
     query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
     query_type = QUERY_TYPES[query_type_label]
 
+    # 添加遍歷子分類選項
+    auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-3)", value=True)
+
     if st.button("抓取 LIHKG 分類帖子"):
         # 清除舊數據
         st.session_state.lihkg_posts = None
-        # 嘗試不同 sub_cat_id 抓取更多帖子
         all_items = []
-        sub_cat_ids = [0, 1, 2, 3]  # 嘗試多個子分類
+        
+        if auto_sub_cat:
+            sub_cat_ids = [0, 1, 2, 3]  # 遍歷多個子分類
+        else:
+            sub_cat_ids = [lihkg_sub_cat_id]
+        
+        # 遍歷每個子分類和帖子類型
         for sub_id in sub_cat_ids:
-            st.write(f"正在抓取子分類 ID: {sub_id}")
-            data = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=query_type)
-            if "error" in data:
-                st.error(data["error"])
-            elif "response" in data and "items" in data["response"]:
-                items = data["response"]["items"]
-                all_items.extend(items)
-                st.write(f"子分類 {sub_id} 抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
+            for qt in QUERY_TYPES.values():  # 遍歷 now, daily, weekly
+                st.write(f"正在抓取子分類 ID: {sub_id}, 帖子類型: {qt}")
+                data = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=qt)
+                if "error" in data:
+                    st.error(data["error"])
+                elif "response" in data and "items" in data["response"]:
+                    items = data["response"]["items"]
+                    # 避免重複帖子（根據 thread_id 去重）
+                    existing_ids = {item["thread_id"] for item in all_items}
+                    new_items = [item for item in items if item["thread_id"] not in existing_ids]
+                    all_items.extend(new_items)
+                    st.write(f"子分類 {sub_id} (類型: {qt}) 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
         st.session_state.lihkg_posts = {"response": {"items": all_items}}
 
