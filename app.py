@@ -30,7 +30,6 @@ def clean_html(text):
 # LIHKG 抓取分類帖子列表（遍歷多頁）
 def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, query_type="now"):
     all_items = []
-    page = start_page
     
     for p in range(start_page, start_page + max_pages):
         url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type={query_type}"
@@ -58,8 +57,9 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
                 items = data["response"]["items"]
                 all_items.extend(items)
                 st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
-                # 如果當前頁返回的帖子數小於 count，說明已到最後一頁
-                if len(items) < count:
+                # 如果返回空列表，停止抓取
+                if not items:
+                    st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
                     break
             else:
                 st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
@@ -73,10 +73,9 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
 # LIHKG 搜索帖子（遍歷多頁）
 def search_lihkg_posts(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, sort="desc_reply_time"):
     all_items = []
-    page = start_page
     
     for p in range(start_page, start_page + max_pages):
-        # 設置 q="" 確保不過濾帖子
+        # 設置 q=""，嘗試不過濾帖子
         url = f"{LIHKG_BASE_URL}thread/search?cat_id={cat_id}&sub_cat_id={sub_cat_id}&q=&sort={sort}&page={p}&count={count}"
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
@@ -98,11 +97,15 @@ def search_lihkg_posts(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=10
         if response.status_code == 200:
             data = response.json()
             st.write(f"調試: 第 {p} 頁返回數據: {data}")
+            if "success" in data and data["success"] == 0:
+                st.write(f"調試: API 返回錯誤: {data.get('error_message', '未知錯誤')}")
+                break
             if "response" in data and "items" in data["response"]:
                 items = data["response"]["items"]
                 all_items.extend(items)
                 st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
-                if len(items) < count:
+                if not items:
+                    st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
                     break
             else:
                 st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
@@ -156,14 +159,17 @@ def main():
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
-    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=5)
+    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)  # 增加到 10 頁
     
     # 添加帖子類型選擇（模擬 QueryType）
     query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
     query_type = QUERY_TYPES[query_type_label]
 
     # 添加搜索選項
-    use_search = st.checkbox("使用搜索端點 (可能獲取更新的帖子)", value=True)
+    use_search = st.checkbox("使用搜索端點 (可能獲取更新的帖子)", value=False)
+
+    # 添加搜索關鍵字輸入（僅用於 thread/search）
+    search_query = st.text_input("輸入搜索關鍵字 (僅用於搜索端點，留空則不過濾)", "")
 
     if st.button("抓取 LIHKG 分類帖子"):
         # 清除舊數據
