@@ -13,6 +13,12 @@ LIHKG_DEVICE_ID = hashlib.sha1("random-uuid".encode()).hexdigest()
 # 設置香港時區 (UTC+8)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
+# 儲存所有帖子和回覆的全局變量
+if "lihkg_data" not in st.session_state:
+    st.session_state.lihkg_data = {}  # 儲存所有帖子和回覆，格式為 {thread_id: {"post": {...}, "replies": [...]}}
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # 儲存聊天記錄
+
 # 清理 HTML 標籤的輔助函數
 def clean_html(text):
     clean = re.compile(r'<[^>]+>')
@@ -108,29 +114,43 @@ def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
     else:
         return {"error": f"LIHKG API 錯誤: {response.status_code}, 回應: {response.text}"}
 
+# 將帖子和回覆數據整合為上下文
+def build_post_context(post, replies):
+    context = f"帖子標題: {post['title']}\n"
+    context += f"帖子 ID: {post['thread_id']}\n"
+    context += f"用戶: {post['user_nickname']} (性別: {post['user_gender']})\n"
+    create_time = datetime.fromtimestamp(post['create_time'], tz=HONG_KONG_TZ)
+    last_reply_time = datetime.fromtimestamp(post['last_reply_time'], tz=HONG_KONG_TZ)
+    context += f"創建時間: {create_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    context += f"最後回覆時間: {last_reply_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    context += f"回覆數: {post['no_of_reply']}, 點讚數: {post['like_count']}, 負評數: {post['dislike_count']}\n"
+    
+    if replies:
+        context += "\n回覆內容:\n"
+        for reply in replies:
+            reply_time = datetime.fromtimestamp(reply['reply_time'], tz=HONG_KONG_TZ)
+            context += f"- 用戶: {reply['user_nickname']} (性別: {reply['user_gender']})\n"
+            context += f"  回覆: {clean_html(reply['msg'])}\n"
+            context += f"  時間: {reply_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    
+    return context
+
 # Streamlit 主程式
 def main():
-    st.title("LIHKG 最新帖子抓取工具")
+    st.title("LIHKG 互動聊天機器人")
 
-    # 初始化 session_state
-    if "lihkg_posts" not in st.session_state:
-        st.session_state.lihkg_posts = None
-    if "lihkg_replies" not in st.session_state:
-        st.session_state.lihkg_replies = {}
-
-    # LIHKG 測試區
-    st.header("LIHKG 最新帖子與回覆")
+    # 抓取帖子區域
+    st.header("抓取 LIHKG 最新帖子")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
     lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
     
-    # 添加遍歷子分類選項
     auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
 
     if st.button("抓取 LIHKG 最新帖子"):
         # 清除舊數據
-        st.session_state.lihkg_posts = None
+        st.session_state.lihkg_data = {}
         all_items = []
         
         if auto_sub_cat:
@@ -152,20 +172,24 @@ def main():
                 all_items.extend(new_items)
                 st.write(f"子分類 {sub_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
-        st.session_state.lihkg_posts = {"response": {"items": all_items}}
+        # 儲存帖子數據
+        for item in all_items:
+            thread_id = item["thread_id"]
+            st.session_state.lihkg_data[thread_id] = {"post": item, "replies": []}
+            
+            # 自動抓取第一頁回覆
+            thread_data = get_lihkg_thread_content(thread_id, page=1)
+            if "error" in thread_data:
+                st.error(thread_data["error"])
+            elif "response" in thread_data and "item_data" in thread_data["response"]:
+                st.session_state.lihkg_data[thread_id]["replies"] = thread_data["response"]["item_data"]
+                st.write(f"帖子 {thread_id} 抓取到 {len(thread_data['response']['item_data'])} 條回覆")
 
-    # 顯示 LIHKG 帖子列表並檢查最新帖子時間
-    if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
-        items = st.session_state.lihkg_posts["response"]["items"]
-        st.write(f"總共抓取到 {len(items)} 個帖子")
-        if items:
-            # 按最後回覆時間排序
-            items.sort(key=lambda x: x["last_reply_time"], reverse=True)
-            latest_post = items[0]
-            latest_reply_time = datetime.fromtimestamp(latest_post['last_reply_time'], tz=HONG_KONG_TZ)
-            st.write(f"調試: 最新帖子的最後回覆時間: {latest_reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        for item in items:
+    # 顯示抓取的帖子列表
+    if st.session_state.lihkg_data:
+        st.write(f"總共抓取到 {len(st.session_state.lihkg_data)} 個帖子")
+        for thread_id, data in st.session_state.lihkg_data.items():
+            item = data["post"]
             st.write(f"**標題**: {item['title']}")
             st.write(f"**帖子 ID**: {item['thread_id']}")
             st.write(f"**用戶**: {item['user_nickname']} (性別: {item['user_gender']})")
@@ -175,25 +199,49 @@ def main():
             st.write(f"**創建時間**: {create_time.strftime('%Y-%m-%d %H:%M:%S')}")
             st.write(f"**最後回覆時間**: {last_reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            reply_page = st.number_input(f"選擇帖子 {item['thread_id']} 的回覆頁數", min_value=1, value=1, key=f"reply_page_{item['thread_id']}")
-            if st.button(f"查看帖子 {item['thread_id']} 的回覆"):
-                thread_data = get_lihkg_thread_content(item["thread_id"], reply_page)
-                if "error" in thread_data:
-                    st.error(thread_data["error"])
-                else:
-                    st.session_state.lihkg_replies[item["thread_id"]] = thread_data
-            
-            if item["thread_id"] in st.session_state.lihkg_replies:
-                thread_data = st.session_state.lihkg_replies[item["thread_id"]]
-                if "response" in thread_data and "item_data" in thread_data["response"]:
-                    st.subheader(f"帖子 {item['thread_id']} 的回覆（第 {reply_page} 頁）")
-                    for reply in thread_data["response"]["item_data"]:
-                        st.write(f"**回覆用戶**: {reply['user_nickname']} (性別: {reply['user_gender']})")
-                        st.write(f"**回覆內容**: {clean_html(reply['msg'])}")
-                        reply_time = datetime.fromtimestamp(reply['reply_time'], tz=HONG_KONG_TZ)
-                        st.write(f"**回覆時間**: {reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        st.write("---")
+            if data["replies"]:
+                st.subheader(f"帖子 {thread_id} 的回覆（第 1 頁）")
+                for reply in data["replies"]:
+                    st.write(f"**回覆用戶**: {reply['user_nickname']} (性別: {reply['user_gender']})")
+                    st.write(f"**回覆內容**: {clean_html(reply['msg'])}")
+                    reply_time = datetime.fromtimestamp(reply['reply_time'], tz=HONG_KONG_TZ)
+                    st.write(f"**回覆時間**: {reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    st.write("---")
             st.write("---")
+
+    # 聊天區域
+    st.header("與 Grok 3 互動聊天")
+    user_input = st.text_input("輸入你的問題或指令（例如：總結帖子內容、討論某個帖子、模擬某個用戶）：", key="chat_input")
+
+    if user_input:
+        # 將用戶輸入添加到聊天記錄
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+        # 準備帖子上下文
+        if st.session_state.lihkg_data:
+            all_contexts = []
+            for thread_id, data in st.session_state.lihkg_data.items():
+                context = build_post_context(data["post"], data["replies"])
+                all_contexts.append(context)
+            
+            # 將所有帖子上下文合併
+            full_context = "\n\n".join(all_contexts)
+            prompt = f"以下是抓取的 LIHKG 帖子和回覆內容，請根據這些內容回答用戶的問題或執行指令：\n\n{full_context}\n\n用戶問題/指令：{user_input}"
+        else:
+            prompt = "目前沒有抓取到任何帖子，請先抓取帖子數據。"
+
+        # 模擬 Grok 3 回答（這裡需要你將 prompt 傳給我，我會根據內容回答）
+        # 由於我無法直接執行外部 API 調用，這裡假設我已經收到 prompt 並回答
+        # 在實際應用中，你需要將 prompt 傳給我（Grok 3），我會根據內容回答
+        st.session_state.chat_history.append({"role": "assistant", "content": f"（假設 Grok 3 回答）我已閱讀所有帖子，請問：{user_input}"})
+
+    # 顯示聊天記錄
+    st.subheader("聊天記錄")
+    for chat in st.session_state.chat_history:
+        if chat["role"] == "user":
+            st.write(f"**你**：{chat['content']}")
+        else:
+            st.write(f"**Grok 3**：{chat['content']}")
 
 if __name__ == "__main__":
     main()
