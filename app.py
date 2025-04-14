@@ -7,7 +7,7 @@ from datetime import datetime
 import pytz
 import asyncio
 
-# LIHKG 配置（公開，硬編碼）
+# LIHKG 配置（保留硬編碼）
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
 LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
@@ -83,12 +83,12 @@ async def async_request(method, url, headers=None, json=None, retries=2):
                 raise e
 
 # 抓取LIHKG帖子列表（元數據）
-async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=30):
+async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, count=60):
     all_items = []
     tasks = []
     
     for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=reply_time"
+        url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now"
         timestamp = int(time.time())
         digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
         
@@ -100,7 +100,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
             "X-LI-DIGEST": digest,
             "Cookie": LIHKG_COOKIE,
             "orginal": "https://lihkg.com",
-            "referer": f"https://lihkg.com/category/{cat_id}?order=reply_time",
+            "referer": f"https://lihkg.com/category/{cat_id}",
             "accept": "application/json",
         }
         
@@ -113,12 +113,12 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
             st.session_state.debug_log.append(f"LIHKG API 錯誤: {str(response)}")
             st.error(f"LIHKG API 錯誤: {str(response)}")
             continue
+        st.session_state.debug_log.append(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
-            st.session_state.debug_log.append(f"LIHKG API: {url}, 狀態: {response.status_code}, 成功: {data.get('success')}")
             if data.get("success") == 0:
                 st.session_state.debug_log.append(f"LIHKG API 錯誤: {data.get('error_message', '無錯誤訊息')}")
-                st.write(f"API 錯誤: {data}")
+                st.error(f"抓取分類 {cat_id} 失敗: {data.get('error_message', '未知錯誤')}")
                 break
             items = data.get("response", {}).get("items", [])
             filtered_items = [
@@ -131,9 +131,9 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
                 break
         else:
             st.session_state.debug_log.append(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
-            st.error(f"LIHKG API 錯誤: {response.status_code}")
+            st.error(f"抓取分類 {cat_id} 失敗: {response.status_code}")
             if response.status_code == 403:
-                st.warning("LIHKG Cookie 可能過期，請更新 PHPSESSID")
+                st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
             break
     
     return all_items
@@ -162,9 +162,9 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
         }
         
         response = await async_request("get", url, headers=headers)
+        st.session_state.debug_log.append(f"LIHKG 帖子內容: {url}, 狀態: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
-            st.session_state.debug_log.append(f"LIHKG 帖子內容: {url}, 狀態: {response.status_code}")
             page_replies = data.get("response", {}).get("item_data", [])
             replies.extend(page_replies)
             page += 1
@@ -174,7 +174,7 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
             st.session_state.debug_log.append(f"LIHKG 帖子內容錯誤: {url}, 狀態: {response.status_code}")
             st.error(f"LIHKG API 錯誤: {response.status_code}")
             if response.status_code == 403:
-                st.warning("LIHKG Cookie 可能過期，請更新 PHPSESSID")
+                st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
             break
     
     return replies[:max_replies]
@@ -273,7 +273,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=1):
     
     if not st.session_state.metadata:
         st.session_state.debug_log.append(f"無有效帖子: 分類 {cat_id}")
-        return f"抱歉，分類（{cat_id}）暫無帖子，可能 Cookie 過期或無內容，請重試或檢查 Cookie."
+        return f"抱歉，分類（{cat_id}）暫無帖子，可能無內容或網路問題，請稍後重試。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -436,7 +436,7 @@ def main():
     
     if submit_chat and user_input:
         st.session_state.chat_history = []
-        st.session_state.metadata = []  # 額外清空
+        st.session_state.metadata = []
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
         with st.spinner("正在分析 LIHKG 帖子..."):
