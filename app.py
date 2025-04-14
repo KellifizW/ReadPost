@@ -4,7 +4,7 @@ import hashlib
 import time
 import re
 from datetime import datetime
-import pytz  # 引入 pytz 庫
+import pytz
 
 # LIHKG API 配置
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
@@ -27,56 +27,91 @@ def clean_html(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# LIHKG 抓取分類帖子列表
-def get_lihkg_topic_list(cat_id, sub_cat_id=0, page=1, count=30, query_type="now"):
-    url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={page}&count={count}&type={query_type}"
-    timestamp = int(time.time())
-    # 使用香港時區顯示時間
-    hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-    st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+# LIHKG 抓取分類帖子列表（遍歷多頁）
+def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, query_type="now"):
+    all_items = []
+    page = start_page
     
-    headers = {
-        "X-LI-DEVICE": LIHKG_DEVICE_ID,
-        "X-LI-DEVICE-TYPE": "android",
-        "User-Agent": "LIHKG/16.0.4 Android/9.0.0 Google/Pixel XL",
-        "X-LI-REQUEST-TIME": str(timestamp),
-        "X-LI-DIGEST": digest,
-        "orginal": "https://lihkg.com",
-        "referer": f"https://lihkg.com/category/{cat_id}",
-    }
+    for p in range(start_page, start_page + max_pages):
+        url = f"{LIHKG_BASE_URL}thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type={query_type}"
+        timestamp = int(time.time())
+        hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
+        st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+        
+        headers = {
+            "X-LI-DEVICE": LIHKG_DEVICE_ID,
+            "X-LI-DEVICE-TYPE": "android",
+            "User-Agent": "LIHKG/16.0.4 Android/9.0.0 Google/Pixel XL",
+            "X-LI-REQUEST-TIME": str(timestamp),
+            "X-LI-DIGEST": digest,
+            "orginal": "https://lihkg.com",
+            "referer": f"https://lihkg.com/category/{cat_id}",
+        }
+        
+        response = requests.get(url, headers=headers)
+        st.write(f"調試: 請求 LIHKG 分類帖子 URL: {url}, 狀態碼: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            st.write(f"調試: 第 {p} 頁返回數據: {data}")
+            if "response" in data and "items" in data["response"]:
+                items = data["response"]["items"]
+                all_items.extend(items)
+                st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
+                # 如果當前頁返回的帖子數小於 count，說明已到最後一頁
+                if len(items) < count:
+                    break
+            else:
+                st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
+                break
+        else:
+            st.error(f"LIHKG API 錯誤: {response.status_code}")
+            break
     
-    response = requests.get(url, headers=headers)
-    st.write(f"調試: 請求 LIHKG 分類帖子 URL: {url}, 狀態碼: {response.status_code}")
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return {"error": f"LIHKG API 錯誤: {response.status_code}"}
+    return {"response": {"items": all_items}}
 
-# LIHKG 搜索帖子（備選方案）
-def search_lihkg_posts(cat_id, sub_cat_id=0, page=1, count=30, sort="desc_reply_time"):
-    url = f"{LIHKG_BASE_URL}thread/search?cat_id={cat_id}&sub_cat_id={sub_cat_id}&q=&sort={sort}&page={page}&count={count}"
-    timestamp = int(time.time())
-    hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-    st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+# LIHKG 搜索帖子（遍歷多頁）
+def search_lihkg_posts(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100, sort="desc_reply_time"):
+    all_items = []
+    page = start_page
     
-    headers = {
-        "X-LI-DEVICE": LIHKG_DEVICE_ID,
-        "X-LI-DEVICE-TYPE": "android",
-        "User-Agent": "LIHKG/16.0.4 Android/9.0.0 Google/Pixel XL",
-        "X-LI-REQUEST-TIME": str(timestamp),
-        "X-LI-DIGEST": digest,
-        "orginal": "https://lihkg.com",
-        "referer": f"https://lihkg.com/category/{cat_id}",
-    }
+    for p in range(start_page, start_page + max_pages):
+        # 設置 q="" 確保不過濾帖子
+        url = f"{LIHKG_BASE_URL}thread/search?cat_id={cat_id}&sub_cat_id={sub_cat_id}&q=&sort={sort}&page={p}&count={count}"
+        timestamp = int(time.time())
+        hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
+        st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+        
+        headers = {
+            "X-LI-DEVICE": LIHKG_DEVICE_ID,
+            "X-LI-DEVICE-TYPE": "android",
+            "User-Agent": "LIHKG/16.0.4 Android/9.0.0 Google/Pixel XL",
+            "X-LI-REQUEST-TIME": str(timestamp),
+            "X-LI-DIGEST": digest,
+            "orginal": "https://lihkg.com",
+            "referer": f"https://lihkg.com/category/{cat_id}",
+        }
+        
+        response = requests.get(url, headers=headers)
+        st.write(f"調試: 搜索 LIHKG 帖子 URL: {url}, 狀態碼: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            st.write(f"調試: 第 {p} 頁返回數據: {data}")
+            if "response" in data and "items" in data["response"]:
+                items = data["response"]["items"]
+                all_items.extend(items)
+                st.write(f"調試: 第 {p} 頁抓取到 {len(items)} 個帖子，總計 {len(all_items)} 個帖子")
+                if len(items) < count:
+                    break
+            else:
+                st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
+                break
+        else:
+            st.error(f"LIHKG API 錯誤: {response.status_code}")
+            break
     
-    response = requests.get(url, headers=headers)
-    st.write(f"調試: 搜索 LIHKG 帖子 URL: {url}, 狀態碼: {response.status_code}")
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return {"error": f"LIHKG API 錯誤: {response.status_code}"}
+    return {"response": {"items": all_items}}
 
 # LIHKG 抓取帖子回覆內容
 def get_lihkg_thread_content(thread_id, page=1, order="reply_time"):
@@ -120,22 +155,23 @@ def main():
     st.header("LIHKG 分類帖子與回覆")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
     lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
-    lihkg_page = st.number_input("LIHKG 分類頁數", min_value=1, value=1)
+    lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
+    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=5)
     
     # 添加帖子類型選擇（模擬 QueryType）
     query_type_label = st.selectbox("選擇帖子類型", list(QUERY_TYPES.keys()), index=0)
     query_type = QUERY_TYPES[query_type_label]
 
     # 添加搜索選項
-    use_search = st.checkbox("使用搜索端點 (可能獲取更新的帖子)", value=False)
+    use_search = st.checkbox("使用搜索端點 (可能獲取更新的帖子)", value=True)
 
     if st.button("抓取 LIHKG 分類帖子"):
         # 清除舊數據
         st.session_state.lihkg_posts = None
         if use_search:
-            data = search_lihkg_posts(lihkg_cat_id, lihkg_sub_cat_id, lihkg_page, sort="desc_reply_time")
+            data = search_lihkg_posts(lihkg_cat_id, lihkg_sub_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, sort="desc_reply_time")
         else:
-            data = get_lihkg_topic_list(lihkg_cat_id, lihkg_sub_cat_id, lihkg_page, query_type=query_type)
+            data = get_lihkg_topic_list(lihkg_cat_id, lihkg_sub_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages, query_type=query_type)
         if "error" in data:
             st.error(data["error"])
         else:
@@ -144,9 +180,9 @@ def main():
     # 顯示 LIHKG 帖子列表並檢查最新帖子時間
     if st.session_state.lihkg_posts and "response" in st.session_state.lihkg_posts and "items" in st.session_state.lihkg_posts["response"]:
         items = st.session_state.lihkg_posts["response"]["items"]
+        st.write(f"總共抓取到 {len(items)} 個帖子")
         if items:
             latest_post = max(items, key=lambda x: x["last_reply_time"])
-            # 使用香港時區顯示帖子時間
             latest_reply_time = datetime.fromtimestamp(latest_post['last_reply_time'], tz=HONG_KONG_TZ)
             st.write(f"調試: 最新帖子的最後回覆時間: {latest_reply_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
