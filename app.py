@@ -14,20 +14,22 @@ LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
 # Grok 3 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 4000  # 假設的 token 限制
+GROK3_TOKEN_LIMIT = 4000
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 儲存數據的全局變量
 if "lihkg_data" not in st.session_state:
-    st.session_state.lihkg_data = {}
+    st.session_state.lihkg_data = {}  # 儲存帖子詳細內容
 if "summaries" not in st.session_state:
-    st.session_state.summaries = {}
+    st.session_state.summaries = {}  # 儲存總結
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []  # 儲存聊天記錄
 if "char_counts" not in st.session_state:
-    st.session_state.char_counts = {}  # 儲存每次總結的字元數
+    st.session_state.char_counts = {}  # 儲存字元數
+if "metadata" not in st.session_state:
+    st.session_state.metadata = []  # 儲存帖子元數據
 
 # 清理HTML標籤
 def clean_html(text):
@@ -58,7 +60,7 @@ async def async_request(method, url, headers=None, json=None):
         response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json))
     return response
 
-# 抓取LIHKG帖子列表
+# 抓取LIHKG帖子列表（元數據）
 async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=100):
     all_items = []
     tasks = []
@@ -144,7 +146,7 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
     
     return replies[:max_replies]
 
-# 構建上下文
+# 構建帖子上下文
 def build_post_context(post, replies):
     context = f"標題: {post['title']}\n"
     if replies:
@@ -163,7 +165,6 @@ async def summarize_with_grok3(text, call_id=None):
         st.error("未找到 Grok 3 API 密鑰，請在 secrets.toml 或 Streamlit Cloud 中配置 [grok3key]")
         return "錯誤: 缺少 API 密鑰"
     
-    # 計算字元數
     char_count = len(text)
     if call_id:
         st.session_state.char_counts[call_id] = char_count
@@ -176,7 +177,7 @@ async def summarize_with_grok3(text, call_id=None):
         "model": "grok-3-beta",
         "messages": [
             {"role": "system", "content": "你是 Grok 3，請使用繁體中文回答所有問題，並確保回覆清晰、簡潔、符合繁體中文語法規範。"},
-            {"role": "user", "content": f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{text}"}
+            {"role": "user", "content": text}
         ],
         "max_tokens": 300,
         "temperature": 0.7
@@ -201,11 +202,128 @@ async def summarize_with_grok3(text, call_id=None):
         st.error(f"Grok 3 API 總結失敗: {str(e)}")
         return f"錯誤: {str(e)}"
 
+# 分析LIHKG元數據
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=3):
+    if not st.session_state.metadata:
+        items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
+        st.session_state.metadata = [
+            {
+                "thread_id": item["thread_id"],
+                "title": item["title"],
+                "no_of_reply": item.get("no_of_reply", 0),
+                "last_reply_time": item.get("last_reply_time", "")
+            }
+            for item in items
+        ]
+    
+    metadata_text = "\n".join([
+        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
+        for item in st.session_state.metadata
+    ])
+    
+    prompt = f"""
+    使用者問題：{user_query}
+    
+    以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
+    {metadata_text}
+    
+    請以繁體中文分析這些元數據，回答使用者的問題，並指出哪些帖子可能與問題最相關（列出帖子 ID 和標題）。若問題涉及「今日熱門」或「最多討論」，優先考慮回覆數最多或最近更新的帖子。
+    """
+    
+    response = await summarize_with_grok3(prompt, call_id=f"metadata_{len(st.session_state.chat_history)}")
+    return response
+
+# 選擇相關帖子
+async def select_relevant_threads(analysis_result, max_threads=3):
+    prompt = f"""
+    以下是對 LIHKG 帖子元數據的分析結果：
+    {analysis_result}
+    
+    請從中挑選最多 {max_threads} 個最相關的帖子，僅返回帖子 ID 列表（例如 ["12345", "67890"]）。
+    """
+    
+    response = await summarize_with_grok3(prompt, call_id=f"select_{len(st.session_state.chat_history)}")
+    try:
+        thread_ids = eval(response.strip())  # 假設 AI 返回 Python 列表格式
+        return [tid for tid in thread_ids if tid in [item["thread_id"] for item in st.session_state.metadata]]
+    except:
+        st.error("無法解析帖子選擇結果，隨機選擇帖子")
+        return [item["thread_id"] for item in st.session_state.metadata[:max_threads]]
+
+# 總結帖子
+async def summarize_thread(thread_id):
+    post = next((item for item in st.session_state.metadata if item["thread_id"] == thread_id), None)
+    if not post:
+        return f"錯誤: 找不到帖子 {thread_id}"
+    
+    replies = await get_lihkg_thread_content(thread_id)
+    st.session_state.lihkg_data[thread_id] = {"post": post, "replies": replies}
+    
+    context = build_post_context(post, replies)
+    chunks = chunk_text([context])
+    
+    chunk_summaries = []
+    for i, chunk in enumerate(chunks):
+        summary = await summarize_with_grok3(
+            f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
+            call_id=f"{thread_id}_chunk_{i}"
+        )
+        chunk_summaries.append(summary)
+    
+    final_summary = await summarize_with_grok3(
+        f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+        call_id=f"{thread_id}_final"
+    )
+    return final_summary
+
 # Streamlit主程式
 def main():
     st.title("LIHKG 總結聊天機器人")
 
-    st.header("抓取 LIHKG 帖子")
+    st.header("與 Grok 3 聊天")
+    user_input = st.text_input("輸入問題（例如「今日最多人討論的新聞是什麼？」）：", key="chat_input")
+    
+    if user_input:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        # 分析元數據並回答
+        analysis_result = asyncio.run(analyze_lihkg_metadata(user_input))
+        st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
+        
+        # 選擇並總結相關帖子
+        thread_ids = asyncio.run(select_relevant_threads(analysis_result))
+        if thread_ids:
+            for thread_id in thread_ids:
+                if thread_id not in st.session_state.summaries:
+                    summary = asyncio.run(summarize_thread(thread_id))
+                    st.session_state.summaries[thread_id] = summary
+    
+    if st.session_state.chat_history:
+        st.subheader("聊天記錄")
+        for i, chat in enumerate(st.session_state.chat_history):
+            role = "你" if chat["role"] == "user" else "Grok 3"
+            st.write(f"**{role}**：{chat['content']}")
+            if chat["role"] == "assistant":
+                char_count = st.session_state.char_counts.get(f"metadata_{i//2}", 0)
+                st.write(f"**處理字元數**：{char_count} 字元")
+            st.write("---")
+
+    st.header("帖子總結")
+    if st.session_state.summaries:
+        for thread_id, summary in st.session_state.summaries.items():
+            post = st.session_state.lihkg_data[thread_id]["post"]
+            st.write(f"**標題**: {post['title']} (ID: {thread_id})")
+            st.write(f"**總結**: {summary}")
+            chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(len(chunk_text([build_post_context(post, st.session_state.lihkg_data[thread_id]["replies"])])))]
+            final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
+            st.write(f"**處理字元數**：分塊總結 {sum(chunk_counts)} 字元，最終總結 {final_count} 字元")
+            if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
+                st.write("**回覆內容**：")
+                for reply in st.session_state.lihkg_data[thread_id]["replies"]:
+                    st.write(f"- {clean_html(reply['msg'])}")
+            st.write("---")
+
+    st.header("手動抓取 LIHKG 帖子")
     cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
     sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
     start_page = st.number_input("開始頁數", min_value=1, value=1)
@@ -240,58 +358,17 @@ def main():
             
             chunk_summaries = []
             for i, chunk in enumerate(chunks):
-                summary = asyncio.run(summarize_with_grok3(chunk, call_id=f"{thread_id}_chunk_{i}"))
+                summary = asyncio.run(summarize_with_grok3(
+                    f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
+                    call_id=f"{thread_id}_chunk_{i}"
+                ))
                 chunk_summaries.append(summary)
             
-            final_summary = asyncio.run(summarize_with_grok3("\n".join(chunk_summaries), call_id=f"{thread_id}_final"))
+            final_summary = asyncio.run(summarize_with_grok3(
+                f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+                call_id=f"{thread_id}_final"
+            ))
             st.session_state.summaries[thread_id] = final_summary
-
-    if st.session_state.summaries:
-        st.header("帖子總結")
-        for thread_id, summary in st.session_state.summaries.items():
-            post = st.session_state.lihkg_data[thread_id]["post"]
-            st.write(f"**標題**: {post['title']} (ID: {thread_id})")
-            st.write(f"**總結**: {summary}")
-            # 顯示字元數
-            chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(len(chunk_text([build_post_context(post, st.session_state.lihkg_data[thread_id]["replies"])])))]
-            final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
-            st.write(f"**處理字元數**：分塊總結 {sum(chunk_counts)} 字元，最終總結 {final_count} 字元")
-            if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
-                st.write("**回覆內容**：")
-                for reply in st.session_state.lihkg_data[thread_id]["replies"]:
-                    st.write(f"- {clean_html(reply['msg'])}")
-            st.write("---")
-
-    st.header("與 Grok 3 互動")
-    user_input = st.text_input("輸入問題或指令：", key="chat_input")
-    
-    if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        
-        context = "\n".join([f"帖子 {tid}: {summary}" for tid, summary in st.session_state.summaries.items()])
-        prompt = f"以下是LIHKG帖子總結：\n{context}\n\n用戶問題：{user_input}\n請以繁體中文回答。"
-        
-        chunks = chunk_text([prompt])
-        responses = []
-        chat_char_counts = []
-        for i, chunk in enumerate(chunks):
-            response = asyncio.run(summarize_with_grok3(chunk, call_id=f"chat_{len(st.session_state.chat_history)}_{i}"))
-            responses.append(response)
-            chat_char_counts.append(st.session_state.char_counts.get(f"chat_{len(st.session_state.chat_history)}_{i}", 0))
-        
-        final_response = "\n".join(responses)
-        st.session_state.chat_history.append({"role": "assistant", "content": final_response})
-        st.session_state.char_counts[f"chat_{len(st.session_state.chat_history)}_total"] = sum(chat_char_counts)
-
-    if st.session_state.chat_history:
-        st.subheader("聊天記錄")
-        for i, chat in enumerate(st.session_state.chat_history):
-            role = "你" if chat["role"] == "user" else "Grok 3"
-            st.write(f"**{role}**：{chat['content']}")
-            if chat["role"] == "assistant":
-                char_count = st.session_state.char_counts.get(f"chat_{i+1}_total", 0)
-                st.write(f"**處理字元數**：{char_count} 字元")
-            st.write("---")
 
 if __name__ == "__main__":
     main()
