@@ -9,6 +9,7 @@ import pytz
 # LIHKG API 配置
 LIHKG_BASE_URL = "https://lihkg.com/api_v2/"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"  # 使用你提供的 x-li-device
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f333ba716b23bb21395107eea023a6459a-1744598744; _cfuvid=gHVdIns58jWF0xv2T20g4Ww4ZMVXBoGJTHCbotFiL8U-1744598744816-0.0.1.1-604800000; cf_clearance=11_Zdj9uPFkQpb4ymO4fZ8hwLjdp83kCeU.DL2lR8CU-1744611639-1.2.1.1-jV3KtJlc8RtBcE5sA0_upE.8KcT_SWvNTmvxWVA3yCzuj3mv13eRfjtFxMPPyb5K3Tfx.9hBbsqWjvABx9STPe6PWiv_bd0XaHszuqIwjFGFJdt.nYrlgCgfZbojBMvg_C9NIpqG67bVMEFJWEtyHpUwBYAQnH.lG0jAzQSqQlttN91BV7thHnsAZ4T38t3hlxXJ2Twy565dfKe9i72Vp6mnktKnbXVEiVNXQEXBOxW8ckOwbndC2b.NKu1eqgU2q8HnesIGmEclatwRgcm9TrkX37daJpmi4F7Dxi_f0cksvilmVab77SFQQmagvNdwZWBitSLzYx0ZAIw1MeEUVNkZFcsxQTNbL9gvaBoh5po"
 
 # 設置香港時區 (UTC+8)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -27,11 +28,11 @@ def clean_html(text):
     return text
 
 # LIHKG 抓取帖子列表（按熱門排序）
-def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=60):
+def get_lihkg_topic_list(cat_id, start_page=1, max_pages=10, count=60):
     all_items = []
     
     for p in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={p}&count={count}&type=now&order=hot"
+        url = f"{LIHKG_BASE_URL}thread/latest?cat_id={cat_id}&page={p}&count={count}&order=hot"
         timestamp = int(time.time())
         hk_time = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         st.write(f"調試: 當前時間戳: {timestamp}, 對應時間: {hk_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -46,6 +47,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
             "X-LI-DIGEST": digest,
             "X-LI-USER": "130972",
             "X-LI-PLUS": "f159171fd79451e447d82db2b64474ebea8ae06b",
+            "Cookie": LIHKG_COOKIE,
             "referer": f"https://lihkg.com/category/{cat_id}?order=hot",
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
@@ -71,6 +73,7 @@ def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5, count=
                     break
             else:
                 st.write(f"調試: 第 {p} 頁無帖子數據，停止抓取")
+                st.write(f"調試: API 響應: {data}")
                 break
         else:
             st.error(f"LIHKG API 錯誤: {response.status_code}")
@@ -97,6 +100,7 @@ def get_lihkg_thread_content(thread_id, max_replies=100):
             "X-LI-DIGEST": digest,
             "X-LI-USER": "130972",
             "X-LI-PLUS": "f159171fd79451e447d82db2b64474ebea8ae06b",
+            "Cookie": LIHKG_COOKIE,
             "referer": f"https://lihkg.com/thread/{thread_id}",
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6",
@@ -145,31 +149,22 @@ def main():
     # 抓取帖子區域
     st.header("抓取 LIHKG 熱門帖子")
     lihkg_cat_id = st.text_input("輸入 LIHKG 分類 ID (例如 1 表示吹水台)", "1")
-    lihkg_sub_cat_id = st.number_input("輸入 LIHKG 子分類 ID (默認為 0)", min_value=0, value=0)
     lihkg_start_page = st.number_input("開始頁數", min_value=1, value=1)
-    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=5)
-    
-    auto_sub_cat = st.checkbox("自動遍歷多個子分類 (0-5)", value=True)
+    lihkg_max_pages = st.number_input("最大抓取頁數", min_value=1, value=10)
 
     if st.button("抓取 LIHKG 熱門帖子"):
         # 清除舊數據
         st.session_state.lihkg_data = {}
         all_items = []
         
-        if auto_sub_cat:
-            sub_cat_ids = [0, 1, 2, 3, 4, 5]
-        else:
-            sub_cat_ids = [lihkg_sub_cat_id]
-        
-        # 遍歷每個子分類
-        for sub_id in sub_cat_ids:
-            st.write(f"正在抓取子分類 ID: {sub_id}")
-            items = get_lihkg_topic_list(lihkg_cat_id, sub_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages)
-            # 避免重複帖子（根據 thread_id 去重）
-            existing_ids = {item["thread_id"] for item in all_items}
-            new_items = [item for item in items if item["thread_id"] not in existing_ids]
-            all_items.extend(new_items)
-            st.write(f"子分類 {sub_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
+        # 直接抓取主分類，不指定子分類
+        st.write(f"正在抓取分類 ID: {lihkg_cat_id}")
+        items = get_lihkg_topic_list(lihkg_cat_id, start_page=lihkg_start_page, max_pages=lihkg_max_pages)
+        # 避免重複帖子（根據 thread_id 去重）
+        existing_ids = {item["thread_id"] for item in all_items}
+        new_items = [item for item in items if item["thread_id"] not in existing_ids]
+        all_items.extend(new_items)
+        st.write(f"分類 {lihkg_cat_id} 抓取到 {len(new_items)} 個新帖子，總計 {len(all_items)} 個帖子")
         
         # 篩選回覆數超過 175 的帖子，按回覆時間排序，取最新 10 個
         filtered_items = [item for item in all_items if item["no_of_reply"] > 175]
