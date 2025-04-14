@@ -399,3 +399,96 @@ async def manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, 
             summary = await summarize_with_grok3(
                 f"請將以下討論區帖子和回覆總結為100-200字，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{chunk}",
                 call_id=f"{thread_id}_chunk_{i}"
+            )
+            if summary.startswith("錯誤:"):
+                st.session_state.debug_log.append(f"手動總結失敗: 帖子 {thread_id}, 分塊 {i}, 錯誤: {summary}")
+                st.error(f"帖子 {thread_id} 分塊 {i} 總結失敗：{summary}")
+                continue
+            chunk_summaries.append(summary)
+        
+        if chunk_summaries:
+            final_summary = await summarize_with_grok3(
+                f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+                call_id=f"{thread_id}_final"
+            )
+            if not final_summary.startswith("錯誤:"):
+                st.session_state.summaries[thread_id] = final_summary
+
+# Streamlit主程式
+def main():
+    st.title("LIHKG 總結聊天機器人")
+
+    st.header("與 Grok 3 聊天")
+    chat_cat_id = st.selectbox(
+        "聊天分類",
+        options=[1, 31],
+        format_func=lambda x: {1: "吹水台", 31: "創意台"}[x],
+        key="chat_cat_id"
+    )
+    with st.form("chat_form", clear_on_submit=True):
+        user_input = st.text_input("輸入問題（例如「有咩膠post?」或「有咩得意野?」）：", key="chat_input")
+        submit_chat = st.form_submit_button("提交問題")
+    
+    if submit_chat and user_input:
+        st.session_state.chat_history = []
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        with st.spinner("正在分析 LIHKG 帖子..."):
+            analysis_result = asyncio.run(analyze_lihkg_metadata(user_input, cat_id=chat_cat_id))
+        st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
+        
+        with st.spinner("正在選擇並總結相關帖子..."):
+            thread_ids = asyncio.run(select_relevant_threads(analysis_result))
+            if thread_ids:
+                for thread_id in thread_ids:
+                    if thread_id not in st.session_state.summaries:
+                        summary = asyncio.run(summarize_thread(thread_id))
+                        if not summary.startswith("錯誤:"):
+                            st.session_state.summaries[thread_id] = summary
+    
+    if st.session_state.chat_history:
+        st.subheader("聊天記錄")
+        for i, chat in enumerate(st.session_state.chat_history):
+            role = "你" if chat["role"] == "user" else "Grok 3"
+            st.markdown(f"**{role}** undue：{chat['content']}")
+            if chat["role"] == "assistant":
+                call_id = f"metadata_{i//2}"
+                char_count = st.session_state.char_counts.get(call_id, 0)
+                st.write(f"**處理字元數**：{char_count} 字元")
+            st.write("---")
+        
+        if st.session_state.debug_log:
+            st.subheader("調錯日誌")
+            for log in st.session_state.debug_log[-5:]:
+                st.write(log)
+
+    st.header("帖子總結")
+    if st.session_state.summaries:
+        for thread_id, summary in st.session_state.summaries.items():
+            post = st.session_state.lihkg_data[thread_id]["post"]
+            st.write(f"**標題**: {post['title']} (ID: {thread_id})")
+            st.write(f"**總結**: {summary}")
+            chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(len(chunk_text([build_post_context(post, st.session_state.lihkg_data[thread_id]["replies"])])))]
+            final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
+            st.write(f"**處理字元數**：分塊總結 {sum(chunk_counts)} 字元，最終總結 {final_count} 字元")
+            if st.button(f"查看詳情 {thread_id}", key=f"detail_{thread_id}"):
+                st.write("**回覆內容**：")
+                for reply in st.session_state.lihkg_data[thread_id]["replies"]:
+                    st.write(f"- {clean_html(reply['msg'])}")
+            st.write("---")
+
+    st.header("手動抓取 LIHKG 帖子")
+    with st.form("manual_fetch_form"):
+        cat_id = st.text_input("分類 ID (如 1 為吹水台)", "1")
+        sub_cat_id = st.number_input("子分類 ID", min_value=0, value=0)
+        start_page = st.number_input("開始頁數", min_value=1, value=1)
+        max_pages = st.number_input("最大頁數", min_value=1, value=5)
+        auto_sub_cat = st.checkbox("自動遍歷子分類 (0-2)", value=True)
+        submit_fetch = st.form_submit_button("抓取並總結")
+    
+    if submit_fetch:
+        with st.spinner("正在抓取並總結..."):
+            asyncio.run(manual_fetch_and_summarize(cat_id, sub_cat_id, start_page, max_pages, auto_sub_cat))
+
+if __name__ == "__main__":
+    main()
