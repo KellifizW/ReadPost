@@ -123,7 +123,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
         for response in responses:
             if isinstance(response, Exception):
                 st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 錯誤: {str(response)}")
-                st.error(f"LIHKG API 錯誤: {str(response)}")
+                st.warning(f"LIHKG API 錯誤: {str(response)}")
                 continue
             st.session_state.debug_log.append(f"LIHKG API 請求: {url}, 狀態: {response.status_code}")
             if response.status_code == 200:
@@ -131,7 +131,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
                 st.session_state.debug_log.append(f"LIHKG API 回應: cat_id={cat_id}, sub_cat_id={sub_id}, success={data.get('success')}, error={data.get('error_message', '無')}, items={len(data.get('response', {}).get('items', []))}")
                 if data.get("success") == 0:
                     st.session_state.debug_log.append(f"LIHKG API 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, 訊息: {data.get('error_message', '無錯誤訊息')}")
-                    st.error(f"抓取分類 {cat_id} 失敗: {data.get('error_message', '未知錯誤')}")
+                    st.warning(f"分類 {cat_id} 無帖子: {data.get('error_message', '未知錯誤')}")
                     continue
                 items = data.get("response", {}).get("items", [])
                 filtered_items = [item for item in items if item.get("title")]
@@ -144,17 +144,18 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1, 
                     break
             else:
                 st.session_state.debug_log.append(f"LIHKG API 錯誤: {url}, 狀態: {response.status_code}")
-                st.error(f"抓取分類 {cat_id} 失敗: HTTP {response.status_code}")
+                st.warning(f"分類 {cat_id} 無帖子: HTTP {response.status_code}")
                 if response.status_code == 403:
                     st.session_state.debug_log.append(f"LIHKG 403 錯誤: cat_id={cat_id}, sub_cat_id={sub_id}, Cookie 可能無效")
                     st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
                 break
     
     st.session_state.debug_log.append(f"元數據總計: cat_id={cat_id}, 帖子數={len(all_items)}, 標題示例={[item['title'] for item in all_items[:3]]}")
+    st.session_state.debug_log = st.session_state.debug_log[-50:]  # 限制日誌長度
     return all_items
 
 # 抓取帖子回覆
-async def get_lihkg_thread_content(thread_id, max_replies=100):
+async def get_lihkg_thread_content(thread_id, max_replies=175):
     replies = []
     page = 1
     per_page = 50
@@ -188,7 +189,7 @@ async def get_lihkg_thread_content(thread_id, max_replies=100):
                 break
         else:
             st.session_state.debug_log.append(f"LIHKG 帖子內容錯誤: {url}, 狀態: {response.status_code}")
-            st.error(f"LIHKG API 錯誤: {response.status_code}")
+            st.warning(f"LIHKG API 錯誤: {response.status_code}")
             if response.status_code == 403:
                 st.session_state.debug_log.append(f"LIHKG 403 錯誤: thread_id={thread_id}, Cookie 可能無效")
                 st.warning("LIHKG Cookie 可能過期，請聯繫管理員更新")
@@ -385,8 +386,11 @@ async def summarize_thread(thread_id):
             return summary
         chunk_summaries.append(summary)
     
+    # 動態設置最終總結字數
+    reply_count = len(replies)
+    word_range = "300-400" if reply_count >= 100 else "100-200"
     final_summary = await summarize_with_grok3(
-        f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+        f"請將以下分塊總結合併為{word_range}字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
         call_id=f"{thread_id}_final"
     )
     if final_summary.startswith("錯誤:"):
@@ -432,14 +436,18 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
             chunk_summaries.append(summary)
         
         if chunk_summaries:
+            # 動態設置最終總結字數（手動抓取）
+            reply_count = len(replies)
+            word_range = "300-400" if reply_count >= 100 else "100-200"
             final_summary = await summarize_with_grok3(
-                f"請將以下分塊總結合併為100-200字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
+                f"請將以下分塊總結合併為{word_range}字的最終總結，聚焦主要主題和關鍵意見，並以繁體中文回覆：\n\n{'\n'.join(chunk_summaries)}",
                 call_id=f"{thread_id}_final"
             )
             if not final_summary.startswith("錯誤:"):
                 st.session_state.summaries[thread_id] = final_summary
     
     st.session_state.debug_log.append(f"抓取完成: 分類={cat_id}, 總結數={len(st.session_state.summaries)}")
+    st.session_state.debug_log = st.session_state.debug_log[-50:]  # 限制日誌長度
     st.session_state.is_fetching = False
     if not st.session_state.summaries:
         st.session_state.debug_log.append(f"手動抓取無總結: 分類={cat_id}, 可能無符合條件帖子")
@@ -462,8 +470,12 @@ def main():
         submit_chat = st.form_submit_button("提交問題")
     
     if submit_chat and user_input:
+        # 清空舊狀態
         st.session_state.chat_history = []
         st.session_state.metadata = []
+        st.session_state.char_counts = {}
+        st.session_state.summaries = {}
+        st.session_state.debug_log.append(f"開始新提問: 問題='{user_input}', 分類={chat_cat_id}")
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
         with st.spinner("正在分析 LIHKG 帖子..."):
