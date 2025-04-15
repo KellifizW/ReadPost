@@ -18,6 +18,7 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 8000
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
+# 初始化 session state
 if "lihkg_data" not in st.session_state:
     st.session_state.lihkg_data = {}
 if "summaries" not in st.session_state:
@@ -36,11 +37,13 @@ if "last_user_query" not in st.session_state:
     st.session_state.last_user_query = ""
 
 def clean_html(text):
+    """清理 HTML 標籤與多餘空白"""
     clean = re.compile(r'<[^>]+>')
     text = clean.sub('', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def try_parse_date(date_str):
+    """嘗試解析日期，支援 ISO 與 timestamp 格式"""
     try:
         return datetime.fromisoformat(date_str)
     except (ValueError, TypeError):
@@ -50,6 +53,7 @@ def try_parse_date(date_str):
             return None
 
 def chunk_text(texts, max_chars=3000):
+    """將文本分塊，限制每塊最大字元數"""
     chunks = []
     current_chunk = ""
     for text in texts:
@@ -64,6 +68,7 @@ def chunk_text(texts, max_chars=3000):
     return chunks
 
 async def async_request(method, url, headers=None, json=None, retries=3):
+    """異步 HTTP 請求，支援重試"""
     for attempt in range(retries + 1):
         try:
             loop = asyncio.get_event_loop()
@@ -82,6 +87,7 @@ async def async_request(method, url, headers=None, json=None, retries=3):
             raise e
 
 async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
+    """抓取 LIHKG 帖子列表"""
     all_items = []
     tasks = []
     
@@ -144,6 +150,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
     return all_items
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
+    """抓取單個帖子內容"""
     replies = []
     page = 1
     per_page = 50
@@ -186,6 +193,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     return replies[:max_replies]
 
 def build_post_context(post, replies):
+    """構建帖子上下文，包含標題與回覆"""
     context = f"標題: {post['title']}\n"
     max_chars = 7000
     if replies:
@@ -202,6 +210,7 @@ def build_post_context(post, replies):
     return context
 
 async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
+    """調用 Grok 3 API 生成總結"""
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -253,6 +262,7 @@ async def summarize_with_grok3(text, call_id=None, recursion_depth=0):
         return f"錯誤: {str(e)}"
 
 async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
+    """第一階段：分析元數據，生成討論區廣泛意見"""
     logger.info(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
@@ -291,12 +301,12 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
 以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 且 Unix Timestamp ≥ {today_timestamp} 的帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
 {metadata_text}
 
-以繁體中文回答，基於元數據（標題與回覆數），禁止生成無關內容。執行以下步驟：
+以繁體中文回答，基於元數據（標題與回覆數），禁止生成無關內容，直接回答問題，聚焦討論區的廣泛意見。執行以下步驟：
 1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。若含「股票」「市場」「投資」「態度」「情緒」，視為財經情緒問題。
-2. 若為財經情緒問題（如「市場態度」）：
-   - 從標題推斷網民態度（「淡友」「跌」=悲觀；「定期存款」「儲蓄」=謹慎；「認真討論」「分享」=中性或分歧）。
+2. 若為財經情緒問題（如「市場情緒」）：
+   - 從標題推斷網民情緒（「淡友」「跌」=悲觀；「定期存款」「儲蓄」=謹慎；「認真討論」「分享」=中性或分歧）。
    - 優先分析回覆數最高的帖子，提取關鍵詞（如「美股」「淡友」）反映討論焦點。
-   - 總結網民對股票市場的態度（100-150 字），說明樂觀、悲觀、中性或分歧，並註明依據。
+   - 總結網民對財經主題的整體情緒（100-150 字），說明是否樂觀、悲觀、中性或分歧，並註明依據（如標題關鍵詞）。
 3. 若為其他主題：
    - 根據分類（cat_id）適配語氣：
      - 吹水台（cat_id=1）：輕鬆，找搞笑、荒誕話題。
@@ -306,13 +316,13 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
      - 財經台（cat_id=15）：偏市場、投資。
      - 成人台（cat_id=29）：適度處理敏感話題。
      - 創意台（cat_id=31）：注重趣味、創意。
-   - 總結網民觀點（100-150 字），回答問題，提取標題關鍵詞。
-4. 若標題不足以回答，註明：「需進一步分析帖子內容以確認詳情。」
-5. 若無符合帖子，說明：「今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看熱門台（cat_id=2）。」
+   - 總結網民整體觀點（100-150 字），提取標題關鍵詞，直接回答問題。
+4. 若標題不足以詳細回答，註明：「可進一步分析帖子內容以提供更多細節。」
+5. 若無相關帖子，說明：「今日 {cat_name} 無符合問題的帖子，可能是討論量低，建議查看熱門台（cat_id=2）。」
 
 輸出格式：
-- 符合帖子：列出最多 3 個（帖子 ID: <數字>, 標題: <標題>）
-- 總結：100-150 字，回答問題，反映網民觀點，說明依據（如標題關鍵詞）。
+- 相關帖子：列出最多 3 個（帖子 ID: <數字>, 標題: <標題>），反映問題主題。
+- 總結：100-150 字，直接回答問題，概述網民觀點，說明依據（如標題關鍵詞）。
 """
     
     call_id = f"metadata_{time.time()}"
@@ -323,11 +333,12 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     return response
 
 async def select_relevant_threads(analysis_result, max_threads=3):
+    """從元數據分析中提取相關帖子 ID"""
     prompt = f"""
-以下是 LIHKG 帖子分析：
+以下是 LIHKG 帖子元數據分析結果：
 {analysis_result}
 
-僅返回帖子 ID（每行一個數字），選擇回覆數 ≥125 且今日（2025-04-15）內的帖子，最多 {max_threads} 個。若無符合，返回空列表。
+僅返回帖子 ID（每行一個數字），選擇與問題最相關、回覆數 ≥125 且今日（2025-04-15）內的帖子，最多 {max_threads} 個。若無符合，返回空列表。
 """
     
     call_id = f"select_{time.time()}"
@@ -344,6 +355,7 @@ async def select_relevant_threads(analysis_result, max_threads=3):
     return selected_ids[:max_threads]
 
 async def summarize_thread(thread_id, cat_id=None):
+    """第二階段：總結單個帖子內容"""
     post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
         logger.error(f"找不到帖子: thread_id={thread_id}")
@@ -373,9 +385,9 @@ async def summarize_thread(thread_id, cat_id=None):
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
 1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
-2. 若為財經情緒問題（如「市場態度」）：
-   - 提取網民對股票市場的觀點（樂觀、悲觀、中性、分歧）。
-   - 說明關鍵討論焦點（如美股、港股、投資策略）。
+2. 若為財經情緒問題（如「市場情緒」）：
+   - 提取網民對財經主題的具體觀點（樂觀、悲觀、中性、分歧）。
+   - 說明討論焦點（如美股、港股、投資策略）。
    - 註明依據（如回覆中的情緒用詞）。
 3. 若為其他主題：
    - 根據分類適配：
@@ -409,9 +421,9 @@ async def summarize_thread(thread_id, cat_id=None):
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
 1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
-2. 若為財經情緒問題（如「市場態度」）：
-   - 提取網民對股票市場的觀點（樂觀、悲觀、中性、分歧）。
-   - 說明關鍵討論焦點（如美股、港股、投資策略）。
+2. 若為財經情緒問題（如「市場情緒」）：
+   - 提取網民對財經主題的具體觀點（樂觀、悲觀、中性、分歧）。
+   - 說明討論焦點（如美股、港股、投資策略）。
    - 註明依據（如回覆中的情緒用詞）。
 3. 若為其他主題：
    - 根據分類適配：
@@ -446,6 +458,7 @@ async def summarize_thread(thread_id, cat_id=None):
     return final_summary
 
 async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
+    """手動抓取並總結帖子"""
     st.session_state.is_fetching = True
     st.session_state.lihkg_data = {}
     st.session_state.summaries = {}
@@ -475,6 +488,7 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
     st.rerun()
 
 def main():
+    """主函數，實現兩階段邏輯"""
     st.title("LIHKG 總結聊天機器人")
     st.header("與 Grok 3 聊天")
     cat_options = [
@@ -493,10 +507,11 @@ def main():
         key="chat_cat_id"
     )
     with st.form("chat_form", clear_on_submit=True):
-        user_input = st.text_input("輸入問題（如「今日有咩新聞?」）：", key="chat_input")
+        user_input = st.text_input("輸入問題（如『今日有咩新聞?』）：", key="chat_input")
         submit_chat = st.form_submit_button("提交問題")
     
     if submit_chat and user_input:
+        # 初始化狀態
         st.session_state.chat_history = []
         st.session_state.metadata = []
         st.session_state.char_counts = {}
@@ -504,26 +519,32 @@ def main():
         logger.info(f"開始新提問: 問題='{user_input}', 分類={chat_cat_id}")
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
-        with st.spinner("正在分析 LIHKG 帖子..."):
-            analysis_result = asyncio.run(analyze_lihkg_metadata(user_query=user_input, cat_id=chat_cat_id))
-        st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
+        # 第一階段：元數據分析，直接回答問題
+        with st.spinner("正在分析 LIHKG 討論區意見..."):
+            try:
+                analysis_result = asyncio.run(analyze_lihkg_metadata(user_query=user_input, cat_id=chat_cat_id))
+                st.session_state.chat_history.append({"role": "assistant", "content": analysis_result})
+            except Exception as e:
+                logger.error(f"元數據分析失敗: 錯誤={str(e)}")
+                st.error("分析失敗，請稍後重試")
+                return
         
-        with st.spinner("正在選擇並總結帖子..."):
-            thread_ids = asyncio.run(select_relevant_threads(analysis_result))
-            if thread_ids:
-                for thread_id in thread_ids:
-                    summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_cat_id))
-                    if not summary.startswith("錯誤:"):
-                        st.session_state.summaries[thread_id] = summary
-            if len(st.session_state.summaries) < 3 and thread_ids:
-                logger.info("總結數量不足，重新選擇帖子")
+        # 第二階段：提取相關帖子並深入總結
+        with st.spinner("正在深入總結相關帖子..."):
+            try:
                 thread_ids = asyncio.run(select_relevant_threads(analysis_result))
-                for thread_id in thread_ids:
-                    if thread_id not in st.session_state.summaries:
+                if thread_ids:
+                    for thread_id in thread_ids:
                         summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_cat_id))
                         if not summary.startswith("錯誤:"):
                             st.session_state.summaries[thread_id] = summary
+                else:
+                    logger.info("無相關帖子可深入總結")
+            except Exception as e:
+                logger.error(f"帖子總結失敗: 錯誤={str(e)}")
+                st.warning("無法生成帖子總結，可能無相關內容")
     
+    # 顯示聊天記錄（第一階段結果）
     if st.session_state.chat_history:
         st.subheader("聊天記錄")
         for chat in st.session_state.chat_history:
@@ -531,20 +552,24 @@ def main():
             st.markdown(f"**{role}**：{chat['content']}")
             st.write("---")
     
-    st.header("帖子總結")
+    # 顯示帖子總結（第二階段結果）
+    st.header("帖子深入總結")
     if st.session_state.summaries:
         for thread_id, summary in st.session_state.summaries.items():
-            post = st.session_state.lihkg_data[thread_id]["post"]
-            st.write(f"**標題**: {post['title']} (ID: {thread_id})")
+            post = st.session_state.lihkg_data.get(thread_id, {}).get("post", {})
+            title = post.get("title", "未知標題")
+            no_of_reply = post.get("no_of_reply", 0)
+            st.write(f"**標題**: {title} (ID: {thread_id})")
             st.write(f"**總結**: {summary}")
-            st.write(f"**回覆數量**：{post['no_of_reply']} 條")
+            st.write(f"**回覆數量**：{no_of_reply} 條")
             chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(10)]
             final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
             st.write(f"**處理字元數**：分塊總結={sum(chunk_counts)} 字元，最終總結={final_count} 字元")
             st.write("---")
     else:
-        st.info("尚無總結內容，請提交問題或手動抓取帖子。")
+        st.info("尚無深入總結內容，可能無相關帖子或分析已涵蓋問題。")
 
+    # 手動抓取功能
     st.header("手動抓取 LIHKG 帖子")
     with st.form("manual_fetch_form"):
         cat_id = st.text_input("分類 ID (如 5 為時事台)", "5")
@@ -552,9 +577,16 @@ def main():
         max_pages = st.number_input("最大頁數", min_value=1, value=5)
         submit_fetch = st.form_submit_button("抓取並總結")
     
-    if submit_fetch:
-        with st.spinner("正在抓取並總結..."):
-            asyncio.run(manual_fetch_and_summarize(int(cat_id), start_page, max_pages))
+    if submit_fetch and cat_id:
+        try:
+            cat_id = int(cat_id)
+            with st.spinner("正在抓取並總結..."):
+                asyncio.run(manual_fetch_and_summarize(cat_id, start_page, max_pages))
+        except ValueError:
+            st.error("請輸入有效的分類 ID（數字）")
+        except Exception as e:
+            logger.error(f"手動抓取失敗: 錯誤={str(e)}")
+            st.error("抓取失敗，請檢查輸入或稍後重試")
 
 if __name__ == "__main__":
     main()
