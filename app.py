@@ -185,37 +185,6 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     
     return replies[:max_replies]
 
-async def get_lihkg_thread_rating(thread_id, cat_id=None):
-    url = f"{LIHKG_BASE_URL}thread/{thread_id}"
-    timestamp = int(time.time())
-    digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
-    
-    headers = {
-        "X-LI-DEVICE": LIHKG_DEVICE_ID,
-        "X-LI-DEVICE-TYPE": "android",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "X-LI-REQUEST-TIME": str(timestamp),
-        "X-LI-DIGEST": digest,
-        "Cookie": LIHKG_COOKIE,
-        "orginal": "https://lihkg.com",
-        "referer": f"https://lihkg.com/thread/{thread_id}",
-        "accept": "application/json",
-    }
-    
-    try:
-        response = await async_request("get", url, headers=headers)
-        logger.info(f"LIHKG 帖子評分: thread_id={thread_id}")
-        logger.debug(f"原始回應: {json.dumps(response, ensure_ascii=False)}")
-        thread_data = response.get("response", {}).get("thread", {})
-        like_count = int(thread_data.get("like_count", "0")) if thread_data.get("like_count") else 0
-        dislike_count = int(thread_data.get("dislike_count", "0")) if thread_data.get("dislike_count") else 0
-        if like_count == 0 and dislike_count == 0:
-            logger.warning(f"正負評為 0，可能缺少資料: thread_id={thread_id}")
-        return like_count, dislike_count
-    except Exception as e:
-        logger.error(f"LIHKG 帖子評分錯誤: thread_id={thread_id}, 錯誤: {str(e)}")
-        return 0, 0
-
 def build_post_context(post, replies):
     context = f"標題: {post['title']}\n"
     max_chars = 7000
@@ -315,10 +284,17 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
     
     today_start = datetime.now(HONG_KONG_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today_start.timestamp())
+    
+    # 動態調整過濾條件：吹水台放寬回覆數門檻，移除今日限制
+    min_replies = 50 if cat_id == 1 else 125
+    time_filter = False if cat_id == 1 else True  # 吹水台不限制今日
+    
     filtered_items = [
         item for item in items
-        if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
+        if item.get("no_of_reply", 0) >= min_replies and (not time_filter or int(item.get("last_reply_time", 0)) >= today_timestamp)
     ]
+    logger.info(f"過濾後帖子數: cat_id={cat_id}, 符合條件數={len(filtered_items)}")
+    
     sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)
     sorted_items = sorted_items[:max_metadata]
     st.session_state.metadata = [
@@ -326,7 +302,9 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
             "thread_id": item["thread_id"],
             "title": item["title"],
             "no_of_reply": item.get("no_of_reply", 0),
-            "last_reply_time": item.get("last_reply_time", "")
+            "last_reply_time": item.get("last_reply_time", ""),
+            "like_count": int(item.get("like_count", "0")) if item.get("like_count") else 0,
+            "dislike_count": int(item.get("dislike_count", "0")) if item.get("dislike_count") else 0,
         }
         for item in sorted_items
     ]
@@ -345,7 +323,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 且 Unix Timestamp ≥ {today_timestamp} 的前 {max_metadata} 篇帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
+以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥{min_replies} 的前 {max_metadata} 篇帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
 {metadata_text}
 
 以繁體中文回答，基於所有帖子標題，綜合分析討論區的廣泛意見，直接回答問題，禁止生成無關內容。執行以下步驟：
@@ -381,7 +359,7 @@ async def select_relevant_threads(user_query, max_threads=3):
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 的帖子元數據：
+以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥50 的帖子元數據：
 {metadata_text}
 
 基於標題，選擇與問題最相關的帖子 ID（每行一個數字），最多 {max_threads} 個。僅返回 ID，無其他內容。若無相關帖子，返回空列表。
@@ -410,7 +388,8 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
         return
     
     replies = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
-    like_count, dislike_count = await get_lihkg_thread_rating(thread_id, cat_id=cat_id)
+    like_count = post.get("like_count", 0)
+    dislike_count = post.get("dislike_count", 0)
     st.session_state.lihkg_data[thread_id] = {"post": post, "replies": replies}
     
     if len(replies) < 50:
