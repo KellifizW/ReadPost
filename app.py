@@ -19,7 +19,6 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 8000
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 初始化 session state
 if "lihkg_data" not in st.session_state:
     st.session_state.lihkg_data = {}
 if "messages" not in st.session_state:
@@ -40,13 +39,11 @@ if "last_cat_id" not in st.session_state:
     st.session_state.last_cat_id = 1
 
 def clean_html(text):
-    """清理 HTML 標籤與多餘空白"""
     clean = re.compile(r'<[^>]+>')
     text = clean.sub('', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def try_parse_date(date_str):
-    """嘗試解析日期，支援 ISO 與 timestamp 格式"""
     try:
         return datetime.fromisoformat(date_str)
     except (ValueError, TypeError):
@@ -56,7 +53,6 @@ def try_parse_date(date_str):
             return None
 
 def chunk_text(texts, max_chars=3000):
-    """將文本分塊，限制每塊最大字元數"""
     chunks = []
     current_chunk = ""
     for text in texts:
@@ -71,10 +67,10 @@ def chunk_text(texts, max_chars=3000):
     return chunks
 
 async def async_request(method, url, headers=None, json=None, retries=3, stream=False):
-    """異步 HTTP 請求，支援重試與流式回應"""
+    connector = aiohttp.TCPConnector(limit=10)  # 限制連線數
     for attempt in range(retries):
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=connector) as session:
                 if method == "get":
                     async with session.get(url, headers=headers, timeout=60) as response:
                         response.raise_for_status()
@@ -88,13 +84,12 @@ async def async_request(method, url, headers=None, json=None, retries=3, stream=
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if attempt < retries - 1:
                 logger.warning(f"API 請求失敗，第 {attempt+1} 次重試: {url}, 錯誤: {str(e)}")
-                await asyncio.sleep(2 ** attempt)  # 指數退避
+                await asyncio.sleep(2 ** attempt)
                 continue
             logger.error(f"API 請求失敗: {url}, 錯誤: {str(e)}")
             raise e
 
 async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
-    """抓取 LIHKG 帖子列表"""
     all_items = []
     tasks = []
     
@@ -153,7 +148,6 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
     return all_items
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
-    """抓取單個帖子內容"""
     replies = []
     page = 1
     per_page = 50
@@ -192,7 +186,6 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     return replies[:max_replies]
 
 def build_post_context(post, replies):
-    """構建帖子上下文，包含標題與回覆"""
     context = f"標題: {post['title']}\n"
     max_chars = 7000
     if replies:
@@ -209,7 +202,6 @@ def build_post_context(post, replies):
     return context
 
 async def stream_grok3_response(text: str, call_id: str = None, recursion_depth: int = 0, retries: int = 3) -> AsyncGenerator[str, None]:
-    """調用 Grok 3 API，支援流式回應與重試"""
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -256,34 +248,36 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
     
     for attempt in range(retries):
         try:
-            response = await async_request("post", GROK3_API_URL, headers=headers, json=payload, stream=True)
-            async for line in response.content:
-                if line:
-                    line_str = line.decode('utf-8').strip()
-                    if line_str.startswith("data: "):
-                        data = line_str[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if content:
-                                yield content
-                        except json.JSONDecodeError:
-                            logger.warning(f"JSON 解析失敗: call_id={call_id}, 數據={line_str}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
+                    response.raise_for_status()
+                    async for line in response.content:
+                        if not line or line.isspace():
                             continue
+                        line_str = line.decode('utf-8').strip()
+                        if line_str == "data: [DONE]":
+                            break
+                        if line_str.startswith("data: "):
+                            data = line_str[6:]
+                            try:
+                                chunk = json.loads(data)
+                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    yield content
+                            except json.JSONDecodeError:
+                                logger.warning(f"JSON 解析失敗: call_id={call_id}, 數據={line_str}")
+                                continue
             logger.info(f"Grok 3 流式完成: call_id={call_id}, 輸入字元: {char_count}")
             return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning(f"Grok 3 請求失敗，第 {attempt+1} 次重試: call_id={call_id}, 錯誤: {str(e)}")
             if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)  # 指數退避
+                await asyncio.sleep(2 ** attempt)
                 continue
             logger.error(f"Grok 3 異常: call_id={call_id}, 錯誤: {str(e)}")
-            yield f"錯誤: 連線失敗，請檢查網路或稍後重試（錯誤詳情：{str(e)}）"
+            yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
 
-async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata=100):
-    """第一階段：分析所有帖子標題，生成廣泛意見總結"""
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata=50):
     logger.info(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
@@ -295,7 +289,6 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
         if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
     ]
     sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)
-    # 限制元數據數量，減少提示長度
     sorted_items = sorted_items[:max_metadata]
     st.session_state.metadata = [
         {
@@ -310,7 +303,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
     if not st.session_state.metadata:
         logger.warning(f"無有效帖子: 分類={cat_id}")
         cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
-        return f"今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看熱門台（cat_id=2）。"
+        return f"今日 {cat_name} 無符合條件的帖子，建議查看熱門台（cat_id=2）。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -325,13 +318,9 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
 {metadata_text}
 
 以繁體中文回答，基於所有帖子標題，綜合分析討論區的廣泛意見，直接回答問題，禁止生成無關內容。執行以下步驟：
-1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。若含「股票」「市場」「投資」「態度」「情緒」，視為財經情緒問題。
-2. 若為財經情緒問題（如「市場情緒」）：
-   - 分析所有標題，推斷網民整體情緒（「淡友」「跌」=悲觀；「定期存款」「儲蓄」=謹慎；「認真討論」「分享」=中性或分歧）。
-   - 提取常見關鍵詞（如「美股」「淡友」），反映討論趨勢。
-   - 總結網民對財經主題的整體情緒（100-150 字），說明是否樂觀、悲觀、中性或分歧，並註明依據（如標題中的情緒線索）。
-3. 若為其他主題：
-   - 根據分類（cat_id）適配語氣：
+1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。
+2. 若為其他主題：
+   - 根據分類適配語氣：
      - 吹水台（cat_id=1）：輕鬆，提取搞笑、荒誕話題。
      - 熱門台（cat_id=2）：聚焦高熱度討論。
      - 時事台（cat_id=5）：關注爭議、事件。
@@ -340,8 +329,8 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
      - 成人台（cat_id=29）：適度處理敏感話題。
      - 創意台（cat_id=31）：注重趣味、創意。
    - 總結網民整體觀點（100-150 字），提取標題關鍵詞，直接回答問題。
-4. 若標題不足以詳細回答，註明：「可進一步分析帖子內容以提供補充細節。」
-5. 若無相關帖子，說明：「今日 {cat_name} 無符合問題的帖子，建議查看熱門台（cat_id=2）。」
+3. 若標題不足以詳細回答，註明：「可進一步分析帖子內容以提供補充細節。」
+4. 若無相關帖子，說明：「今日 {cat_name} 無符合問題的帖子，建議查看熱門台（cat_id=2）。」
 
 輸出格式：
 - 總結：100-150 字，直接回答問題，概述網民整體觀點，說明依據（如標題關鍵詞）。
@@ -349,7 +338,6 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
     return prompt
 
 async def select_relevant_threads(user_query, max_threads=3):
-    """第二階段：從元數據中選擇與問題最相關的帖子 ID"""
     if not st.session_state.metadata:
         logger.warning("無元數據可選擇帖子")
         return []
@@ -384,7 +372,6 @@ async def select_relevant_threads(user_query, max_threads=3):
     return selected_ids[:max_threads]
 
 async def summarize_thread(thread_id, cat_id=None):
-    """第二階段：總結單個帖子內容，作為補充"""
     post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
         logger.error(f"找不到帖子: thread_id={thread_id}")
@@ -412,25 +399,17 @@ async def summarize_thread(thread_id, cat_id=None):
 {chunk}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
-2. 若為財經情緒問題（如「市場情緒」）：
-   - 提取網民對財經主題的具體觀點（樂觀、悲觀、中性、分歧）。
-   - 說明討論焦點（如美股、港股、投資策略）。
-   - 註明依據（如回覆中的情緒用詞）。
-3. 若為其他主題：
-   - 根據分類適配：
-     - 吹水台：提取搞笑、輕鬆觀點。
-     - 熱門台：反映熱門焦點。
-     - 時事台：聚焦爭議或事件。
-     - 財經台：分析市場情緒。
-     - 其他：適配語氣與主題。
-   - 總結網民觀點，回答問題。
-4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
-5. 若數據不足，返回：「內容不足，無法生成總結。」
+1. 識別問題意圖（如搞笑、爭議、時事）。
+2. 總結網民觀點，回答問題，適配分類語氣：
+   - 吹水台：提取搞笑、輕鬆觀點。
+   - 熱門台：反映熱門焦點。
+   - 其他：適配主題。
+3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+4. 若數據不足，返回：「內容不足，無法生成總結。」
 
 輸出格式：
 - 標題：<標題>
-- 總結：100-200 字，作為補充細節，反映網民觀點，說明依據。
+- 總結：100-200 字，反映網民觀點，說明依據。
 """
         summary = ""
         async for chunk in stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"):
@@ -449,25 +428,17 @@ async def summarize_thread(thread_id, cat_id=None):
 {'\n'.join(chunk_summaries)}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
-2. 若為財經情緒問題（如「市場情緒」）：
-   - 提取網民對財經主題的具體觀點（樂觀、悲觀、中性、分歧）。
-   - 說明討論焦點（如美股、港股、投資策略）。
-   - 註明依據（如回覆中的情緒用詞）。
-3. 若為其他主題：
-   - 根據分類適配：
-     - 吹水台：提取搞笑、輕鬆觀點。
-     - 熱門台：反映熱門焦點。
-     - 時事台：聚焦爭議或事件。
-     - 財經台：分析市場情緒。
-     - 其他：適配語氣與主題。
-   - 總結網民觀點，回答問題。
-4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
-5. 若數據不足，返回：「內容不足，無法生成總結。」
+1. 識別問題意圖（如搞笑、爭議、時事）。
+2. 總結網民觀點，回答問題，適配分類語氣：
+   - 吹水台：提取搞笑、輕鬆觀點。
+   - 熱門台：反映熱門焦點。
+   - 其他：適配主題。
+3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+4. 若數據不足，返回：「內容不足，無法生成總結。」
 
 輸出格式：
 - 標題：<標題>
-- 總結：{word_range} 字，作為補充細節，反映網民觀點，說明依據。
+- 總結：{word_range} 字，反映網民觀點，說明依據。
 """
     
     if len(final_prompt) > 1000:
@@ -491,7 +462,6 @@ async def summarize_thread(thread_id, cat_id=None):
     return final_summary
 
 def async_to_sync_stream(async_gen):
-    """將異步生成器轉換為同步生成器，供 st.write_stream 使用"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -510,7 +480,6 @@ def async_to_sync_stream(async_gen):
     loop.close()
 
 def chat_page():
-    """聊天頁面邏輯，支援流式顯示"""
     st.title("LIHKG 討論區分析")
     
     cat_id_map = {
@@ -535,7 +504,7 @@ def chat_page():
         st.session_state.last_cat_id = cat_id_map[selected_cat]
     
     with col1:
-        user_query = st.chat_input("輸入問題（例如：財經台的市場情緒如何？）或回應（『需要』、『ID 數字』、『不需要』）")
+        user_query = st.chat_input("輸入問題（例如：吹水台有哪些搞笑話題？）或回應（『需要』、『ID 數字』、『不需要』）")
     
     chat_container = st.container()
     
@@ -553,7 +522,6 @@ def chat_page():
                 st.markdown(user_query)
             
             if st.session_state.waiting_for_summary:
-                # 處理第二階段回應
                 prompt_lower = user_query.lower().strip()
                 
                 if prompt_lower == "不需要":
@@ -635,7 +603,6 @@ def chat_page():
                     logger.warning(f"無效回應: {user_query}")
             
             else:
-                # 第一階段：新問題
                 st.session_state.metadata = []
                 st.session_state.char_counts = {}
                 st.session_state.waiting_for_summary = False
@@ -664,7 +631,6 @@ def chat_page():
         st.session_state.is_fetching = False
 
 def main():
-    """主函數，控制頁面切換"""
     st.sidebar.title("導航")
     page = st.sidebar.selectbox("選擇頁面", ["聊天介面"])
     
