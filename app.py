@@ -67,7 +67,7 @@ def chunk_text(texts, max_chars=3000):
     return chunks
 
 async def async_request(method, url, headers=None, json=None, retries=3, stream=False):
-    connector = aiohttp.TCPConnector(limit=10)  # 限制連線數
+    connector = aiohttp.TCPConnector(limit=10)
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession(connector=connector) as session:
@@ -371,18 +371,20 @@ async def select_relevant_threads(user_query, max_threads=3):
     
     return selected_ids[:max_threads]
 
-async def summarize_thread(thread_id, cat_id=None):
+async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
     post = next((item for item in st.session_state.metadata if str(item["thread_id"]) == str(thread_id)), None)
     if not post:
         logger.error(f"找不到帖子: thread_id={thread_id}")
-        return f"錯誤: 找不到帖子 {thread_id}"
+        yield f"錯誤: 找不到帖子 {thread_id}"
+        return
     
     replies = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
     st.session_state.lihkg_data[thread_id] = {"post": post, "replies": replies}
     
     if len(replies) < 50:
         logger.info(f"帖子 {thread_id} 回覆數={len(replies)}，生成簡短總結")
-        return f"標題: {post['title']}\n總結: 討論參與度低，網民回應不足，話題未見熱烈討論。（回覆數: {len(replies)}）"
+        yield f"標題: {post['title']}\n總結: 討論參與度低，網民回應不足，話題未見熱烈討論。（回覆數: {len(replies)}）"
+        return
     
     context = build_post_context(post, replies)
     chunks = chunk_text([context], max_chars=3000)
@@ -411,13 +413,13 @@ async def summarize_thread(thread_id, cat_id=None):
 - 標題：<標題>
 - 總結：100-200 字，反映網民觀點，說明依據。
 """
-        summary = ""
         async for chunk in stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"):
-            summary += chunk
-        if summary.startswith("錯誤:"):
-            logger.error(f"帖子 {thread_id} 分塊 {i} 總結失敗: {summary}")
-            return summary
-        chunk_summaries.append(summary)
+            if chunk.startswith("錯誤:"):
+                logger.error(f"帖子 {thread_id} 分塊 {i} 總結失敗: {chunk}")
+                yield chunk
+                return
+            chunk_summaries.append(chunk)
+            yield chunk
     
     reply_count = len(replies)
     word_range = "300-400" if reply_count >= 100 else "100-200"
@@ -425,7 +427,7 @@ async def summarize_thread(thread_id, cat_id=None):
 請將帖子（ID: {thread_id}）的分塊總結合併為 {word_range} 字，僅基於以下內容，聚焦標題與回覆，作為問題的補充細節，禁止引入無關話題。以繁體中文回覆。
 
 分塊總結：
-{'\n'.join(chunk_summaries)}
+{''.join(chunk_summaries)}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
 1. 識別問題意圖（如搞笑、爭議、時事）。
@@ -443,23 +445,20 @@ async def summarize_thread(thread_id, cat_id=None):
     
     if len(final_prompt) > 1000:
         chunks = chunk_text([final_prompt], max_chars=500)
-        final_summaries = []
         for i, chunk in enumerate(chunks):
-            summary = ""
             async for sub_chunk in stream_grok3_response(chunk, call_id=f"{thread_id}_final_sub_{i}"):
-                summary += sub_chunk
-            final_summaries.append(summary)
-        final_summary = "\n".join(final_summaries)
+                if sub_chunk.startswith("錯誤:"):
+                    logger.error(f"帖子 {thread_id} 最終分塊 {i} 總結失敗: {sub_chunk}")
+                    yield sub_chunk
+                    return
+                yield sub_chunk
     else:
-        final_summary = ""
         async for chunk in stream_grok3_response(final_prompt, call_id=f"{thread_id}_final"):
-            final_summary += chunk
-    
-    if final_summary.startswith("錯誤:"):
-        logger.error(f"帖子 {thread_id} 最終總結失敗: {final_summary}")
-        return "\n".join(chunk_summaries) or "錯誤: 總結失敗"
-    
-    return final_summary
+            if chunk.startswith("錯誤:"):
+                logger.error(f"帖子 {thread_id} 最終總結失敗: {chunk}")
+                yield chunk
+                return
+            yield chunk
 
 def async_to_sync_stream(async_gen):
     loop = asyncio.new_event_loop()
@@ -540,11 +539,10 @@ def chat_page():
                                 summaries = []
                                 for thread_id in thread_ids:
                                     with st.chat_message("assistant"):
-                                        placeholder = st.empty()
-                                        summary = asyncio.run(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id))
-                                        if not summary.startswith("錯誤:"):
-                                            summaries.append(summary)
-                                            placeholder.markdown(summary)
+                                        full_summary = st.write_stream(async_to_sync_stream(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id)))
+                                        if not full_summary.startswith("錯誤:"):
+                                            summaries.append(full_summary)
+                                            st.session_state.messages.append({"role": "assistant", "content": full_summary})
                                 if summaries:
                                     response = "以上是相關帖子總結。你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
                                 else:
@@ -573,14 +571,13 @@ def chat_page():
                         with st.spinner(f"正在總結帖子 {thread_id}..."):
                             try:
                                 with st.chat_message("assistant"):
-                                    placeholder = st.empty()
-                                    summary = asyncio.run(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id))
-                                    if not summary.startswith("錯誤:"):
-                                        response = f"帖子 {thread_id} 的總結：\n\n{summary}\n\n你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
+                                    full_summary = st.write_stream(async_to_sync_stream(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id)))
+                                    if not full_summary.startswith("錯誤:"):
+                                        response = f"帖子 {thread_id} 的總結：\n\n{full_summary}\n\n你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
                                     else:
-                                        response = f"帖子 {thread_id} 總結失敗：{summary}。你需要嘗試其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
-                                    placeholder.markdown(response)
+                                        response = f"帖子 {thread_id} 總結失敗：{full_summary}。你需要嘗試其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
                                     st.session_state.messages.append({"role": "assistant", "content": response})
+                                    st.markdown(response)
                             except Exception as e:
                                 logger.error(f"帖子 {thread_id} 總結失敗: 錯誤={str(e)}")
                                 response = f"總結失敗：{str(e)}。請重試或提出新問題。"
