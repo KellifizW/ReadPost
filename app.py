@@ -401,10 +401,12 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
 {chunk}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如搞笑、爭議、時事）。
+1. 識別問題意圖（如搞笑、爭議、時事、財經）。
 2. 總結網民觀點，回答問題，適配分類語氣：
    - 吹水台：提取搞笑、輕鬆觀點。
    - 熱門台：反映熱門焦點。
+   - 時事台：聚焦爭議或事件。
+   - 財經台：分析市場情緒。
    - 其他：適配主題。
 3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
 4. 若數據不足，返回：「內容不足，無法生成總結。」
@@ -413,38 +415,39 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
 - 標題：<標題>
 - 總結：100-200 字，反映網民觀點，說明依據。
 """
+        summary = ""
         async for chunk in stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"):
             if chunk.startswith("錯誤:"):
                 logger.error(f"帖子 {thread_id} 分塊 {i} 總結失敗: {chunk}")
                 yield chunk
                 return
-            chunk_summaries.append(chunk)
-            yield chunk
+            summary += chunk
+        chunk_summaries.append(summary)
     
-    reply_count = len(replies)
-    word_range = "300-400" if reply_count >= 100 else "100-200"
     final_prompt = f"""
-請將帖子（ID: {thread_id}）的分塊總結合併為 {word_range} 字，僅基於以下內容，聚焦標題與回覆，作為問題的補充細節，禁止引入無關話題。以繁體中文回覆。
+請將帖子（ID: {thread_id}）的總結合併為 150-200 字，僅基於以下內容，聚焦標題與回覆，作為問題的補充細節，禁止引入無關話題。以繁體中文回覆。
 
 分塊總結：
-{''.join(chunk_summaries)}
+{'\n'.join(chunk_summaries)}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如搞笑、爭議、時事）。
+1. 識別問題意圖（如搞笑、爭議、時事、財經）。
 2. 總結網民觀點，回答問題，適配分類語氣：
    - 吹水台：提取搞笑、輕鬆觀點。
    - 熱門台：反映熱門焦點。
+   - 時事台：聚焦爭議或事件。
+   - 財經台：分析市場情緒。
    - 其他：適配主題。
 3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
 4. 若數據不足，返回：「內容不足，無法生成總結。」
 
 輸出格式：
 - 標題：<標題>
-- 總結：{word_range} 字，反映網民觀點，說明依據。
+- 總結：150-200 字，反映網民觀點，說明依據。
 """
     
-    if len(final_prompt) > 1000:
-        chunks = chunk_text([final_prompt], max_chars=500)
+    if len(final_prompt) > GROK3_TOKEN_LIMIT:
+        chunks = chunk_text([final_prompt], max_chars=3000)
         for i, chunk in enumerate(chunks):
             async for sub_chunk in stream_grok3_response(chunk, call_id=f"{thread_id}_final_sub_{i}"):
                 if sub_chunk.startswith("錯誤:"):
