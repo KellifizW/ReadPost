@@ -76,11 +76,11 @@ async def async_request(method, url, headers=None, json=None, retries=3, stream=
         try:
             async with aiohttp.ClientSession() as session:
                 if method == "get":
-                    async with session.get(url, headers=headers, timeout=30) as response:
+                    async with session.get(url, headers=headers, timeout=60) as response:
                         response.raise_for_status()
                         return await response.json()
                 elif method == "post":
-                    async with session.post(url, headers=headers, json=json, timeout=30) as response:
+                    async with session.post(url, headers=headers, json=json, timeout=60) as response:
                         response.raise_for_status()
                         if stream:
                             return response
@@ -88,7 +88,7 @@ async def async_request(method, url, headers=None, json=None, retries=3, stream=
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if attempt < retries - 1:
                 logger.warning(f"API 請求失敗，第 {attempt+1} 次重試: {url}, 錯誤: {str(e)}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2 ** attempt)  # 指數退避
                 continue
             logger.error(f"API 請求失敗: {url}, 錯誤: {str(e)}")
             raise e
@@ -208,8 +208,8 @@ def build_post_context(post, replies):
                 char_count += len(msg_line)
     return context
 
-async def stream_grok3_response(text: str, call_id: str = None, recursion_depth: int = 0) -> AsyncGenerator[str, None]:
-    """調用 Grok 3 API，支援流式回應"""
+async def stream_grok3_response(text: str, call_id: str = None, recursion_depth: int = 0, retries: int = 3) -> AsyncGenerator[str, None]:
+    """調用 Grok 3 API，支援流式回應與重試"""
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -235,7 +235,7 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
             if len(chunk_prompt) > GROK3_TOKEN_LIMIT:
                 chunk_prompt = chunk_prompt[:GROK3_TOKEN_LIMIT - 100] + "\n[已截斷]"
                 logger.warning(f"分塊超限: call_id={call_id}_sub_{i}, 字元數={len(chunk_prompt)}")
-            async for chunk in stream_grok3_response(chunk_prompt, call_id=f"{call_id}_sub_{i}", recursion_depth=recursion_depth + 1):
+            async for chunk in stream_grok3_response(chunk_prompt, call_id=f"{call_id}_sub_{i}", recursion_depth=recursion_depth + 1, retries=retries):
                 yield chunk
         return
     
@@ -254,29 +254,35 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
         "stream": True
     }
     
-    try:
-        response = await async_request("post", GROK3_API_URL, headers=headers, json=payload, stream=True)
-        async for line in response.content:
-            if line:
-                line_str = line.decode('utf-8').strip()
-                if line_str.startswith("data: "):
-                    data = line_str[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                        if content:
-                            yield content
-                    except json.JSONDecodeError:
-                        logger.warning(f"JSON 解析失敗: call_id={call_id}, 數據={line_str}")
-                        continue
-        logger.info(f"Grok 3 流式完成: call_id={call_id}, 輸入字元: {char_count}")
-    except Exception as e:
-        logger.error(f"Grok 3 異常: call_id={call_id}, 錯誤: {str(e)}")
-        yield f"錯誤: {str(e)}"
+    for attempt in range(retries):
+        try:
+            response = await async_request("post", GROK3_API_URL, headers=headers, json=payload, stream=True)
+            async for line in response.content:
+                if line:
+                    line_str = line.decode('utf-8').strip()
+                    if line_str.startswith("data: "):
+                        data = line_str[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if content:
+                                yield content
+                        except json.JSONDecodeError:
+                            logger.warning(f"JSON 解析失敗: call_id={call_id}, 數據={line_str}")
+                            continue
+            logger.info(f"Grok 3 流式完成: call_id={call_id}, 輸入字元: {char_count}")
+            return
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Grok 3 請求失敗，第 {attempt+1} 次重試: call_id={call_id}, 錯誤: {str(e)}")
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)  # 指數退避
+                continue
+            logger.error(f"Grok 3 異常: call_id={call_id}, 錯誤: {str(e)}")
+            yield f"錯誤: 連線失敗，請檢查網路或稍後重試（錯誤詳情：{str(e)}）"
 
-async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata=100):
     """第一階段：分析所有帖子標題，生成廣泛意見總結"""
     logger.info(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
@@ -289,6 +295,8 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
         if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
     ]
     sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)
+    # 限制元數據數量，減少提示長度
+    sorted_items = sorted_items[:max_metadata]
     st.session_state.metadata = [
         {
             "thread_id": item["thread_id"],
@@ -313,7 +321,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 且 Unix Timestamp ≥ {today_timestamp} 的所有帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
+以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 且 Unix Timestamp ≥ {today_timestamp} 的前 {max_metadata} 篇帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
 {metadata_text}
 
 以繁體中文回答，基於所有帖子標題，綜合分析討論區的廣泛意見，直接回答問題，禁止生成無關內容。執行以下步驟：
@@ -648,7 +656,7 @@ def chat_page():
                             st.session_state.waiting_for_summary = True
                     except Exception as e:
                         logger.error(f"分析失敗: 問題='{user_query}', 錯誤: {str(e)}")
-                        response = f"錯誤: {str(e)}"
+                        response = f"錯誤: {str(e)}。請重試或檢查網路連線。"
                         st.session_state.messages.append({"role": "assistant", "content": response})
                         with st.chat_message("assistant"):
                             st.markdown(response)
