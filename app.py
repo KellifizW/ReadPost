@@ -185,6 +185,34 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     
     return replies[:max_replies]
 
+async def get_lihkg_thread_rating(thread_id, cat_id=None):
+    url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/1?order=reply_time"
+    timestamp = int(time.time())
+    digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+    
+    headers = {
+        "X-LI-DEVICE": LIHKG_DEVICE_ID,
+        "X-LI-DEVICE-TYPE": "android",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-LI-REQUEST-TIME": str(timestamp),
+        "X-LI-DIGEST": digest,
+        "Cookie": LIHKG_COOKIE,
+        "orginal": "https://lihkg.com",
+        "referer": f"https://lihkg.com/thread/{thread_id}",
+        "accept": "application/json",
+    }
+    
+    try:
+        response = await async_request("get", url, headers=headers)
+        logger.info(f"LIHKG 帖子評分: thread_id={thread_id}")
+        thread_data = response.get("response", {}).get("thread", {})
+        like_count = thread_data.get("like_count", 0)
+        dislike_count = thread_data.get("dislike_count", 0)
+        return like_count, dislike_count
+    except Exception as e:
+        logger.warning(f"LIHKG 帖子評分錯誤: thread_id={thread_id}, 錯誤: {str(e)}")
+        return 0, 0
+
 def build_post_context(post, replies):
     context = f"標題: {post['title']}\n"
     max_chars = 7000
@@ -379,11 +407,12 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
         return
     
     replies = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
+    like_count, dislike_count = await get_lihkg_thread_rating(thread_id, cat_id=cat_id)
     st.session_state.lihkg_data[thread_id] = {"post": post, "replies": replies}
     
     if len(replies) < 50:
         logger.info(f"帖子 {thread_id} 回覆數={len(replies)}，生成簡短總結")
-        yield f"標題: {post['title']}\n總結: 討論參與度低，網民回應不足，話題未見熱烈討論。（回覆數: {len(replies)}）"
+        yield f"標題: {post['title']}\n總結: 討論參與度低，網民回應不足，話題未見熱烈討論。（回覆數: {len(replies)}）\n評分: 正評 {like_count}, 負評 {dislike_count}"
         return
     
     context = build_post_context(post, replies)
@@ -444,6 +473,7 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
 輸出格式：
 - 標題：<標題>
 - 總結：150-200 字，反映網民觀點，說明依據。
+- 評分：正評 {like_count}, 負評 {dislike_count}
 """
     
     if len(final_prompt) > GROK3_TOKEN_LIMIT:
