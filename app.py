@@ -513,7 +513,7 @@ def main():
         {"id": 14, "name": "上班台"},
         {"id": 15, "name": "財經台"},
         {"id": 29, "name": "成人台"},
-        {"id": 31, "創意台"},
+        {"id": 31, "name": "創意台"}  # 已修正
     ]
     chat_cat_id = st.selectbox(
         "選擇討論區分類",
