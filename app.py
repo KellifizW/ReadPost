@@ -32,6 +32,8 @@ if "is_fetching" not in st.session_state:
     st.session_state.is_fetching = False
 if "last_call_id" not in st.session_state:
     st.session_state.last_call_id = None
+if "last_user_query" not in st.session_state:
+    st.session_state.last_user_query = ""
 
 def clean_html(text):
     clean = re.compile(r'<[^>]+>')
@@ -275,7 +277,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     if not st.session_state.metadata:
         logger.warning(f"無有效帖子: 分類={cat_id}")
         cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
-        return f"今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看其他分類（如熱門台）。"
+        return f"今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看熱門台（cat_id=2）。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
@@ -290,19 +292,23 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
 {metadata_text}
 
 以繁體中文回答，基於元數據（標題與回覆數），禁止生成無關內容。執行以下步驟：
-1. 解析問題意圖，識別核心主題（如搞笑、爭議、情緒、生活、時事、財經等）。
-2. 根據分類（cat_id）與問題主題：
-   - 吹水台（cat_id=1）：偏輕鬆，優先找搞笑、荒誕話題。
-   - 熱門台（cat_id=2）：聚焦高熱度討論，反映廣泛關注。
-   - 時事台（cat_id=5）：關注爭議、社會事件。
-   - 上班台（cat_id=14）：聚焦職場、生活壓力。
-   - 財經台（cat_id=15）：分析市場情緒、投資話題。
-   - 成人台（cat_id=29）：適度處理敏感話題。
-   - 創意台（cat_id=31）：注重創意、趣味討論。
-3. 從標題提取關鍵詞，推斷網民討論焦點與傾向（如「淡友」=悲觀，「之亂」=爭議）。
-4. 優先分析回覆數最高的帖子，回答問題並總結網民觀點（100-150 字）。
-5. 若標題不足以回答，註明：「需進一步分析帖子內容以確認詳情。」
-6. 若無符合帖子，說明：「今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看其他分類（如熱門台）。」
+1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。若含「股票」「市場」「投資」「態度」「情緒」，視為財經情緒問題。
+2. 若為財經情緒問題（如「市場態度」）：
+   - 從標題推斷網民態度（「淡友」「跌」=悲觀；「定期存款」「儲蓄」=謹慎；「認真討論」「分享」=中性或分歧）。
+   - 優先分析回覆數最高的帖子，提取關鍵詞（如「美股」「淡友」）反映討論焦點。
+   - 總結網民對股票市場的態度（100-150 字），說明樂觀、悲觀、中性或分歧，並註明依據。
+3. 若為其他主題：
+   - 根據分類（cat_id）適配語氣：
+     - 吹水台（cat_id=1）：輕鬆，找搞笑、荒誕話題。
+     - 熱門台（cat_id=2）：聚焦高熱度討論。
+     - 時事台（cat_id=5）：關注爭議、事件。
+     - 上班台（cat_id=14）：聚焦職場、生活。
+     - 財經台（cat_id=15）：偏市場、投資。
+     - 成人台（cat_id=29）：適度處理敏感話題。
+     - 創意台（cat_id=31）：注重趣味、創意。
+   - 總結網民觀點（100-150 字），回答問題，提取標題關鍵詞。
+4. 若標題不足以回答，註明：「需進一步分析帖子內容以確認詳情。」
+5. 若無符合帖子，說明：「今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看熱門台（cat_id=2）。」
 
 輸出格式：
 - 符合帖子：列出最多 3 個（帖子 ID: <數字>, 標題: <標題>）
@@ -366,17 +372,25 @@ async def summarize_thread(thread_id, cat_id=None):
 {chunk}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如搞笑、爭議、情緒、時事、財經）。
-2. 根據分類與意圖：
-   - 吹水台：提取輕鬆、搞笑觀點。
-   - 熱門台：反映熱門焦點。
-   - 時事台：聚焦爭議或事件。
-   - 財經台：分析市場情緒。
-   - 其他分類：適配相應語氣與主題。
-3. 總結網民觀點，回答問題（如「搞笑話題」列舉趣事，「情緒」判斷樂觀/悲觀）。
+1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
+2. 若為財經情緒問題（如「市場態度」）：
+   - 提取網民對股票市場的觀點（樂觀、悲觀、中性、分歧）。
+   - 說明關鍵討論焦點（如美股、港股、投資策略）。
+   - 註明依據（如回覆中的情緒用詞）。
+3. 若為其他主題：
+   - 根據分類適配：
+     - 吹水台：提取搞笑、輕鬆觀點。
+     - 熱門台：反映熱門焦點。
+     - 時事台：聚焦爭議或事件。
+     - 財經台：分析市場情緒。
+     - 其他：適配語氣與主題。
+   - 總結網民觀點，回答問題。
 4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+5. 若數據不足，返回：「內容不足，無法生成總結。」
 
-若數據不足，返回：「內容不足，無法生成總結。」
+輸出格式：
+- 標題：<標題>
+- 總結：100-200 字，回答問題，反映網民觀點，說明依據。
 """,
             call_id=f"{thread_id}_chunk_{i}"
         )
@@ -394,17 +408,25 @@ async def summarize_thread(thread_id, cat_id=None):
 {'\n'.join(chunk_summaries)}
 
 參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
-1. 識別問題意圖（如搞笑、爭議、情緒、時事、財經）。
-2. 根據分類與意圖：
-   - 吹水台：提取輕鬆、搞笑觀點。
-   - 熱門台：反映熱門焦點。
-   - 時事台：聚焦爭議或事件。
-   - 財經台：分析市場情緒。
-   - 其他分類：適配相應語氣與主題。
-3. 總結網民觀點，回答問題（如「搞笑話題」列舉趣事，「情緒」判斷樂觀/悲觀）。
+1. 識別問題意圖（如財經情緒、搞笑、爭議、時事）。
+2. 若為財經情緒問題（如「市場態度」）：
+   - 提取網民對股票市場的觀點（樂觀、悲觀、中性、分歧）。
+   - 說明關鍵討論焦點（如美股、港股、投資策略）。
+   - 註明依據（如回覆中的情緒用詞）。
+3. 若為其他主題：
+   - 根據分類適配：
+     - 吹水台：提取搞笑、輕鬆觀點。
+     - 熱門台：反映熱門焦點。
+     - 時事台：聚焦爭議或事件。
+     - 財經台：分析市場情緒。
+     - 其他：適配語氣與主題。
+   - 總結網民觀點，回答問題。
 4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+5. 若數據不足，返回：「內容不足，無法生成總結。」
 
-若數據不足，返回：「內容不足，無法生成總結。」
+輸出格式：
+- 標題：<標題>
+- 總結：{word_range} 字，回答問題，反映網民觀點，說明依據。
 """
     
     if len(final_prompt) > 1000:
@@ -498,7 +520,7 @@ def main():
                 thread_ids = asyncio.run(select_relevant_threads(analysis_result))
                 for thread_id in thread_ids:
                     if thread_id not in st.session_state.summaries:
-                        summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_id))
+                        summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_cat_id))
                         if not summary.startswith("錯誤:"):
                             st.session_state.summaries[thread_id] = summary
     
@@ -532,7 +554,7 @@ def main():
     
     if submit_fetch:
         with st.spinner("正在抓取並總結..."):
-            asyncio.run(manual_fetch_and_summarize(cat_id, start_page, max_pages))
+            asyncio.run(manual_fetch_and_summarize(int(cat_id), start_page, max_pages))
 
 if __name__ == "__main__":
     main()
