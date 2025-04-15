@@ -21,8 +21,6 @@ HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 # 初始化 session state
 if "lihkg_data" not in st.session_state:
     st.session_state.lihkg_data = {}
-if "summaries" not in st.session_state:
-    st.session_state.summaries = {}
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "char_counts" not in st.session_state:
@@ -475,7 +473,6 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
     """手動抓取並總結帖子"""
     st.session_state.is_fetching = True
     st.session_state.lihkg_data = {}
-    st.session_state.summaries = {}
     logger.info(f"手動抓取: 分類={cat_id}, 頁數={start_page}-{start_page+max_pages-1}")
     
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=start_page, max_pages=max_pages)
@@ -487,6 +484,7 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
     ]
     sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:10]
     
+    summaries = []
     for item in sorted_items:
         thread_id = item["thread_id"]
         replies = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
@@ -494,15 +492,19 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
         
         summary = await summarize_thread(thread_id, cat_id=cat_id)
         if not summary.startswith("錯誤:"):
-            st.session_state.summaries[thread_id] = summary
+            summaries.append(f"帖子 ID: {thread_id}\n{summary}")
     
     st.session_state.is_fetching = False
-    if not st.session_state.summaries:
+    if summaries:
+        st.write("### 抓取結果")
+        for summary in summaries:
+            st.markdown(summary)
+            st.write("---")
+    else:
         st.warning("無總結結果，可能無符合條件的帖子")
-    st.rerun()
 
-def main():
-    """主函數，實現交互式連續對話"""
+def chat_page():
+    """聊天介面頁面"""
     st.title("LIHKG 總結聊天機器人")
     
     # 分類選擇
@@ -513,7 +515,7 @@ def main():
         {"id": 14, "name": "上班台"},
         {"id": 15, "name": "財經台"},
         {"id": 29, "name": "成人台"},
-        {"id": 31, "name": "創意台"}  # 已修正
+        {"id": 31, "name": "創意台"}
     ]
     chat_cat_id = st.selectbox(
         "選擇討論區分類",
@@ -524,21 +526,34 @@ def main():
     
     # 聊天介面
     st.subheader("與 Grok 3 對話")
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+    chat_container = st.container()
     
+    # 顯示歷史對話
+    with chat_container:
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+    
+    # 處理用戶輸入
     if prompt := st.chat_input("輸入問題（如『今日有咩新聞?』）或回應（如『需要』、『ID 1234567』、『不需要』）"):
         logger.info(f"用戶輸入: '{prompt}', 分類={chat_cat_id}, 等待總結={st.session_state.waiting_for_summary}")
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
         
         if st.session_state.waiting_for_summary:
             # 處理第二階段回應
-            st.session_state.messages.append({"role": "user", "content": prompt})
             prompt_lower = prompt.lower().strip()
             
             if prompt_lower == "不需要":
                 st.session_state.waiting_for_summary = False
-                st.session_state.messages.append({"role": "assistant", "content": "好的，已結束深入分析。你可以提出新問題！"})
+                response = "好的，已結束深入分析。你可以提出新問題！"
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        st.markdown(response)
                 logger.info("用戶選擇不需要，結束第二階段")
             
             elif prompt_lower == "需要":
@@ -546,18 +561,35 @@ def main():
                     try:
                         thread_ids = asyncio.run(select_relevant_threads(st.session_state.last_user_query))
                         if thread_ids:
+                            summaries = []
                             for thread_id in thread_ids:
                                 summary = asyncio.run(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id))
                                 if not summary.startswith("錯誤:"):
-                                    st.session_state.summaries[thread_id] = summary
-                            st.session_state.messages.append({"role": "assistant", "content": "已生成相關帖子總結，請查看下方『相關帖子補充總結』。你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"})
+                                    summaries.append(summary)
+                            if summaries:
+                                response = "以下是相關帖子總結：\n\n" + "\n\n---\n\n".join(summaries) + "\n\n你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
+                            else:
+                                response = "無法生成帖子總結，可能數據不足。你需要我嘗試其他分析嗎？（輸入『需要』或『不需要』）"
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                            with chat_container:
+                                with st.chat_message("assistant"):
+                                    st.markdown(response)
                         else:
-                            st.session_state.messages.append({"role": "assistant", "content": "無相關帖子可總結。你需要我嘗試其他分析嗎？（輸入『需要』或『不需要』）"})
+                            response = "無相關帖子可總結。你需要我嘗試其他分析嗎？（輸入『需要』或『不需要』）"
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                            with chat_container:
+                                with st.chat_message("assistant"):
+                                    st.markdown(response)
                             logger.info("無相關帖子可總結")
+                        st.session_state.waiting_for_summary = True
                     except Exception as e:
                         logger.error(f"帖子總結失敗: 錯誤={str(e)}")
-                        st.session_state.messages.append({"role": "assistant", "content": f"總結失敗：{str(e)}。請重試或提出新問題。"})
-                st.session_state.waiting_for_summary = True
+                        response = f"總結失敗：{str(e)}。請重試或提出新問題。"
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                        with chat_container:
+                            with st.chat_message("assistant"):
+                                st.markdown(response)
+                        st.session_state.waiting_for_summary = False
             
             elif re.match(r'^(id\s*)?\d{5,}$', prompt_lower.replace(" ", "")):
                 thread_id = re.search(r'\d{5,}', prompt_lower).group()
@@ -567,29 +599,44 @@ def main():
                         try:
                             summary = asyncio.run(summarize_thread(thread_id, cat_id=st.session_state.last_cat_id))
                             if not summary.startswith("錯誤:"):
-                                st.session_state.summaries[thread_id] = summary
-                                st.session_state.messages.append({"role": "assistant", "content": f"已生成帖子 {thread_id} 的總結，請查看下方『相關帖子補充總結』。你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"})
+                                response = f"帖子 {thread_id} 的總結：\n\n{summary}\n\n你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
                             else:
-                                st.session_state.messages.append({"role": "assistant", "content": f"帖子 {thread_id} 總結失敗：{summary}。你需要嘗試其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"})
+                                response = f"帖子 {thread_id} 總結失敗：{summary}。你需要嘗試其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                            with chat_container:
+                                with st.chat_message("assistant"):
+                                    st.markdown(response)
+                            st.session_state.waiting_for_summary = True
                         except Exception as e:
                             logger.error(f"帖子 {thread_id} 總結失敗: 錯誤={str(e)}")
-                            st.session_state.messages.append({"role": "assistant", "content": f"總結失敗：{str(e)}。請重試或提出新問題。"})
+                            response = f"總結失敗：{str(e)}。請重試或提出新問題。"
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                            with chat_container:
+                                with st.chat_message("assistant"):
+                                    st.markdown(response)
+                            st.session_state.waiting_for_summary = False
                 else:
-                    st.session_state.messages.append({"role": "assistant", "content": f"無效帖子 ID {thread_id}，請確認 ID 是否正確。你需要我自動選擇帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"})
+                    response = f"無效帖子 ID {thread_id}，請確認 ID 是否正確。你需要我自動選擇帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
                     logger.warning(f"無效帖子 ID: {thread_id}")
-                st.session_state.waiting_for_summary = True
+                    st.session_state.waiting_for_summary = True
             
             else:
-                st.session_state.messages.append({"role": "assistant", "content": "請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"})
+                response = "請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        st.markdown(response)
                 logger.warning(f"無效回應: {prompt}")
                 st.session_state.waiting_for_summary = True
         
         else:
             # 第一階段：新問題
-            st.session_state.messages.append({"role": "user", "content": prompt})
             st.session_state.metadata = []
             st.session_state.char_counts = {}
-            st.session_state.summaries = {}
             st.session_state.waiting_for_summary = False
             st.session_state.last_cat_id = chat_cat_id
             
@@ -597,32 +644,28 @@ def main():
                 try:
                     analysis_result = asyncio.run(analyze_lihkg_metadata(user_query=prompt, cat_id=chat_cat_id))
                     st.session_state.messages.append({"role": "assistant", "content": analysis_result})
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.markdown(analysis_result)
                     if not analysis_result.startswith("今日"):
-                        st.session_state.messages.append({"role": "assistant", "content": "你需要我對某個帖子生成更深入的總結嗎？請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"})
+                        response = "你需要我對某個帖子生成更深入的總結嗎？請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                        with chat_container:
+                            with st.chat_message("assistant"):
+                                st.markdown(response)
                         st.session_state.waiting_for_summary = True
                 except Exception as e:
                     logger.error(f"元數據分析失敗: 錯誤={str(e)}")
-                    st.session_state.messages.append({"role": "assistant", "content": f"分析失敗：{str(e)}。請重試或提出新問題。"})
+                    response = f"分析失敗：{str(e)}。請重試或提出新問題。"
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+
+def fetch_page():
+    """手動抓取頁面"""
+    st.title("手動抓取 LIHKG 帖子")
     
-    # 顯示帖子總結
-    st.header("相關帖子補充總結")
-    if st.session_state.summaries:
-        for thread_id, summary in st.session_state.summaries.items():
-            post = st.session_state.lihkg_data.get(thread_id, {}).get("post", {})
-            title = post.get("title", "未知標題")
-            no_of_reply = post.get("no_of_reply", 0)
-            st.write(f"**標題**: {title} (ID: {thread_id})")
-            st.write(f"**總結**: {summary}")
-            st.write(f"**回覆數量**：{no_of_reply} 條")
-            chunk_counts = [st.session_state.char_counts.get(f"{thread_id}_chunk_{i}", 0) for i in range(10)]
-            final_count = st.session_state.char_counts.get(f"{thread_id}_final", 0)
-            st.write(f"**處理字元數**：分塊總結={sum(chunk_counts)} 字元，最終總結={final_count} 字元")
-            st.write("---")
-    else:
-        st.info("無相關帖子補充總結，請在上方輸入『需要』或『ID 數字』以生成總結。")
-    
-    # 手動抓取功能
-    st.header("手動抓取 LIHKG 帖子")
     with st.form("manual_fetch_form"):
         cat_id = st.text_input("分類 ID (如 5 為時事台)", "5")
         start_page = st.number_input("開始頁數", min_value=1, value=1)
@@ -639,6 +682,16 @@ def main():
         except Exception as e:
             logger.error(f"手動抓取失敗: 錯誤={str(e)}")
             st.error("抓取失敗，請檢查輸入或稍後重試")
+
+def main():
+    """主函數，控制頁面切換"""
+    st.sidebar.title("導航")
+    page = st.sidebar.selectbox("選擇頁面", ["聊天介面", "手動抓取"])
+    
+    if page == "聊天介面":
+        chat_page()
+    elif page == "手動抓取":
+        fetch_page()
 
 if __name__ == "__main__":
     main()
