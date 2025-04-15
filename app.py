@@ -104,7 +104,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
             else:
                 url = f"{LIHKG_BASE_URL}{endpoint}?cat_id={cat_id}&sub_cat_id={sub_id}&page={p}&count=60&type=now"
             timestamp = int(time.time())
-            digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+            digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
             
             headers = {
                 "X-LI-DEVICE": LIHKG_DEVICE_ID,
@@ -155,7 +155,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     while len(replies) < max_replies:
         url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/{page}?order=reply_time"
         timestamp = int(time.time())
-        digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+        digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
         
         headers = {
             "X-LI-DEVICE": LIHKG_DEVICE_ID,
@@ -188,7 +188,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
 async def get_lihkg_thread_rating(thread_id, cat_id=None):
     url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/1?order=reply_time"
     timestamp = int(time.time())
-    digest = hashlib.sha1(f"jeams$get${url}${timestamp}".encode()).hexdigest()
+    digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
     
     headers = {
         "X-LI-DEVICE": LIHKG_DEVICE_ID,
@@ -205,12 +205,15 @@ async def get_lihkg_thread_rating(thread_id, cat_id=None):
     try:
         response = await async_request("get", url, headers=headers)
         logger.info(f"LIHKG 帖子評分: thread_id={thread_id}")
+        logger.debug(f"原始回應: {json.dumps(response, ensure_ascii=False)}")
         thread_data = response.get("response", {}).get("thread", {})
-        like_count = thread_data.get("like_count", 0)
-        dislike_count = thread_data.get("dislike_count", 0)
+        like_count = int(thread_data.get("like_count", "0")) if thread_data.get("like_count") else 0
+        dislike_count = int(thread_data.get("dislike_count", "0")) if thread_data.get("dislike_count") else 0
+        if like_count == 0 and dislike_count == 0:
+            logger.warning(f"正負評為 0，可能缺少資料: thread_id={thread_id}")
         return like_count, dislike_count
     except Exception as e:
-        logger.warning(f"LIHKG 帖子評分錯誤: thread_id={thread_id}, 錯誤: {str(e)}")
+        logger.error(f"LIHKG 帖子評分錯誤: thread_id={thread_id}, 錯誤: {str(e)}")
         return 0, 0
 
 def build_post_context(post, replies):
