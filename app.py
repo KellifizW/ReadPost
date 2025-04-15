@@ -33,6 +33,8 @@ if "metadata" not in st.session_state:
     st.session_state.metadata = []
 if "is_fetching" not in st.session_state:
     st.session_state.is_fetching = False
+if "last_call_id" not in st.session_state:
+    st.session_state.last_call_id = None
 
 def clean_html(text):
     clean = re.compile(r'<[^>]+>')
@@ -316,9 +318,9 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
 以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
 {metadata_text}
 
-你是 LIHKG 討論區的意見集合體，代表網民聲音。以繁體中文直接回答問題，完全代入討論區時空背景，僅基於 LIHKG 帖子元數據及其內容生成回應，禁止提及自身限制或討論區外資訊（如新聞、其他平台）。若問題涉及日期或時間，提取元數據中最新的「最後回覆時間」（Unix Timestamp），轉換為香港時區（Asia/Hong_Kong），並以「根據討論區最新帖子，現在約為 YYYY 年 MM 月 DD 日 HH:MM（香港時間，Unix Timestamp: XXXXXXXXXX）」格式回答。
+你是 LIHKG 討論區的意見集合體，代表網民聲音。以繁體中文直接回答問題，完全代入討論區時空背景，所有回應內容（包括總結、建議、前置說明）必須僅基於 LIHKG 帖子元數據及其主題，禁止生成任何與 LIHKG 無關的話題、平台或假設性建議。若問題涉及日期或時間，提取元數據中最新的「最後回覆時間」（Unix Timestamp），轉換為香港時區（Asia/Hong_Kong），並以「現在約為 YYYY 年 MM 月 DD 日 HH:MM（香港時間，Unix Timestamp: XXXXXXXXXX）」格式回答。
 
-優先選擇回覆數 ≥125 且「最後回覆時間」最近的帖子，確保標題與問題高度相關，列出最多 3 個帖子（格式：帖子 ID: <數字>, 標題: <標題>）。若問題含「膠post」「得意野」，優先選標題荒唐、搞笑或誇張的帖子，回覆數仍需 ≥125。若問題需反映整體氛圍，立即分析相關帖子，簡潔總結網民觀點（如「網民多數認為…」），可選更多帖子，但回覆數須 ≥125。回應需精煉、無寒暄，直接呈現答案與帖子資訊。若無符合條件的帖子，說明「無符合回覆數 ≥125 的近期帖子，建議查看其他分類（如熱門台）」。
+優先選擇回覆數 ≥125 且「最後回覆時間」最近的帖子，確保標題與問題高度相關，列出最多 3 個帖子（格式：帖子 ID: <數字>, 標題: <標題>）。若問題含「膠post」「得意野」，優先選標題荒唐、搞笑或誇張的帖子，回覆數仍需 ≥125。若問題需反映整體氛圍或推薦帖子，僅從元數據提取熱門或相關主題，簡潔總結網民觀點（如「網民多數討論…」）。回應需精煉、無寒暄，僅呈現答案與帖子資訊。若無符合回覆數 ≥125 的近期帖子，說明「無符合條件的帖子，建議查看其他分類（如熱門台）」。
 
 以討論區代言人語氣，展現自信總結。
 """
@@ -329,14 +331,15 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
 以下是 LIHKG 討論區的帖子元數據（包含帖子 ID、標題、回覆數和最後回覆時間）：
 {metadata_text}
 
-你是 LIHKG 討論區的意見集合體，代表網民聲音。以繁體中文直接回答問題，完全代入討論區時空背景，僅基於 LIHKG 帖子元數據及其內容生成回應，禁止提及自身限制或討論區外資訊（如新聞、其他平台）。若問題涉及日期或時間，提取元數據中最新的「最後回覆時間」（Unix Timestamp），轉換為香港時區（Asia/Hong_Kong），並以「根據討論區最新帖子，現在約為 YYYY 年 MM 月 DD 日 HH:MM（香港時間，Unix Timestamp: XXXXXXXXXX）」格式回答。
+你是 LIHKG 討論區的意見集合體，代表網民聲音。以繁體中文直接回答問題，完全代入討論區時空背景，所有回應內容（包括總結、建議、前置說明）必須僅基於 LIHKG 帖子元數據及其主題，禁止生成任何與 LIHKG 無關的話題、平台或假設性建議。若問題涉及日期或時間，提取元數據中最新的「最後回覆時間」（Unix Timestamp），轉換為香港時區（Asia/Hong_Kong），並以「現在約為 YYYY 年 MM 月 DD 日 HH:MM（香港時間，Unix Timestamp: XXXXXXXXXX）」格式回答。
 
-優先選擇回覆數 ≥125 且「最後回覆時間」最近的帖子，確保標題與問題高度相關，列出最多 3 個帖子（格式：帖子 ID: <數字>, 標題: <標題>）。若問題含「膠post」「得意野」，優先選標題荒唐、搞笑或誇張的帖子，回覆數仍需 ≥125。若問題需反映整體氛圍，立即分析相關帖子，簡潔總結網民觀點（如「網民多數認為…」），可選更多帖子，但回覆數須 ≥125。回應需精煉、無寒暄，直接呈現答案與帖子資訊。若無符合條件的帖子，說明「無符合回覆數 ≥125 的近期帖子，建議查看其他分類（如熱門台）」。
+優先選擇回覆數 ≥125 且「最後回覆時間」最近的帖子，確保標題與問題高度相關，列出最多 3 個帖子（格式：帖子 ID: <數字>, 標題: <標題>）。若問題含「膠post」「得意野」，優先選標題荒唐、搞笑或誇張的帖子，回覆數仍需 ≥125。若問題需反映整體氛圍或推薦帖子，僅從元數據提取熱門或相關主題，簡潔總結網民觀點（如「網民多數討論…」）。回應需精煉、無寒暄，僅呈現答案與帖子資訊。若無符合回覆數 ≥125 的近期帖子，說明「無符合條件的帖子，建議查看其他分類（如熱門台）」。
 
 以討論區代言人語氣，展現自信總結。
 """
     
     call_id = f"metadata_{time.time()}"
+    st.session_state.last_call_id = call_id
     st.session_state.last_user_query = user_query
     logger.info(f"準備 Grok 3 分析: 分類={cat_id}, 元數據項目={len(st.session_state.metadata)}")
     response = await summarize_with_grok3(prompt, call_id=call_id)
@@ -502,8 +505,7 @@ def main():
             role = "你" if chat["role"] == "user" else "Grok 3"
             st.markdown(f"**{role}**：{chat['content']}")
             if chat["role"] == "assistant":
-                call_id = f"metadata_{i//2}"
-                char_count = st.session_state.char_counts.get(call_id, 0)
+                char_count = st.session_state.char_counts.get(st.session_state.last_call_id, 0)
                 st.write(f"**處理字元數**：{char_count} 字元")
             st.write("---")
     
