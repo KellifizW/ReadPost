@@ -47,7 +47,7 @@ def try_parse_date(date_str):
         except (ValueError, TypeError):
             return None
 
-def chunk_text(texts, max_chars=3000):  # 降低 max_chars
+def chunk_text(texts, max_chars=3000):
     chunks = []
     current_chunk = ""
     for text in texts:
@@ -61,12 +61,12 @@ def chunk_text(texts, max_chars=3000):  # 降低 max_chars
         chunks.append(current_chunk)
     return chunks
 
-async def async_request(method, url, headers=None, json=None, retries=3):  # 增加重試次數
+async def async_request(method, url, headers=None, json=None, retries=3):
     for attempt in range(retries + 1):
         try:
             loop = asyncio.get_event_loop()
             if method == "get":
-                response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))  # 增加超時
+                response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
             elif method == "post":
                 response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=json, timeout=30))
             response.raise_for_status()
@@ -74,7 +74,7 @@ async def async_request(method, url, headers=None, json=None, retries=3):  # 增
         except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
             if attempt < retries:
                 logger.warning(f"API 請求失敗，第 {attempt+1} 次重試: {url}, 錯誤: {str(e)}")
-                await asyncio.sleep(5)  # 延遲 5 秒
+                await asyncio.sleep(5)
                 continue
             logger.error(f"API 請求失敗: {url}, 錯誤: {str(e)}")
             raise e
@@ -85,7 +85,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
     
     endpoint = "thread/hot" if cat_id == 2 else "thread/category"
     sub_cat_ids = [0] if cat_id == 2 else ([0, 1, 2] if cat_id == 29 else [sub_cat_id])
-    max_pages = 1 if cat_id == 2 else max_pages  # 限制熱門台 page=1
+    max_pages = 1 if cat_id == 2 else max_pages
     
     for sub_id in sub_cat_ids:
         for p in range(start_page, start_page + max_pages):
@@ -118,7 +118,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5):
                     data = response.json()
                     if data.get("success") == 0:
                         logger.info(f"LIHKG API 無帖子: cat_id={cat_id}, sub_cat_id={sub_id}, page={page}, 訊息: {data.get('error_message', '無錯誤訊息')}")
-                        break  # 立即終止後續頁面
+                        break
                     items = data.get("response", {}).get("items", [])
                     filtered_items = [item for item in items if item.get("title")]
                     logger.info(f"LIHKG 抓取: cat_id={cat_id}, sub_cat_id={sub_id}, page={page}, 帖子數={len(filtered_items)}")
@@ -255,14 +255,13 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     st.session_state.metadata = []
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
     
-    # 篩選今日帖子
     today_start = datetime.now(HONG_KONG_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today_start.timestamp())
     filtered_items = [
         item for item in items
         if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
     ]
-    sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:100]  # 限制 100 帖
+    sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:100]
     st.session_state.metadata = [
         {
             "thread_id": item["thread_id"],
@@ -275,20 +274,39 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     
     if not st.session_state.metadata:
         logger.warning(f"無有效帖子: 分類={cat_id}")
-        return f"今日無符合回覆數 ≥125 的帖子，建議查看其他分類。"
+        cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
+        return f"今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看其他分類（如熱門台）。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
         for item in st.session_state.metadata
     ])
     
+    cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）的帖子元數據：
+以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥125 且 Unix Timestamp ≥ {today_timestamp} 的帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
 {metadata_text}
 
-以繁體中文回答，僅基於元數據，禁止生成無關內容。選擇回覆數 ≥125 且今日內（Unix Timestamp ≥ {today_timestamp}）的帖子，列出最多 3 個（格式：帖子 ID: <數字>, 標題: <標題>）。若問題含「新聞」或「熱門」，總結網民討論焦點（100-150 字）。若無符合帖子，說明「今日無符合條件的帖子」。
+以繁體中文回答，基於元數據（標題與回覆數），禁止生成無關內容。執行以下步驟：
+1. 解析問題意圖，識別核心主題（如搞笑、爭議、情緒、生活、時事、財經等）。
+2. 根據分類（cat_id）與問題主題：
+   - 吹水台（cat_id=1）：偏輕鬆，優先找搞笑、荒誕話題。
+   - 熱門台（cat_id=2）：聚焦高熱度討論，反映廣泛關注。
+   - 時事台（cat_id=5）：關注爭議、社會事件。
+   - 上班台（cat_id=14）：聚焦職場、生活壓力。
+   - 財經台（cat_id=15）：分析市場情緒、投資話題。
+   - 成人台（cat_id=29）：適度處理敏感話題。
+   - 創意台（cat_id=31）：注重創意、趣味討論。
+3. 從標題提取關鍵詞，推斷網民討論焦點與傾向（如「淡友」=悲觀，「之亂」=爭議）。
+4. 優先分析回覆數最高的帖子，回答問題並總結網民觀點（100-150 字）。
+5. 若標題不足以回答，註明：「需進一步分析帖子內容以確認詳情。」
+6. 若無符合帖子，說明：「今日 {cat_name} 無符合條件的帖子，可能是討論量低，建議查看其他分類（如熱門台）。」
+
+輸出格式：
+- 符合帖子：列出最多 3 個（帖子 ID: <數字>, 標題: <標題>）
+- 總結：100-150 字，回答問題，反映網民觀點，說明依據（如標題關鍵詞）。
 """
     
     call_id = f"metadata_{time.time()}"
@@ -337,6 +355,7 @@ async def summarize_thread(thread_id, cat_id=None):
     
     logger.info(f"總結帖子 {thread_id}: 回覆數={len(replies)}, 分塊數={len(chunks)}")
     chunk_summaries = []
+    cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
     for i, chunk in enumerate(chunks):
         logger.debug(f"分塊內容: thread_id={thread_id}, chunk_{i}, 字元數={len(chunk)}")
         summary = await summarize_with_grok3(
@@ -346,7 +365,18 @@ async def summarize_thread(thread_id, cat_id=None):
 帖子內容：
 {chunk}
 
-若數據不足，返回「內容不足」。
+參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
+1. 識別問題意圖（如搞笑、爭議、情緒、時事、財經）。
+2. 根據分類與意圖：
+   - 吹水台：提取輕鬆、搞笑觀點。
+   - 熱門台：反映熱門焦點。
+   - 時事台：聚焦爭議或事件。
+   - 財經台：分析市場情緒。
+   - 其他分類：適配相應語氣與主題。
+3. 總結網民觀點，回答問題（如「搞笑話題」列舉趣事，「情緒」判斷樂觀/悲觀）。
+4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+
+若數據不足，返回：「內容不足，無法生成總結。」
 """,
             call_id=f"{thread_id}_chunk_{i}"
         )
@@ -363,10 +393,21 @@ async def summarize_thread(thread_id, cat_id=None):
 分塊總結：
 {'\n'.join(chunk_summaries)}
 
-若數據不足，返回「內容不足」。
+參考使用者問題「{st.session_state.get('last_user_query', '')}」與分類（cat_id={cat_id}，{cat_name}），執行以下步驟：
+1. 識別問題意圖（如搞笑、爭議、情緒、時事、財經）。
+2. 根據分類與意圖：
+   - 吹水台：提取輕鬆、搞笑觀點。
+   - 熱門台：反映熱門焦點。
+   - 時事台：聚焦爭議或事件。
+   - 財經台：分析市場情緒。
+   - 其他分類：適配相應語氣與主題。
+3. 總結網民觀點，回答問題（如「搞笑話題」列舉趣事，「情緒」判斷樂觀/悲觀）。
+4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+
+若數據不足，返回：「內容不足，無法生成總結。」
 """
     
-    if len(final_prompt) > 1000:  # 檢查最終輸入
+    if len(final_prompt) > 1000:
         chunks = chunk_text([final_prompt], max_chars=500)
         final_summaries = []
         for i, chunk in enumerate(chunks):
@@ -414,10 +455,19 @@ async def manual_fetch_and_summarize(cat_id, start_page, max_pages):
 def main():
     st.title("LIHKG 總結聊天機器人")
     st.header("與 Grok 3 聊天")
+    cat_options = [
+        {"id": 1, "name": "吹水台"},
+        {"id": 2, "name": "熱門台"},
+        {"id": 5, "name": "時事台"},
+        {"id": 14, "name": "上班台"},
+        {"id": 15, "name": "財經台"},
+        {"id": 29, "name": "成人台"},
+        {"id": 31, "name": "創意台"},
+    ]
     chat_cat_id = st.selectbox(
         "聊天分類",
-        options=[1, 31, 5, 14, 15, 29, 2],
-        format_func=lambda x: {1: "吹水台", 31: "創意台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 2: "熱門"}[x],
+        options=[opt["id"] for opt in cat_options],
+        format_func=lambda x: next(opt["name"] for opt in cat_options if opt["id"] == x),
         key="chat_cat_id"
     )
     with st.form("chat_form", clear_on_submit=True):
@@ -443,12 +493,12 @@ def main():
                     summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_cat_id))
                     if not summary.startswith("錯誤:"):
                         st.session_state.summaries[thread_id] = summary
-            if len(st.session_state.summaries) < 3 and thread_ids:  # 重試
+            if len(st.session_state.summaries) < 3 and thread_ids:
                 logger.info("總結數量不足，重新選擇帖子")
                 thread_ids = asyncio.run(select_relevant_threads(analysis_result))
                 for thread_id in thread_ids:
                     if thread_id not in st.session_state.summaries:
-                        summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_cat_id))
+                        summary = asyncio.run(summarize_thread(thread_id, cat_id=chat_id))
                         if not summary.startswith("錯誤:"):
                             st.session_state.summaries[thread_id] = summary
     
