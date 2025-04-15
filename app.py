@@ -174,6 +174,9 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
             logger.info(f"LIHKG 帖子內容: thread_id={thread_id}, page={page}")
             data = response
             page_replies = data.get("response", {}).get("item_data", [])
+            for reply in page_replies:
+                reply["like_count"] = int(reply.get("like_count", "0")) if reply.get("like_count") else 0
+                reply["dislike_count"] = int(reply.get("dislike_count", "0")) if reply.get("dislike_count") else 0
             replies.extend(page_replies)
             page += 1
             if not page_replies:
@@ -191,10 +194,12 @@ def build_post_context(post, replies):
     if replies:
         context += "回覆:\n"
         char_count = len(context)
-        for reply in replies:
+        for idx, reply in enumerate(replies, 1):
             msg = clean_html(reply['msg'])
+            like_count = reply.get("like_count", 0)
+            dislike_count = reply.get("dislike_count", 0)
             if len(msg) > 10:
-                msg_line = f"- {msg}\n"
+                msg_line = f"- 回覆 {idx}: {msg} (正評: {like_count}, 負評: {dislike_count})\n"
                 if char_count + len(msg_line) > max_chars:
                     break
                 context += msg_line
@@ -277,7 +282,7 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
             logger.error(f"Grok 3 異常: call_id={call_id}, 錯誤: {str(e)}")
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
 
-async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata=50):
+async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     logger.info(f"開始分析: 分類={cat_id}, 問題='{user_query}'")
     st.session_state.metadata = []
     items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
@@ -285,19 +290,20 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
     today_start = datetime.now(HONG_KONG_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today_start.timestamp())
     
-    # 動態調整過濾條件：吹水台放寬回覆數門檻，移除今日限制
-    min_replies = 50 if cat_id == 1 else 125
-    time_filter = False if cat_id == 1 else True  # 吹水台不限制今日
-    
+    # 篩選條件：總回覆數 ≥ 125，且最後回覆時間在今日
     filtered_items = [
         item for item in items
-        if item.get("no_of_reply", 0) >= min_replies and (not time_filter or int(item.get("last_reply_time", 0)) >= today_timestamp)
+        if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
     ]
     logger.info(f"過濾後帖子數: cat_id={cat_id}, 符合條件數={len(filtered_items)}")
     
-    sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0), reverse=True)
-    sorted_items = sorted_items[:max_metadata]
-    st.session_state.metadata = [
+    if not filtered_items:
+        logger.warning(f"無有效帖子: 分類={cat_id}")
+        cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
+        return f"今日 {cat_name} 無符合條件的帖子（總回覆數 ≥ 125 且最後回覆在今日），建議查看熱門台（cat_id=2）。"
+    
+    # 準備元數據供 AI 排序
+    metadata_list = [
         {
             "thread_id": item["thread_id"],
             "title": item["title"],
@@ -306,38 +312,79 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5, max_metadata
             "like_count": int(item.get("like_count", "0")) if item.get("like_count") else 0,
             "dislike_count": int(item.get("dislike_count", "0")) if item.get("dislike_count") else 0,
         }
-        for item in sorted_items
+        for item in filtered_items
     ]
     
-    if not st.session_state.metadata:
-        logger.warning(f"無有效帖子: 分類={cat_id}")
-        cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
-        return f"今日 {cat_name} 無符合條件的帖子，建議查看熱門台（cat_id=2）。"
-    
     metadata_text = "\n".join([
-        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}"
-        for item in st.session_state.metadata
+        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}, 正評: {item['like_count']}, 負評: {item['dislike_count']}"
+        for item in metadata_list
     ])
     
     cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥{min_replies} 的前 {max_metadata} 篇帖子元數據，分類為 {cat_name}（cat_id={cat_id}）：
+以下是 LIHKG 討論區今日（2025-04-15）篩選出的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），條件為總回覆數 ≥ 125 且最後回覆在今日：
+{metadata_text}
+
+以繁體中文回答，基於帖子標題和正負評數量，執行以下步驟：
+1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。
+2. 根據問題主題和分類特性，排序帖子：
+   - 優先考慮標題與問題的相關性。
+   - 根據分類調整正負評的權重：
+     - 吹水台（cat_id=1）、時事台（cat_id=5）：正負評高的帖子（正評或負評 ≥ 50）可能更有趣或更有立場，應提高優先級。
+     - 財經台（cat_id=15）：正負評不應過分影響排序，應更注重標題的資訊性。
+     - 其他分類（如熱門台、上班台、成人台、創意台）：正負評可作為次要參考，適度提升有趣或爭議性帖子的優先級。
+3. 返回與問題相關的帖子 ID 列表（每行一個數字），不相關的帖子不應包含在列表中。若無相關帖子，返回空列表。
+
+輸出格式：
+- 僅返回相關帖子 ID（每行一個數字），無其他內容。
+"""
+    
+    call_id = f"sort_{cat_id}_{int(time.time())}"
+    response = ""
+    async for chunk in stream_grok3_response(prompt, call_id=call_id):
+        response += chunk
+    
+    thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
+    valid_ids = [str(item["thread_id"]) for item in metadata_list]
+    sorted_ids = [tid for tid in thread_ids if tid in valid_ids]
+    
+    logger.info(f"AI 排序後帖子: 提取={thread_ids}, 有效={sorted_ids}")
+    
+    if not sorted_ids:
+        logger.warning(f"無相關帖子: 分類={cat_id}")
+        return f"今日 {cat_name} 無與問題相關的帖子，建議查看熱門台（cat_id=2）。"
+    
+    # 根據 AI 排序的 ID 重新排列 metadata
+    st.session_state.metadata = []
+    for tid in sorted_ids:
+        for item in metadata_list:
+            if str(item["thread_id"]) == tid:
+                st.session_state.metadata.append(item)
+                break
+    
+    metadata_text = "\n".join([
+        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}, 正評: {item['like_count']}, 負評: {item['dislike_count']}"
+        for item in st.session_state.metadata
+    ])
+    
+    prompt = f"""
+使用者問題：{user_query}
+
+以下是 LIHKG 討論區今日（2025-04-15）篩選並排序後的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），已按相關性排序：
 {metadata_text}
 
 以繁體中文回答，基於所有帖子標題，綜合分析討論區的廣泛意見，直接回答問題，禁止生成無關內容。執行以下步驟：
 1. 解析問題意圖，識別核心主題（如財經、情緒、搞笑、爭議、時事、生活等）。
-2. 若為其他主題：
-   - 根據分類適配語氣：
-     - 吹水台（cat_id=1）：輕鬆，提取搞笑、荒誕話題。
-     - 熱門台（cat_id=2）：聚焦高熱度討論。
-     - 時事台（cat_id=5）：關注爭議、事件。
-     - 上班台（cat_id=14）：聚焦職場、生活。
-     - 財經台（cat_id=15）：偏市場、投資。
-     - 成人台（cat_id=29）：適度處理敏感話題。
-     - 創意台（cat_id=31）：注重趣味、創意。
-   - 總結網民整體觀點（100-150 字），提取標題關鍵詞，直接回答問題。
+2. 總結網民整體觀點（100-150 字），提取標題關鍵詞，直接回答問題，適配分類語氣：
+   - 吹水台（cat_id=1）：輕鬆，提取搞笑、荒誕話題。
+   - 熱門台（cat_id=2）：聚焦高熱度討論。
+   - 時事台（cat_id=5）：關注爭議、事件。
+   - 上班台（cat_id=14）：聚焦職場、生活。
+   - 財經台（cat_id=15）：偏市場、投資。
+   - 成人台（cat_id=29）：適度處理敏感話題。
+   - 創意台（cat_id=31）：注重趣味、創意。
 3. 若標題不足以詳細回答，註明：「可進一步分析帖子內容以提供補充細節。」
 4. 若無相關帖子，說明：「今日 {cat_name} 無符合問題的帖子，建議查看熱門台（cat_id=2）。」
 
@@ -352,14 +399,14 @@ async def select_relevant_threads(user_query, max_threads=3):
         return []
     
     metadata_text = "\n".join([
-        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}"
+        f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 正評: {item['like_count']}, 負評: {item['dislike_count']}"
         for item in st.session_state.metadata
     ])
     
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）回覆數 ≥50 的帖子元數據：
+以下是 LIHKG 討論區今日（2025-04-15）已排序的帖子元數據：
 {metadata_text}
 
 基於標題，選擇與問題最相關的帖子 ID（每行一個數字），最多 {max_threads} 個。僅返回 ID，無其他內容。若無相關帖子，返回空列表。
@@ -419,12 +466,13 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
    - 時事台：聚焦爭議或事件。
    - 財經台：分析市場情緒。
    - 其他：適配主題。
-3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
-4. 若數據不足，返回：「內容不足，無法生成總結。」
+3. 分析回覆的正負評，特別關注正評或負評 ≥ 5 的回覆，提取其觀點。
+4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+5. 若數據不足，返回：「內容不足，無法生成總結。」
 
 輸出格式：
 - 標題：<標題>
-- 總結：100-200 字，反映網民觀點，說明依據。
+- 總結：100-200 字，反映網民觀點，說明依據，提及高評分回覆（正評或負評 ≥ 5）。
 """
         summary = ""
         async for chunk in stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"):
@@ -449,12 +497,13 @@ async def summarize_thread(thread_id, cat_id=None) -> AsyncGenerator[str, None]:
    - 時事台：聚焦爭議或事件。
    - 財經台：分析市場情緒。
    - 其他：適配主題。
-3. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
-4. 若數據不足，返回：「內容不足，無法生成總結。」
+3. 分析回覆的正負評，特別關注正評或負評 ≥ 5 的回覆，提取其觀點。
+4. 若內容與問題無關，返回：「內容與問題不符，無法回答。」
+5. 若數據不足，返回：「內容不足，無法生成總結。」
 
 輸出格式：
 - 標題：<標題>
-- 總結：150-200 字，反映網民觀點，說明依據。
+- 總結：150-200 字，反映網民觀點，說明依據，提及高評分回覆（正評或負評 ≥ 5）。
 - 評分：正評 {like_count}, 負評 {dislike_count}
 """
     
