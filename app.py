@@ -186,9 +186,9 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=175):
     return replies[:max_replies]
 
 async def get_lihkg_thread_rating(thread_id, cat_id=None):
-    url = f"{LIHKG_BASE_URL}thread/{thread_id}/page/1?order=reply_time"
+    url = f"{LIHKG_BASE_URL}thread/{thread_id}/like"
     timestamp = int(time.time())
-    digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
+    digest = hashlib.sha1(f"jeams$post${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
     
     headers = {
         "X-LI-DEVICE": LIHKG_DEVICE_ID,
@@ -200,10 +200,11 @@ async def get_lihkg_thread_rating(thread_id, cat_id=None):
         "orginal": "https://lihkg.com",
         "referer": f"https://lihkg.com/thread/{thread_id}",
         "accept": "application/json",
+        "content-type": "application/json",
     }
     
     try:
-        response = await async_request("get", url, headers=headers)
+        response = await async_request("post", url, headers=headers, json={})
         logger.info(f"LIHKG 帖子評分: thread_id={thread_id}")
         logger.debug(f"原始回應: {json.dumps(response, ensure_ascii=False)}")
         thread_data = response.get("response", {}).get("thread", {})
