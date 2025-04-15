@@ -256,7 +256,7 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
     
     try:
         response = await async_request("post", GROK3_API_URL, headers=headers, json=payload, stream=True)
-        async for line in response.content.iter_lines():
+        async for line in response.content:
             if line:
                 line_str = line.decode('utf-8').strip()
                 if line_str.startswith("data: "):
