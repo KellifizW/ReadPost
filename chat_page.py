@@ -4,11 +4,11 @@ import re
 from data_processor import analyze_lihkg_metadata
 from grok3_client import stream_grok3_response
 from lihkg_api import get_lihkg_thread_content
-from utils import async_to_sync_stream, build_post_context
+from utils import build_post_context
 
 st.set_page_config(page_title="LIHKG 討論區分析", layout="wide")
 
-def select_relevant_threads(user_query, metadata, max_threads=3):
+async def select_relevant_threads(user_query, metadata, max_threads=3):
     if not metadata:
         st.warning("無元數據可選擇帖子")
         return []
@@ -28,7 +28,10 @@ def select_relevant_threads(user_query, metadata, max_threads=3):
 """
     
     call_id = f"select_{int(time.time())}"
-    response = "".join(list(async_to_sync_stream(stream_grok3_response(prompt, call_id=call_id))))
+    response = ""
+    async for chunk in stream_grok3_response(prompt, call_id=call_id):
+        response += chunk
+    
     thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
     valid_ids = [str(item["thread_id"]) for item in metadata]
     return [tid for tid in thread_ids if tid in valid_ids][:max_threads]
@@ -72,7 +75,9 @@ async def summarize_thread(thread_id, cat_id, metadata, user_query, lihkg_data):
 - 標題：<標題>
 - 總結：100-200 字，反映網民觀點。
 """
-        summary = "".join(list(async_to_sync_stream(stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"))))
+        summary = ""
+        async for chunk in stream_grok3_response(prompt, call_id=f"{thread_id}_chunk_{i}"):
+            summary += chunk
         chunk_summaries.append(summary)
     
     final_prompt = f"""
@@ -171,15 +176,15 @@ def chat_page():
                 
                 elif prompt_lower == "需要":
                     with st.spinner("正在選擇並總結相關帖子..."):
-                        thread_ids = select_relevant_threads(st.session_state.last_user_query, st.session_state.metadata)
+                        thread_ids = await select_relevant_threads(st.session_state.last_user_query, st.session_state.metadata)
                         if thread_ids:
                             summaries = []
                             for thread_id in thread_ids:
                                 with st.chat_message("assistant"):
-                                    full_summary = st.write_stream(async_to_sync_stream(summarize_thread(
+                                    full_summary = st.write_stream(summarize_thread(
                                         thread_id, st.session_state.last_cat_id, st.session_state.metadata,
                                         st.session_state.last_user_query, st.session_state.lihkg_data
-                                    )))
+                                    ))
                                     if not full_summary.startswith("錯誤:"):
                                         summaries.append(full_summary)
                                         st.session_state.messages.append({"role": "assistant", "content": full_summary})
@@ -202,10 +207,10 @@ def chat_page():
                     if thread_id in valid_ids:
                         with st.spinner(f"正在總結帖子 {thread_id}..."):
                             with st.chat_message("assistant"):
-                                full_summary = st.write_stream(async_to_sync_stream(summarize_thread(
+                                full_summary = st.write_stream(summarize_thread(
                                     thread_id, st.session_state.last_cat_id, st.session_state.metadata,
                                     st.session_state.last_user_query, st.session_state.lihkg_data
-                                )))
+                                ))
                                 if not full_summary.startswith("錯誤:"):
                                     response = f"帖子 {thread_id} 的總結：\n\n{full_summary}\n\n你需要進一步分析其他帖子嗎？（輸入『需要』、『ID 數字』或『不需要』）"
                                 else:
@@ -232,14 +237,17 @@ def chat_page():
                 
                 with st.spinner("正在分析討論區數據..."):
                     try:
-                        prompt = asyncio.run(analyze_lihkg_metadata(user_query, cat_id=st.session_state.last_cat_id, max_pages=10))
-                        if prompt.startswith("以下是分類"):
-                            full_response = prompt
-                        else:
-                            call_id = f"analyze_{st.session_state.last_cat_id}_{int(time.time())}"
+                        result = await analyze_lihkg_metadata(user_query, cat_id=st.session_state.last_cat_id, max_pages=10)
+                        if isinstance(result, str):  # 如果結果是字符串，直接顯示
+                            full_response = result
                             with st.chat_message("assistant"):
-                                full_response = st.write_stream(async_to_sync_stream(stream_grok3_response(prompt, call_id=call_id)))
+                                st.markdown(full_response)
                                 st.session_state.messages.append({"role": "assistant", "content": full_response})
+                        else:  # 如果結果是異步生成器，流式顯示
+                            with st.chat_message("assistant"):
+                                full_response = st.write_stream(result)
+                                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                        
                         if not full_response.startswith("今日") and not full_response.startswith("錯誤") and not full_response.startswith("以下是分類"):
                             response = "你需要我對某個帖子生成更深入的總結嗎？請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"
                             st.session_state.messages.append({"role": "assistant", "content": response})
