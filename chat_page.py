@@ -60,10 +60,11 @@ async def chat_page():
                 # 儲存最新問題以供 Grok 3 使用
                 st.session_state.last_user_query = user_question
                 
-                # 解析用戶問題並抓取數據（優先使用問題中的分類）
+                # 解析用戶問題並抓取數據（傳遞 UI 選擇的分類）
                 result = await process_user_question(
                     user_question,
                     cat_id_map=cat_id_map,
+                    selected_cat=selected_cat,  # 傳遞 UI 選擇的分類
                     request_counter=st.session_state.request_counter,
                     last_reset=st.session_state.last_reset,
                     rate_limit_until=st.session_state.rate_limit_until
@@ -81,7 +82,7 @@ async def chat_page():
                 else:
                     items = result.get("items", [])
                     rate_limit_info = result.get("rate_limit_info", [])
-                    question_cat = result.get("selected_cat", selected_cat)  # 優先問題中的分類，否則使用選單
+                    question_cat = result.get("selected_cat", selected_cat)
                     
                     # 準備元數據
                     metadata_list = [
@@ -125,23 +126,24 @@ async def chat_page():
                         for info in rate_limit_info:
                             answer += f"- {info}\n"
                     
+                    # 顯示帖子列表
+                    with st.chat_message("assistant"):
+                        st.markdown(answer)
+                
                     # 可選：調用 Grok 3 增強回應（流式顯示）
                     try:
                         grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
                         grok_response = ""
+                        # 使用 st.empty 動態更新 Grok 3 回應
+                        grok_container = st.empty()
                         async for chunk in stream_grok3_response(grok_context):
                             grok_response += chunk
-                            # 即時更新顯示
-                            with st.chat_message("assistant"):
-                                st.markdown(answer + f"\n#### Grok 3 建議：\n{grok_response}")
+                            grok_container.markdown(f"{answer}\n#### Grok 3 建議：\n{grok_response}")
                         if grok_response and not grok_response.startswith("錯誤:"):
                             answer += f"\n#### Grok 3 建議：\n{grok_response}"
                     except Exception as e:
                         logger.warning(f"Grok 3 增強失敗: 問題={user_question}, 錯誤={str(e)}")
-                
-                # 顯示最終回應
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
+                        answer += f"\n#### Grok 3 建議：\n錯誤：無法獲取建議，原因：{str(e)}"
                 
                 # 更新聊天歷史
                 st.session_state.chat_history.append({
