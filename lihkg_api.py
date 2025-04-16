@@ -30,6 +30,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
                         break
                     
                     data = await response.json()
+                    logger.debug(f"帖子列表 API 回應: cat_id={cat_id}, page={page}, 數據={data}")
                     if not data.get("success"):
                         logger.error(f"API 返回失敗: cat_id={cat_id}, page={page}, 錯誤={data.get('error_message', '未知錯誤')}")
                         break
@@ -47,7 +48,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
     
     return items
 
-async def get_lihkg_thread_content(thread_id, cat_id):
+async def get_lihkg_thread_content(thread_id, cat_id=None):
     headers = {
         "User-Agent": "LIHKG/7.6.2 (iPhone; iOS 17.4.1; Scale/3.00)",
         "Accept": "application/json",
@@ -59,6 +60,7 @@ async def get_lihkg_thread_content(thread_id, cat_id):
     replies = []
     page = 1
     thread_title = None
+    total_replies = None
     
     async with aiohttp.ClientSession() as session:
         while True:
@@ -72,15 +74,19 @@ async def get_lihkg_thread_content(thread_id, cat_id):
                         break
                     
                     data = await response.json()
+                    logger.debug(f"帖子內容 API 回應: thread_id={thread_id}, page={page}, 數據={data}")
                     if not data.get("success"):
                         logger.error(f"API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={data.get('error_message', '未知錯誤')}")
                         break
                     
-                    # 檢查是否包含標題
-                    if page == 1 and "title" in data["response"]:
-                        thread_title = data["response"]["title"]
+                    # 提取標題（檢查多個可能的字段）
+                    if page == 1:
+                        response_data = data.get("response", {})
+                        thread_title = response_data.get("title") or response_data.get("thread", {}).get("title")
+                        total_replies = response_data.get("total_replies") or response_data.get("total_reply", 0)
                     
-                    new_replies = data["response"]["items"]
+                    # 提取回覆
+                    new_replies = data["response"].get("items", [])
                     if not new_replies:
                         break
                     
@@ -88,13 +94,12 @@ async def get_lihkg_thread_content(thread_id, cat_id):
                     logger.info(f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數={len(new_replies)}")
                     page += 1
                     
-                    # 檢查是否有更多頁面
-                    total_replies = data["response"].get("total_replies", len(replies))
-                    if len(replies) >= total_replies:
+                    # 檢查是否還有更多回覆
+                    if total_replies and len(replies) >= total_replies:
                         break
             
             except Exception as e:
                 logger.error(f"抓取帖子內容錯誤: thread_id={thread_id}, page={page}, 錯誤={str(e)}")
                 break
     
-    return {"replies": replies, "title": thread_title}
+    return {"replies": replies, "title": thread_title, "total_replies": total_replies}
