@@ -1,12 +1,11 @@
 import streamlit as st
 import streamlit.logger
 import time
-import re  # 為 re.findall 添加導入
+import re
 from datetime import datetime
 import pytz
 from lihkg_api import get_lihkg_topic_list
-from grok3_client import stream_grok3_response  # 導入 stream_grok3_response
-from utils import async_to_sync_stream  # 導入 async_to_sync_stream
+from grok3_client import stream_grok3_response
 
 logger = streamlit.logger.get_logger(__name__)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -105,7 +104,13 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=10):
 """
     
     call_id = f"sort_{cat_id}_{int(time.time())}"
-    response = "".join(list(async_to_sync_stream(stream_grok3_response(prompt, call_id=call_id))))
+    # 直接返回 stream_grok3_response 的異步生成器
+    response_stream = stream_grok3_response(prompt, call_id=call_id)
+    
+    # 收集排序後的帖子 ID
+    response = ""
+    async for chunk in response_stream:
+        response += chunk
     
     thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
     valid_ids = [str(item["thread_id"]) for item in filtered_items]
@@ -156,4 +161,6 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=10):
 - 篩選報告：
 {filter_report}
 """
-    return prompt
+    # 返回流式回應
+    call_id = f"analyze_{cat_id}_{int(time.time())}"
+    return stream_grok3_response(prompt, call_id=call_id)
