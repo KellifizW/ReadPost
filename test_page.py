@@ -4,12 +4,17 @@ import time
 from datetime import datetime
 import pickle
 import os
+import random
+import pytz
 
 # 使用 Streamlit 的 logger
 logger = st.logger.get_logger(__name__)
 
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 import aiohttp
+
+# 定義香港時區
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 本地快取檔案
 CACHE_FILE = "lihkg_cache.pkl"
@@ -95,7 +100,7 @@ async def test_page():
             index=0
         )
         cat_id = cat_id_map[selected_cat]
-        max_pages = st.slider("抓取頁數", 1, 5, 1)  # 範圍改為 1-5，預設為 1
+        max_pages = st.slider("抓取頁數", 1, 5, 1)  # 範圍 1-5，預設 1
     
     with col1:
         # 顯示速率限制狀態
@@ -156,13 +161,18 @@ async def test_page():
                     for info in rate_limit_info:
                         st.markdown(f"- {info}")
                 
-                #  Ascendingly 準備元數據
+                # 準備元數據
                 metadata_list = [
                     {
                         "thread_id": item["thread_id"],
                         "title": item["title"],
                         "no_of_reply": item["no_of_reply"],
-                        "last_reply_time": datetime.fromtimestamp(int(item.get("last_reply_time", 0))).strftime("%Y-%m-%d %H:%M:%S") if item.get("last_reply_time") else "未知",
+                        "last_reply_time": (
+                            datetime.fromtimestamp(int(item.get("last_reply_time", 0)), tz=HONG_KONG_TZ)
+                            .strftime("%Y-%m-%d %H:%M:%S")
+                            if item.get("last_reply_time")
+                            else "未知"
+                        ),
                         "like_count": item.get("like_count", 0),
                         "dislike_count": item.get("dislike_count", 0),
                     }
@@ -201,7 +211,12 @@ async def test_page():
                         if thread_data:
                             thread_title = thread_data.get("title", "未知標題")
                             reply_count = thread_data.get("no_of_reply", 0)
-                            last_reply_time = datetime.fromtimestamp(int(thread_data.get("last_reply_time", 0))).strftime("%Y-%m-%d %H:%M:%S") if thread_data.get("last_reply_time") else "未知"
+                            last_reply_time = (
+                                datetime.fromtimestamp(int(thread_data.get("last_reply_time", 0)), tz=HONG_KONG_TZ)
+                                .strftime("%Y-%m-%d %H:%M:%S")
+                                if thread_data.get("last_reply_time")
+                                else "未知"
+                            )
                             
                             st.markdown(f"#### 查詢結果")
                             st.markdown(f"- 帖子 ID: {thread_id}")
