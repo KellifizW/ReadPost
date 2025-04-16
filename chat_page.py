@@ -102,7 +102,7 @@ async def summarize_thread(thread_id, cat_id, metadata, user_query, lihkg_data):
     async for chunk in stream_grok3_response(final_prompt, call_id=f"{thread_id}_final"):
         yield chunk
 
-def chat_page():
+async def chat_page():
     # 初始化 session state
     if "lihkg_data" not in st.session_state:
         st.session_state.lihkg_data = {}
