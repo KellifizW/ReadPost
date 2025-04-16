@@ -2,11 +2,26 @@ import streamlit as st
 import asyncio
 import time
 from datetime import datetime
+import pickle
+import os
 
 # 使用 Streamlit 的 logger
 logger = st.logger.get_logger(__name__)
 
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
+
+# 本地快取檔案
+CACHE_FILE = "lihkg_cache.pkl"
+
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "rb") as f:
+            return pickle.load(f)
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, "wb") as f:
+        pickle.dump(cache, f)
 
 async def test_page():
     st.title("LIHKG 數據測試頁面")
@@ -44,39 +59,59 @@ async def test_page():
             index=0
         )
         cat_id = cat_id_map[selected_cat]
-        max_pages = st.slider("抓取頁數", 1, 20, 10)
+        max_pages = st.slider("抓取頁數", 1, 20, 5)  # 預設降低到 5 頁
     
     with col1:
-        # 原有功能：抓取數據
+        # 顯示速率限制狀態
+        st.markdown("#### 速率限制狀態")
+        st.markdown(f"- 當前請求計數: {st.session_state.request_counter}")
+        st.markdown(f"- 最後重置時間: {datetime.fromtimestamp(st.session_state.last_reset)}")
+        st.markdown(
+            f"- 速率限制解除時間: "
+            f"{datetime.fromtimestamp(st.session_state.rate_limit_until) if st.session_state.rate_limit_until > time.time() else '無限制'}"
+        )
+        
+        # 抓取數據
         if st.button("抓取數據"):
             with st.spinner("正在抓取數據..."):
                 logger.info(f"開始抓取數據: 分類={selected_cat}, cat_id={cat_id}, 頁數={max_pages}")
                 cache_key = f"{cat_id}_{max_pages}"
-                if cache_key in st.session_state.topic_list_cache:
-                    items = st.session_state.topic_list_cache[cache_key]["items"]
-                    rate_limit_info = st.session_state.topic_list_cache[cache_key]["rate_limit_info"]
-                    logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數={max_pages}, 帖子數={len(items)}")
+                
+                # 檢查本地快取
+                local_cache = load_cache()
+                if cache_key in local_cache:
+                    items = local_cache[cache_key]["items"]
+                    rate_limit_info = local_cache[cache_key]["rate_limit_info"]
+                    logger.info(f"從本地快取載入數據: cat_id={cat_id}, 頁數={max_pages}, 帖子數={len(items)}")
                 else:
-                    result = await get_lihkg_topic_list(
-                        cat_id,
-                        sub_cat_id=0,
-                        start_page=1,
-                        max_pages=max_pages,
-                        request_counter=st.session_state.request_counter,
-                        last_reset=st.session_state.last_reset,
-                        rate_limit_until=st.session_state.rate_limit_until
-                    )
-                    items = result["items"]
-                    rate_limit_info = result["rate_limit_info"]
-                    st.session_state.request_counter = result["request_counter"]
-                    st.session_state.last_reset = result["last_reset"]
-                    st.session_state.rate_limit_until = result["rate_limit_until"]
-                    st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": rate_limit_info}
-                    logger.info(f"抓取完成: 總共 {len(items)} 篇帖子")
+                    # 檢查 session state 快取
+                    if cache_key in st.session_state.topic_list_cache:
+                        items = st.session_state.topic_list_cache[cache_key]["items"]
+                        rate_limit_info = st.session_state.topic_list_cache[cache_key]["rate_limit_info"]
+                        logger.info(f"從 session state 快取載入數據: cat_id={cat_id}, 頁數={max_pages}, 帖子數={len(items)}")
+                    else:
+                        result = await get_lihkg_topic_list(
+                            cat_id,
+                            sub_cat_id=0,
+                            start_page=1,
+                            max_pages=max_pages,
+                            request_counter=st.session_state.request_counter,
+                            last_reset=st.session_state.last_reset,
+                            rate_limit_until=st.session_state.rate_limit_until
+                        )
+                        items = result["items"]
+                        rate_limit_info = result["rate_limit_info"]
+                        st.session_state.request_counter = result["request_counter"]
+                        st.session_state.last_reset = result["last_reset"]
+                        st.session_state.rate_limit_until = result["rate_limit_until"]
+                        st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": rate_limit_info}
+                        local_cache[cache_key] = {"items": items, "rate_limit_info": rate_limit_info}
+                        save_cache(local_cache)
+                        logger.info(f"抓取完成: 總共 {len(items)} 篇帖子")
                 
                 # 檢查抓取是否完整
                 expected_items = max_pages * 60
-                if len(items) < expected_items * 0.5:  # 如果抓取的帖子數少於預期的一半
+                if len(items) < expected_items * 0.5:
                     st.warning("抓取數據不完整，可能是因為 API 速率限制。請稍後重試，或減少抓取頁數。")
                 
                 # 顯示速率限制調試信息
@@ -114,8 +149,8 @@ async def test_page():
                 else:
                     st.markdown("無符合條件的帖子。")
                     logger.warning("無符合條件的帖子，可能數據不足或篩選條件過嚴")
-
-        # 新功能：查詢帖子回覆數
+        
+        # 查詢帖子回覆數
         st.markdown("---")
         st.markdown("### 查詢帖子回覆數")
         thread_id_input = st.text_input("輸入帖子 ID", placeholder="例如：123456")
@@ -125,7 +160,6 @@ async def test_page():
                     thread_id = int(thread_id_input)
                     with st.spinner(f"正在查詢帖子 {thread_id} 的回覆數..."):
                         logger.info(f"查詢帖子回覆數: thread_id={thread_id}")
-                        # 獲取帖子內容（不指定分類）
                         thread_data = await get_lihkg_thread_content(
                             thread_id,
                             cat_id=None,
@@ -149,14 +183,24 @@ async def test_page():
                         if replies is not None:
                             fetched_reply_count = len(replies)
                             if thread_title is None:
-                                # 如果標題仍未找到，嘗試從所有分類中查找
-                                logger.warning(f"從 API 回應中未找到標題，嘗試從帖子列表中查找: thread_id={thread_id}")
+                                logger.warning(
+                                    f"從 API 回應中未找到標題，嘗試從帖子列表中查找: thread_id={thread_id}"
+                                )
                                 thread_title = "未知標題"
                                 for cat_name, cat_id in cat_id_map.items():
-                                    cache_key = f"{cat_id}_5"  # 使用 max_pages=5 作為緩存鍵
-                                    if cache_key in st.session_state.topic_list_cache:
+                                    cache_key = f"{cat_id}_5"
+                                    local_cache = load_cache()
+                                    if cache_key in local_cache:
+                                        items = local_cache[cache_key]["items"]
+                                        logger.info(
+                                            f"從本地快取載入數據: cat_id={cat_id}, 頁數=5, 帖子數={len(items)}"
+                                        )
+                                    elif cache_key in st.session_state.topic_list_cache:
                                         items = st.session_state.topic_list_cache[cache_key]["items"]
-                                        logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數=5, 帖子數={len(items)}")
+                                        logger.info(
+                                            f"從 session state 快取載入數據: cat_id={cat_id}, 頁數=5, "
+                                            f"帖子數={len(items)}"
+                                        )
                                     else:
                                         result = await get_lihkg_topic_list(
                                             cat_id,
@@ -172,7 +216,15 @@ async def test_page():
                                         st.session_state.request_counter = result["request_counter"]
                                         st.session_state.last_reset = result["last_reset"]
                                         st.session_state.rate_limit_until = result["rate_limit_until"]
-                                        st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": result["rate_limit_info"]}
+                                        st.session_state.topic_list_cache[cache_key] = {
+                                            "items": items,
+                                            "rate_limit_info": result["rate_limit_info"]
+                                        }
+                                        local_cache[cache_key] = {
+                                            "items": items,
+                                            "rate_limit_info": result["rate_limit_info"]
+                                        }
+                                        save_cache(local_cache)
                                     metadata_list = [
                                         {
                                             "thread_id": item["thread_id"],
@@ -184,7 +236,10 @@ async def test_page():
                                     for item in metadata_list:
                                         if str(item["thread_id"]) == str(thread_id):
                                             thread_title = item["title"]
-                                            logger.info(f"找到標題: thread_id={thread_id}, 標題={thread_title}, 分類={cat_name}")
+                                            logger.info(
+                                                f"找到標題: thread_id={thread_id}, 標題={thread_title}, "
+                                                f"分類={cat_name}"
+                                            )
                                             break
                                     if thread_title != "未知標題":
                                         break
@@ -195,9 +250,14 @@ async def test_page():
                             st.markdown(f"- 抓取的回覆數: {fetched_reply_count}")
                             if api_reply_count:
                                 st.markdown(f"- API 報告的總回覆數: {api_reply_count}")
-                            logger.info(f"查詢成功: thread_id={thread_id}, 抓取回覆數={fetched_reply_count}, API 總回覆數={api_reply_count}, 標題={thread_title}")
+                            logger.info(
+                                f"查詢成功: thread_id={thread_id}, 抓取回覆數={fetched_reply_count}, "
+                                f"API 總回覆數={api_reply_count}, 標題={thread_title}"
+                            )
                         else:
-                            st.markdown(f"錯誤：無法獲取帖子 {thread_id} 的回覆數據，可能是帖子不存在或需要登錄權限。")
+                            st.markdown(
+                                f"錯誤：無法獲取帖子 {thread_id} 的回覆數據，可能是帖子不存在或需要登錄權限。"
+                            )
                             logger.warning(f"查詢失敗: thread_id={thread_id}, 無回覆數據")
                 except ValueError:
                     st.markdown("錯誤：請輸入有效的帖子 ID（必須是數字）。")
