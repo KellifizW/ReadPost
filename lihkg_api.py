@@ -30,10 +30,9 @@ PROXY_LIST = [
     "http://103.149.162.195:80",
     "http://162.240.75.37:80",
     "http://50.174.7.162:80",
-    # 建議添加更多代理，或使用付費代理服務
-    # 例如：
-    # "http://proxy.example.com:8080",
-    # "http://user:pass@proxy2.example.com:8080",
+    # 建議使用付費代理服務，例如：
+    # "http://user:pass@proxy.example.com:8080",
+    # "http://proxy2.example.com:8080",
 ]
 
 async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, request_counter, last_reset, rate_limit_until):
@@ -129,7 +128,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                             logger.error(
                                 f"抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 代理={proxy}, 條件={fetch_conditions}"
                             )
-                            await asyncio.sleep(1)  # 固定 1 秒延遲
+                            await asyncio.sleep(1)
                             continue
                         
                         data = await response.json()
@@ -275,4 +274,143 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                 "request_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "request_counter": request_counter,
                 "last_reset": datetime.fromtimestamp(last_reset).strftime("%Y-%m-%d %H:%M:%S"),
-                "rate_limit_until": datetime.fromtimestamp(rate_limit_until).strftime("%Y-%m-%d %H:%M:%S") if
+                "rate_limit_until": datetime.fromtimestamp(rate_limit_until).strftime("%Y-%m-%d %H:%M:%S") if rate_limit_until > time.time() else "無"
+            }
+            
+            while attempt < max_attempts:
+                proxy = PROXY_LIST[proxy_index] if PROXY_LIST else None
+                fetch_conditions["proxy"] = proxy if proxy else "無"
+                
+                try:
+                    async with session.get(url, headers=headers, proxy=proxy, timeout=10) as response:
+                        if response.status == 429:
+                            attempt += 1
+                            proxy_index = (proxy_index + 1) % len(PROXY_LIST) if PROXY_LIST else 0
+                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                            retry_after = response.headers.get("Retry-After")
+                            wait_time = int(retry_after) if retry_after else 5
+                            rate_limit_until = time.time() + wait_time
+                            rate_limit_info.append(
+                                f"{current_time} - 速率限制: thread_id={thread_id}, page={page}, 嘗試={attempt}, "
+                                f"狀態碼=429, 等待 {wait_time} 秒, 請求計數={request_counter}, "
+                                f"最後重置={datetime.fromtimestamp(last_reset)}, 代理={proxy}"
+                            )
+                            logger.warning(
+                                f"速率限制: thread_id={thread_id}, page={page}, 嘗試={attempt}, 狀態碼=429, "
+                                f"等待 {wait_time} 秒, 代理={proxy}, 條件={fetch_conditions}"
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                        if response.status != 200:
+                            attempt += 1
+                            proxy_index = (proxy_index + 1) % len(PROXY_LIST) if PROXY_LIST else 0
+                            rate_limit_info.append(
+                                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 抓取帖子內容失敗: "
+                                f"thread_id={thread_id}, page={page}, 狀態碼={response.status}, 代理={proxy}"
+                            )
+                            logger.error(
+                                f"抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}, "
+                                f"代理={proxy}, 條件={fetch_conditions}"
+                            )
+                            await asyncio.sleep(1)
+                            continue
+                        
+                        data = await response.json()
+                        logger.debug(f"帖子內容 API 回應: thread_id={thread_id}, page={page}, 數據={data}")
+                        if not data.get("success"):
+                            error_message = data.get("error_message", "未知錯誤")
+                            if "998" in error_message:
+                                rate_limit_info.append(
+                                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 帖子無效或無權訪問: "
+                                    f"thread_id={thread_id}, page={page}, 錯誤={error_message}, 代理={proxy}"
+                                )
+                                logger.warning(
+                                    f"帖子無效或無權訪問: thread_id={thread_id}, page={page}, 錯誤={error_message}, "
+                                    f"代理={proxy}, 條件={fetch_conditions}"
+                                )
+                                return {
+                                    "replies": [],
+                                    "title": None,
+                                    "total_replies": 0,
+                                    "rate_limit_info": rate_limit_info,
+                                    "request_counter": request_counter,
+                                    "last_reset": last_reset,
+                                    "rate_limit_until": rate_limit_until
+                                }
+                            attempt += 1
+                            proxy_index = (proxy_index + 1) % len(PROXY_LIST) if PROXY_LIST else 0
+                            rate_limit_info.append(
+                                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - API 返回失敗: "
+                                f"thread_id={thread_id}, page={page}, 錯誤={error_message}, 代理={proxy}"
+                            )
+                            logger.error(
+                                f"API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}, 代理={proxy}, 條件={fetch_conditions}"
+                            )
+                            await asyncio.sleep(1)
+                            continue
+                        
+                        if page == 1:
+                            response_data = data.get("response", {})
+                            thread_title = response_data.get("title") or response_data.get("thread", {}).get("title")
+                            total_replies = response_data.get("total_replies") or response_data.get("total_reply", 0)
+                        
+                        new_replies = data["response"].get("items", [])
+                        if not new_replies:
+                            break
+                        
+                        logger.info(
+                            f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, "
+                            f"回覆數={len(new_replies)}, 代理={proxy}, 條件={fetch_conditions}"
+                        )
+                        
+                        replies.extend(new_replies)
+                        page += 1
+                        await asyncio.sleep(1)  # 固定 1 秒延遲
+                        break
+                
+                except Exception as e:
+                    attempt += 1
+                    proxy_index = (proxy_index + 1) % len(PROXY_LIST) if PROXY_LIST else 0
+                    rate_limit_info.append(
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 抓取帖子內容錯誤: "
+                        f"thread_id={thread_id}, page={page}, 錯誤={str(e)}, 代理={proxy}"
+                    )
+                    logger.error(
+                        f"抓取帖子內容錯誤: thread_id={thread_id}, page={page}, 錯誤={str(e)}, 代理={proxy}, "
+                        f"條件={fetch_conditions}"
+                    )
+                    await asyncio.sleep(1)
+                    continue
+            
+            if attempt >= max_attempts:
+                rate_limit_info.append(
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 重試失敗: "
+                    f"thread_id={thread_id}, page={page}, 已達最大重試次數 {max_attempts}, 代理={proxy}"
+                )
+                logger.error(
+                    f"重試失敗: thread_id={thread_id}, page={page}, "
+                    f"已達最大重試次數 {max_attempts}, 代理={proxy}, 條件={fetch_conditions}"
+                )
+                return {
+                    "replies": replies,
+                    "title": thread_title,
+                    "total_replies": total_replies,
+                    "rate_limit_info": rate_limit_info,
+                    "request_counter": request_counter,
+                    "last_reset": last_reset,
+                    "rate_limit_until": rate_limit_until
+                }
+            
+            if total_replies and len(replies) >= total_replies:
+                break
+    
+    return {
+        "replies": replies,
+        "title": thread_title,
+        "total_replies": total_replies,
+        "rate_limit_info": rate_limit_info,
+        "request_counter": request_counter,
+        "last_reset": last_reset,
+        "rate_limit_until": rate_limit_until
+    }
