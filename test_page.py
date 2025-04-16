@@ -2,7 +2,7 @@ import streamlit as st
 import asyncio
 from lihkg_api import get_lihkg_topic_list
 
-def test_page():
+async def test_page():
     st.title("LIHKG 數據測試頁面")
     
     cat_id_map = {
@@ -28,7 +28,7 @@ def test_page():
     with col1:
         if st.button("抓取數據"):
             with st.spinner("正在抓取數據..."):
-                items = asyncio.run(get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages))
+                items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
                 
                 # 準備元數據
                 metadata_list = [
