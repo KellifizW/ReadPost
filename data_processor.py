@@ -104,10 +104,8 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=10):
 """
     
     call_id = f"sort_{cat_id}_{int(time.time())}"
-    # 直接返回 stream_grok3_response 的異步生成器
     response_stream = stream_grok3_response(prompt, call_id=call_id)
     
-    # 收集排序後的帖子 ID
     response = ""
     async for chunk in response_stream:
         response += chunk
@@ -161,6 +159,5 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=10):
 - 篩選報告：
 {filter_report}
 """
-    # 返回流式回應
     call_id = f"analyze_{cat_id}_{int(time.time())}"
     return stream_grok3_response(prompt, call_id=call_id)
