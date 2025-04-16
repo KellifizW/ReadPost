@@ -75,7 +75,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                 request_counter = 0
                 last_reset = time.time()
             
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={page}&count=60"
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now&order=now"
             attempt = 0
             max_attempts = 3
             
@@ -137,6 +137,16 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                         new_items = data["response"]["items"]
                         if not new_items:
                             break
+                        
+                        # 記錄排序資訊（第一個和最後一個帖子的 last_reply_time）
+                        if new_items:
+                            first_item = new_items[0]
+                            last_item = new_items[-1]
+                            logger.info(
+                                f"排序檢查: cat_id={cat_id}, page={page}, "
+                                f"首帖 thread_id={first_item['thread_id']}, last_reply_time={first_item.get('last_reply_time', '未知')}, "
+                                f"末帖 thread_id={last_item['thread_id']}, last_reply_time={last_item.get('last_reply_time', '未知')}"
+                            )
                         
                         items.extend(new_items)
                         logger.info(f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(new_items)}, 代理={proxy}")
