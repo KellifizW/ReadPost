@@ -78,30 +78,35 @@ async def test_page():
                     with st.spinner(f"正在查詢帖子 {thread_id} 的回覆數..."):
                         logger.info(f"查詢帖子回覆數: thread_id={thread_id}, cat_id={cat_id}")
                         # 獲取帖子內容
-                        replies = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
-                        if replies:
-                            # 假設 replies 是回覆列表，計算回覆數
+                        thread_data = await get_lihkg_thread_content(thread_id, cat_id=cat_id)
+                        replies = thread_data["replies"]
+                        thread_title = thread_data["title"]
+                        
+                        if replies is not None:
                             reply_count = len(replies)
-                            # 從 metadata_list 中查找標題（如果之前抓取過）
-                            thread_title = "未知標題"
-                            items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=1)
-                            metadata_list = [
-                                {
-                                    "thread_id": item["thread_id"],
-                                    "title": item["title"],
-                                    "no_of_reply": item["no_of_reply"],
-                                }
-                                for item in items
-                            ]
-                            for item in metadata_list:
-                                if str(item["thread_id"]) == str(thread_id):
-                                    thread_title = item["title"]
-                                    break
+                            if thread_title is None:
+                                # 如果標題仍未找到，嘗試從帖子列表中獲取（增加頁數）
+                                logger.warning(f"從 API 回應中未找到標題，嘗試從帖子列表中查找: thread_id={thread_id}")
+                                items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5)  # 增加頁數
+                                metadata_list = [
+                                    {
+                                        "thread_id": item["thread_id"],
+                                        "title": item["title"],
+                                        "no_of_reply": item["no_of_reply"],
+                                    }
+                                    for item in items
+                                ]
+                                thread_title = "未知標題"
+                                for item in metadata_list:
+                                    if str(item["thread_id"]) == str(thread_id):
+                                        thread_title = item["title"]
+                                        break
+                            
                             st.markdown(f"#### 查詢結果")
                             st.markdown(f"- 帖子 ID: {thread_id}")
                             st.markdown(f"- 標題: {thread_title}")
                             st.markdown(f"- 回覆數: {reply_count}")
-                            logger.info(f"查詢成功: thread_id={thread_id}, 回覆數={reply_count}")
+                            logger.info(f"查詢成功: thread_id={thread_id}, 回覆數={reply_count}, 標題={thread_title}")
                         else:
                             st.markdown(f"錯誤：無法獲取帖子 {thread_id} 的回覆數據，可能是帖子不存在或分類不正確。")
                             logger.warning(f"查詢失敗: thread_id={thread_id}, 無回覆數據")
