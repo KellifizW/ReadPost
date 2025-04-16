@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime
 import pytz
 from data_processor import process_user_question
-from grok3_client import get_grok3_response
+from grok3_client import stream_grok3_response
 import time
 
 # 定義香港時區
@@ -38,6 +38,9 @@ async def chat_page():
         "創意台": 31
     }
     
+    # 分類選擇
+    selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
+    
     # 顯示聊天歷史
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
@@ -46,7 +49,7 @@ async def chat_page():
             st.markdown(chat["answer"])
     
     # 聊天輸入框
-    user_question = st.chat_input("請輸入您想查詢的 LIHKG 話題（例如：吹水台有哪些搞笑話題？）")
+    user_question = st.chat_input("請輸入您想查詢的 LIHKG 話題（例如：有哪些搞笑話題？）")
     
     if user_question:
         with st.chat_message("user"):
@@ -57,7 +60,7 @@ async def chat_page():
                 # 儲存最新問題以供 Grok 3 使用
                 st.session_state.last_user_query = user_question
                 
-                # 解析用戶問題並抓取數據
+                # 解析用戶問題並抓取數據（優先使用問題中的分類）
                 result = await process_user_question(
                     user_question,
                     cat_id_map=cat_id_map,
@@ -78,8 +81,7 @@ async def chat_page():
                 else:
                     items = result.get("items", [])
                     rate_limit_info = result.get("rate_limit_info", [])
-                    selected_cat = result.get("selected_cat", "吹水台")  # 預設吹水台
-                    max_pages = result.get("max_pages", 1)  # 預設抓取 1 頁
+                    question_cat = result.get("selected_cat", selected_cat)  # 優先問題中的分類，否則使用選單
                     
                     # 準備元數據
                     metadata_list = [
@@ -105,17 +107,17 @@ async def chat_page():
                     
                     # 構建回應
                     if filtered_items:
-                        answer = f"### 來自 {selected_cat} 的話題（回覆數 ≥ {min_replies}）：\n"
+                        answer = f"### 來自 {question_cat} 的話題（回覆數 ≥ {min_replies}）：\n"
                         for item in filtered_items:
                             answer += (
                                 f"- 帖子 ID: {item['thread_id']}，標題: {item['title']}，"
                                 f"回覆數: {item['no_of_reply']}，最後回覆時間: {item['last_reply_time']}\n"
                             )
                         answer += f"\n共找到 {len(filtered_items)} 篇符合條件的帖子。"
-                        logger.info(f"成功處理: 問題={user_question}, 分類={selected_cat}, 帖子數={len(filtered_items)}")
+                        logger.info(f"成功處理: 問題={user_question}, 分類={question_cat}, 帖子數={len(filtered_items)}")
                     else:
-                        answer = f"在 {selected_cat} 中未找到回覆數 ≥ {min_replies} 的帖子。"
-                        logger.warning(f"無符合條件的帖子: 問題={user_question}, 分類={selected_cat}")
+                        answer = f"在 {question_cat} 中未找到回覆數 ≥ {min_replies} 的帖子。"
+                        logger.warning(f"無符合條件的帖子: 問題={user_question}, 分類={question_cat}")
                     
                     # 顯示速率限制信息（若有）
                     if rate_limit_info:
@@ -123,16 +125,21 @@ async def chat_page():
                         for info in rate_limit_info:
                             answer += f"- {info}\n"
                     
-                    # 可選：調用 Grok 3 增強回應
+                    # 可選：調用 Grok 3 增強回應（流式顯示）
                     try:
                         grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
-                        grok_response = await get_grok3_response(grok_context)
+                        grok_response = ""
+                        async for chunk in stream_grok3_response(grok_context):
+                            grok_response += chunk
+                            # 即時更新顯示
+                            with st.chat_message("assistant"):
+                                st.markdown(answer + f"\n#### Grok 3 建議：\n{grok_response}")
                         if grok_response and not grok_response.startswith("錯誤:"):
                             answer += f"\n#### Grok 3 建議：\n{grok_response}"
                     except Exception as e:
                         logger.warning(f"Grok 3 增強失敗: 問題={user_question}, 錯誤={str(e)}")
                 
-                # 顯示回應
+                # 顯示最終回應
                 with st.chat_message("assistant"):
                     st.markdown(answer)
                 
