@@ -86,45 +86,32 @@ async def chat_page():
                         "answer": answer
                     })
                 else:
-                    items = result.get("items", [])
+                    thread_data = result.get("thread_data", [])
                     rate_limit_info = result.get("rate_limit_info", [])
                     question_cat = result.get("selected_cat", selected_cat)
                     
-                    # 準備元數據
-                    metadata_list = [
-                        {
-                            "thread_id": item["thread_id"],
-                            "title": item["title"],
-                            "no_of_reply": item["no_of_reply"],
-                            "last_reply_time": (
-                                datetime.fromtimestamp(int(item.get("last_reply_time", 0)), tz=HONG_KONG_TZ)
-                                .strftime("%Y-%m-%d %H:%M:%S")
-                                if item.get("last_reply_time")
-                                else "未知"
-                            ),
-                            "like_count": item.get("like_count", 0),
-                            "dislike_count": item.get("dislike_count", 0),
-                        }
-                        for item in items
-                    ]
-                    
-                    # 篩選回覆數 ≥ 125 的帖子
-                    min_replies = 125
-                    filtered_items = [item for item in metadata_list if item["no_of_reply"] >= min_replies]
-                    
-                    # 構建帖子列表（僅用於 Grok 3 上下文，不顯示）
-                    if filtered_items:
-                        answer = f"### 來自 {question_cat} 的話題（回覆數 ≥ {min_replies}）：\n"
-                        for item in filtered_items:
+                    # 構建上下文（包含帖子和回覆數據，僅用於 Grok 3，不顯示）
+                    if thread_data:
+                        answer = f"### 來自 {question_cat} 的話題（回覆數 ≥ 125）：\n"
+                        for item in thread_data:
                             answer += (
                                 f"- 帖子 ID: {item['thread_id']}，標題: {item['title']}，"
-                                f"回覆數: {item['no_of_reply']}，最後回覆時間: {item['last_reply_time']}，"
+                                f"回覆數: {item['no_of_reply']}，"
+                                f"最後回覆時間: {datetime.fromtimestamp(int(item['last_reply_time']), tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if item['last_reply_time'] else '未知'}，"
                                 f"正評: {item['like_count']}，負評: {item['dislike_count']}\n"
                             )
-                        answer += f"\n共找到 {len(filtered_items)} 篇符合條件的帖子。"
-                        logger.info(f"成功處理: 問題={user_question}, 分類={question_cat}, 帖子數={len(filtered_items)}")
+                            if item["replies"]:
+                                answer += "  回覆:\n"
+                                for idx, reply in enumerate(item["replies"], 1):
+                                    answer += (
+                                        f"    - 回覆 {idx}: {reply['msg'][:100]}"
+                                        f"{'...' if len(reply['msg']) > 100 else ''} "
+                                        f"(正評: {reply['like_count']}, 負評: {reply['dislike_count']})\n"
+                                    )
+                        answer += f"\n共找到 {len(thread_data)} 篇符合條件的帖子。"
+                        logger.info(f"成功處理: 問題={user_question}, 分類={question_cat}, 帖子數={len(thread_data)}")
                     else:
-                        answer = f"在 {question_cat} 中未找到回覆數 ≥ {min_replies} 的帖子。"
+                        answer = f"在 {question_cat} 中未找到回覆數 ≥ 125 的帖子。"
                         logger.warning(f"無符合條件的帖子: 問題={user_question}, 分類={question_cat}")
                     
                     # 添加速率限制信息（若有）
@@ -136,6 +123,33 @@ async def chat_page():
                     # 調用 Grok 3 增強回應（流式顯示）
                     try:
                         grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
+                        # 檢查 token 量，動態調整
+                        if len(grok_context) > 7000:  # 留 1000 字元餘量
+                            logger.warning(f"上下文接近限制: 字元數={len(grok_context)}，縮減回覆數據")
+                            # 減少回覆數量
+                            for item in thread_data:
+                                item["replies"] = item["replies"][:1]  # 每帖保留 1 條回覆
+                            # 重構 answer
+                            answer = f"### 來自 {question_cat} 的話題（回覆數 ≥ 125）：\n"
+                            for item in thread_data:
+                                answer += (
+                                    f"- 帖子 ID: {item['thread_id']}，標題: {item['title']}，"
+                                    f"回覆數: {item['no_of_reply']}，"
+                                    f"最後回覆時間: {datetime.fromtimestamp(int(item['last_reply_time']), tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if item['last_reply_time'] else '未知'}，"
+                                    f"正評: {item['like_count']}，負評: {item['dislike_count']}\n"
+                                )
+                                if item["replies"]:
+                                    answer += "  回覆:\n"
+                                    for idx, reply in enumerate(item["replies"], 1):
+                                        answer += (
+                                            f"    - 回覆 {idx}: {reply['msg'][:100]}"
+                                            f"{'...' if len(reply['msg']) > 100 else ''} "
+                                            f"(正評: {reply['like_count']}, 負評: {reply['dislike_count']})\n"
+                                        )
+                            answer += f"\n共找到 {len(thread_data)} 篇符合條件的帖子。"
+                            grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
+                            logger.info(f"縮減後上下文: 字元數={len(grok_context)}")
+                        
                         grok_response = ""
                         with st.chat_message("assistant"):
                             grok_container = st.empty()
