@@ -2,7 +2,6 @@ import aiohttp
 import asyncio
 import time
 from datetime import datetime
-import logging.handlers
 import random
 import uuid
 import hashlib
@@ -40,8 +39,8 @@ class RateLimiter:
             self.requests = self.requests[1:]  # 移除最早的請求
         self.requests.append(now)
 
-# 初始化速率限制器（每分鐘 5 次）
-rate_limiter = RateLimiter(max_requests=5, period=60)
+# 初始化速率限制器（每分鐘 20 次）
+rate_limiter = RateLimiter(max_requests=20, period=60)
 
 async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, request_counter, last_reset, rate_limit_until):
     # 生成隨機設備 ID
