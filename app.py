@@ -14,7 +14,7 @@ async def main():
     if page == "聊天介面":
         await chat_page()
     elif page == "測試頁面":
-        test_page()
+        await test_page()  # 添加 await
 
 if __name__ == "__main__":
     # 在 Streamlit 中運行異步主函數
