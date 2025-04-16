@@ -1,5 +1,4 @@
 import re
-import asyncio
 from datetime import datetime
 import pytz
 
@@ -50,21 +49,3 @@ def build_post_context(post, replies):
                 context += msg_line
                 char_count += len(msg_line)
     return context
-
-def async_to_sync_stream(async_gen):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    def get_next():
-        try:
-            return loop.run_until_complete(anext(async_gen))
-        except StopAsyncIteration:
-            return None
-    
-    while True:
-        chunk = get_next()
-        if chunk is None:
-            break
-        yield chunk
-    
-    loop.close()
