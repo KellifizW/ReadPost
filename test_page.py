@@ -1,10 +1,10 @@
 import streamlit as st
 import asyncio
-import streamlit.logger
 import time
 from datetime import datetime
 
-logger = streamlit.logger.get_logger(__name__)
+# 使用 Streamlit 的 logger
+logger = st.logger.get_logger(__name__)
 
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
@@ -16,6 +16,10 @@ async def test_page():
         st.session_state.topic_list_cache = {}
     if "rate_limit_until" not in st.session_state:
         st.session_state.rate_limit_until = 0
+    if "request_counter" not in st.session_state:
+        st.session_state.request_counter = 0
+    if "last_reset" not in st.session_state:
+        st.session_state.last_reset = time.time()
     
     # 檢查是否處於速率限制中
     if time.time() < st.session_state.rate_limit_until:
@@ -53,9 +57,20 @@ async def test_page():
                     rate_limit_info = st.session_state.topic_list_cache[cache_key]["rate_limit_info"]
                     logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數={max_pages}, 帖子數={len(items)}")
                 else:
-                    result = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
+                    result = await get_lihkg_topic_list(
+                        cat_id,
+                        sub_cat_id=0,
+                        start_page=1,
+                        max_pages=max_pages,
+                        request_counter=st.session_state.request_counter,
+                        last_reset=st.session_state.last_reset,
+                        rate_limit_until=st.session_state.rate_limit_until
+                    )
                     items = result["items"]
                     rate_limit_info = result["rate_limit_info"]
+                    st.session_state.request_counter = result["request_counter"]
+                    st.session_state.last_reset = result["last_reset"]
+                    st.session_state.rate_limit_until = result["rate_limit_until"]
                     st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": rate_limit_info}
                     logger.info(f"抓取完成: 總共 {len(items)} 篇帖子")
                 
@@ -111,11 +126,20 @@ async def test_page():
                     with st.spinner(f"正在查詢帖子 {thread_id} 的回覆數..."):
                         logger.info(f"查詢帖子回覆數: thread_id={thread_id}")
                         # 獲取帖子內容（不指定分類）
-                        thread_data = await get_lihkg_thread_content(thread_id)
+                        thread_data = await get_lihkg_thread_content(
+                            thread_id,
+                            cat_id=None,
+                            request_counter=st.session_state.request_counter,
+                            last_reset=st.session_state.last_reset,
+                            rate_limit_until=st.session_state.rate_limit_until
+                        )
                         replies = thread_data["replies"]
                         thread_title = thread_data["title"]
                         api_reply_count = thread_data["total_replies"]
                         rate_limit_info = thread_data["rate_limit_info"]
+                        st.session_state.request_counter = thread_data["request_counter"]
+                        st.session_state.last_reset = thread_data["last_reset"]
+                        st.session_state.rate_limit_until = thread_data["rate_limit_until"]
                         
                         if rate_limit_info:
                             st.markdown("#### 速率限制調試信息")
@@ -134,9 +158,20 @@ async def test_page():
                                         items = st.session_state.topic_list_cache[cache_key]["items"]
                                         logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數=5, 帖子數={len(items)}")
                                     else:
-                                        result = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5)
+                                        result = await get_lihkg_topic_list(
+                                            cat_id,
+                                            sub_cat_id=0,
+                                            start_page=1,
+                                            max_pages=5,
+                                            request_counter=st.session_state.request_counter,
+                                            last_reset=st.session_state.last_reset,
+                                            rate_limit_until=st.session_state.rate_limit_until
+                                        )
                                         items = result["items"]
                                         rate_limit_info.extend(result["rate_limit_info"])
+                                        st.session_state.request_counter = result["request_counter"]
+                                        st.session_state.last_reset = result["last_reset"]
+                                        st.session_state.rate_limit_until = result["rate_limit_until"]
                                         st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": result["rate_limit_info"]}
                                     metadata_list = [
                                         {
