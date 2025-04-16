@@ -3,24 +3,52 @@ import streamlit.logger
 import asyncio
 import time
 from datetime import datetime
+import random
 
 logger = streamlit.logger.get_logger(__name__)
 
 LIHKG_BASE_URL = "https://lihkg.com"
 
+# 隨機 User-Agent 列表
+USER_AGENTS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+]
+
 async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
     headers = {
-        "User-Agent": "LIHKG/7.6.2 (iPhone; iOS 17.4.1; Scale/3.00)",
+        "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9",
         "Connection": "keep-alive",
     }
     
     items = []
-    rate_limit_info = []  # 用於記錄 429 錯誤的調試信息
+    rate_limit_info = []
+    
+    # 請求計數器
+    if "request_counter" not in st.session_state:
+        st.session_state.request_counter = 0
+        st.session_state.last_reset = time.time()
+    
+    if time.time() - st.session_state.last_reset >= 60:
+        st.session_state.request_counter = 0
+        st.session_state.last_reset = time.time()
     
     async with aiohttp.ClientSession() as session:
         for page in range(start_page, start_page + max_pages):
+            # 檢查速率限制
+            st.session_state.request_counter += 1
+            if st.session_state.request_counter > 90:  # 假設每分鐘 100 次，留 10 次緩衝
+                wait_time = 60 - (time.time() - st.session_state.last_reset)
+                rate_limit_info.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 即將達到每分鐘請求限制，暫停 {wait_time:.2f} 秒")
+                logger.warning(f"即將達到每分鐘請求限制，暫停 {wait_time:.2f} 秒")
+                await asyncio.sleep(wait_time)
+                st.session_state.request_counter = 0
+                st.session_state.last_reset = time.time()
+            
             url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&sub_cat_id={sub_cat_id}&page={page}&count=60"
             headers["Referer"] = f"{LIHKG_BASE_URL}/category/{cat_id}"
             
@@ -37,16 +65,16 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
                             if first_429_time is None:
                                 first_429_time = time.time()
                             
-                            # 檢查 Retry-After 頭
                             retry_after = response.headers.get("Retry-After")
                             if retry_after:
                                 try:
                                     wait_time = int(retry_after)
                                 except ValueError:
-                                    wait_time = 5 * attempt  # 如果 Retry-After 不是數字，使用指數退避
+                                    wait_time = 5 * attempt
                             else:
-                                wait_time = 5 * attempt  # 指數退避：第 1 次 5 秒，第 2 次 10 秒，第 3 次 15 秒
+                                wait_time = 5 * attempt
                             
+                            st.session_state.rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(f"{current_time} - 速率限制: cat_id={cat_id}, page={page}, 嘗試={attempt}, 狀態碼=429, 等待 {wait_time} 秒")
                             logger.warning(f"速率限制: cat_id={cat_id}, page={page}, 嘗試={attempt}, 狀態碼=429, 等待 {wait_time} 秒")
                             await asyncio.sleep(wait_time)
@@ -75,7 +103,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
                         
                         items.extend(new_items)
                         logger.info(f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(new_items)}")
-                        await asyncio.sleep(1)  # 每次請求後等待 1 秒
+                        await asyncio.sleep(2)  # 每次請求後等待 2 秒
                         break
                 
                 except Exception as e:
@@ -92,7 +120,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages):
 
 async def get_lihkg_thread_content(thread_id, cat_id=None):
     headers = {
-        "User-Agent": "LIHKG/7.6.2 (iPhone; iOS 17.4.1; Scale/3.00)",
+        "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9",
         "Connection": "keep-alive",
@@ -104,8 +132,26 @@ async def get_lihkg_thread_content(thread_id, cat_id=None):
     total_replies = None
     rate_limit_info = []
     
+    # 請求計數器
+    if "request_counter" not in st.session_state:
+        st.session_state.request_counter = 0
+        st.session_state.last_reset = time.time()
+    
+    if time.time() - st.session_state.last_reset >= 60:
+        st.session_state.request_counter = 0
+        st.session_state.last_reset = time.time()
+    
     async with aiohttp.ClientSession() as session:
         while True:
+            st.session_state.request_counter += 1
+            if st.session_state.request_counter > 90:
+                wait_time = 60 - (time.time() - st.session_state.last_reset)
+                rate_limit_info.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} - 即將達到每分鐘請求限制，暫停 {wait_time:.2f} 秒")
+                logger.warning(f"即將達到每分鐘請求限制，暫停 {wait_time:.2f} 秒")
+                await asyncio.sleep(wait_time)
+                st.session_state.request_counter = 0
+                st.session_state.last_reset = time.time()
+            
             url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/message?page={page}&count=100"
             headers["Referer"] = f"{LIHKG_BASE_URL}/thread/{thread_id}"
             
@@ -131,6 +177,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None):
                             else:
                                 wait_time = 5 * attempt
                             
+                            st.session_state.rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(f"{current_time} - 速率限制: thread_id={thread_id}, page={page}, 嘗試={attempt}, 狀態碼=429, 等待 {wait_time} 秒")
                             logger.warning(f"速率限制: thread_id={thread_id}, page={page}, 嘗試={attempt}, 狀態碼=429, 等待 {wait_time} 秒")
                             await asyncio.sleep(wait_time)
@@ -167,7 +214,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None):
                         replies.extend(new_replies)
                         logger.info(f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數={len(new_replies)}")
                         page += 1
-                        await asyncio.sleep(1)  # 每次請求後等待 1 秒
+                        await asyncio.sleep(2)  # 每次請求後等待 2 秒
                         break
                 
                 except Exception as e:
