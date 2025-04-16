@@ -9,6 +9,10 @@ from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 async def test_page():
     st.title("LIHKG 數據測試頁面")
     
+    # 初始化緩存
+    if "topic_list_cache" not in st.session_state:
+        st.session_state.topic_list_cache = {}
+    
     cat_id_map = {
         "吹水台": 1,
         "熱門台": 2,
@@ -34,8 +38,28 @@ async def test_page():
         if st.button("抓取數據"):
             with st.spinner("正在抓取數據..."):
                 logger.info(f"開始抓取數據: 分類={selected_cat}, cat_id={cat_id}, 頁數={max_pages}")
-                items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
-                logger.info(f"抓取完成: 總共 {len(items)} 篇帖子")
+                cache_key = f"{cat_id}_{max_pages}"
+                if cache_key in st.session_state.topic_list_cache:
+                    items = st.session_state.topic_list_cache[cache_key]["items"]
+                    rate_limit_info = st.session_state.topic_list_cache[cache_key]["rate_limit_info"]
+                    logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數={max_pages}, 帖子數={len(items)}")
+                else:
+                    result = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=max_pages)
+                    items = result["items"]
+                    rate_limit_info = result["rate_limit_info"]
+                    st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": rate_limit_info}
+                    logger.info(f"抓取完成: 總共 {len(items)} 篇帖子")
+                
+                # 檢查抓取是否完整
+                expected_items = max_pages * 60
+                if len(items) < expected_items * 0.5:  # 如果抓取的帖子數少於預期的一半
+                    st.warning("抓取數據不完整，可能是因為 API 速率限制。請稍後重試，或減少抓取頁數。")
+                
+                # 顯示速率限制調試信息
+                if rate_limit_info:
+                    st.markdown("#### 速率限制調試信息")
+                    for info in rate_limit_info:
+                        st.markdown(f"- {info}")
                 
                 # 準備元數據
                 metadata_list = [
@@ -82,6 +106,12 @@ async def test_page():
                         replies = thread_data["replies"]
                         thread_title = thread_data["title"]
                         api_reply_count = thread_data["total_replies"]
+                        rate_limit_info = thread_data["rate_limit_info"]
+                        
+                        if rate_limit_info:
+                            st.markdown("#### 速率限制調試信息")
+                            for info in rate_limit_info:
+                                st.markdown(f"- {info}")
                         
                         if replies is not None:
                             fetched_reply_count = len(replies)
@@ -90,7 +120,15 @@ async def test_page():
                                 logger.warning(f"從 API 回應中未找到標題，嘗試從帖子列表中查找: thread_id={thread_id}")
                                 thread_title = "未知標題"
                                 for cat_name, cat_id in cat_id_map.items():
-                                    items = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5)
+                                    cache_key = f"{cat_id}_5"  # 使用 max_pages=5 作為緩存鍵
+                                    if cache_key in st.session_state.topic_list_cache:
+                                        items = st.session_state.topic_list_cache[cache_key]["items"]
+                                        logger.info(f"從緩存中載入數據: cat_id={cat_id}, 頁數=5, 帖子數={len(items)}")
+                                    else:
+                                        result = await get_lihkg_topic_list(cat_id, sub_cat_id=0, start_page=1, max_pages=5)
+                                        items = result["items"]
+                                        rate_limit_info.extend(result["rate_limit_info"])
+                                        st.session_state.topic_list_cache[cache_key] = {"items": items, "rate_limit_info": result["rate_limit_info"]}
                                     metadata_list = [
                                         {
                                             "thread_id": item["thread_id"],
