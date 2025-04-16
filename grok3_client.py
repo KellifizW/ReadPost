@@ -9,7 +9,8 @@ logger = streamlit.logger.get_logger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 8000
 
-async def stream_grok3_response(text: str, call_id: str = None, recursion_depth: int = 0, retries: int = 3) -> AsyncGenerator[str, None]:
+async def stream_grok3_response(text: str, retries: int = 3) -> AsyncGenerator[str, None]:
+    """以流式方式從 Grok 3 API 獲取回應"""
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -19,23 +20,16 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
         return
     
     char_count = len(text)
-    if call_id:
-        st.session_state.char_counts[call_id] = char_count
-    
-    if len(text) > GROK3_TOKEN_LIMIT:
-        if recursion_depth > 2:
-            logger.error(f"輸入超限: call_id={call_id}, 字元數={char_count}, 遞迴過深")
-            yield "錯誤: 輸入過長，無法分塊處理"
-            return
-        logger.warning(f"輸入超限: call_id={call_id}, 字元數={char_count}")
+    if char_count > GROK3_TOKEN_LIMIT:
+        logger.warning(f"輸入超限: 字元數={char_count}")
         chunks = [text[i:i+3000] for i in range(0, len(text), 3000)]
-        logger.info(f"分塊處理: call_id={call_id}, 分塊數={len(chunks)}")
+        logger.info(f"分塊處理: 分塊數={len(chunks)}")
         for i, chunk in enumerate(chunks):
             chunk_prompt = f"使用者問題：{st.session_state.get('last_user_query', '')}\n{chunk}"
             if len(chunk_prompt) > GROK3_TOKEN_LIMIT:
                 chunk_prompt = chunk_prompt[:GROK3_TOKEN_LIMIT - 100] + "\n[已截斷]"
-                logger.warning(f"分塊超限: call_id={call_id}_sub_{i}, 字元數={len(chunk_prompt)}")
-            async for chunk in stream_grok3_response(chunk_prompt, call_id=f"{call_id}_sub_{i}", recursion_depth=recursion_depth + 1, retries=retries):
+                logger.warning(f"分塊超限: 子塊 {i}, 字元數={len(chunk_prompt)}")
+            async for chunk in stream_grok3_response(chunk_prompt, retries=retries):
                 yield chunk
         return
     
@@ -73,14 +67,21 @@ async def stream_grok3_response(text: str, call_id: str = None, recursion_depth:
                                 if content:
                                     yield content
                             except json.JSONDecodeError:
-                                logger.warning(f"JSON 解析失敗: call_id={call_id}, 數據={line_str}")
+                                logger.warning(f"JSON 解析失敗: 數據={line_str}")
                                 continue
-            logger.info(f"Grok 3 流式完成: call_id={call_id}, 輸入字元: {char_count}")
+            logger.info(f"Grok 3 流式完成: 輸入字元={char_count}")
             return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning(f"Grok 3 請求失敗，第 {attempt+1} 次重試: call_id={call_id}, 錯誤: {str(e)}")
+            logger.warning(f"Grok 3 請求失敗，第 {attempt+1} 次重試: 錯誤={str(e)}")
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
                 continue
-            logger.error(f"Grok 3 異常: call_id={call_id}, 錯誤: {str(e)}")
+            logger.error(f"Grok 3 異常: 錯誤={str(e)}")
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
+
+async def get_grok3_response(text: str, retries: int = 3) -> str:
+    """從 Grok 3 API 獲取完整回應（非流式）"""
+    full_response = ""
+    async for chunk in stream_grok3_response(text, retries=retries):
+        full_response += chunk
+    return full_response.strip()
