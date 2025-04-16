@@ -1,9 +1,12 @@
 import streamlit as st
 import streamlit.logger
 import time
+import re  # 為 re.findall 添加導入
 from datetime import datetime
 import pytz
 from lihkg_api import get_lihkg_topic_list
+from grok3_client import stream_grok3_response  # 導入 stream_grok3_response
+from utils import async_to_sync_stream  # 導入 async_to_sync_stream
 
 logger = streamlit.logger.get_logger(__name__)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
