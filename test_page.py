@@ -1,3 +1,4 @@
+# [此處為原始 test_page.py，未作改動]
 import streamlit as st
 import asyncio
 import time
@@ -221,18 +222,4 @@ async def test_page():
                             st.markdown(f"#### 查詢結果")
                             st.markdown(f"- 帖子 ID: {thread_id}")
                             st.markdown(f"- 標題: {thread_title}")
-                            st.markdown(f"- 回覆數: {reply_count}")
-                            st.markdown(f"- 最後回覆時間: {last_reply_time}")
-                            logger.info(f"查詢成功: thread_id={thread_id}, 標題={thread_title}, 回覆數={reply_count}, 最後回覆時間={last_reply_time}")
-                        else:
-                            st.markdown(f"錯誤：無法獲取帖子 {thread_id} 的信息，可能是帖子不存在或需要登錄權限。")
-                            logger.warning(f"查詢失敗: thread_id={thread_id}, 無帖子信息")
-                except ValueError:
-                    st.markdown("錯誤：請輸入有效的帖子 ID（必須是數字）。")
-                    logger.warning(f"無效帖子 ID: {thread_id_input}")
-                except Exception as e:
-                    st.markdown(f"錯誤：查詢失敗，原因：{str(e)}")
-                    logger.error(f"查詢帖子信息失敗: thread_id={thread_id_input}, 錯誤={str(e)}")
-            else:
-                st.markdown("請輸入帖子 ID。")
-                logger.warning("未輸入帖子 ID")
+                            st.markdown(f"- 回覆數: {reply
