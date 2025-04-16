@@ -78,10 +78,3 @@ async def stream_grok3_response(text: str, retries: int = 3) -> AsyncGenerator[s
                 continue
             logger.error(f"Grok 3 異常: 錯誤={str(e)}")
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
-
-async def get_grok3_response(text: str, retries: int = 3) -> str:
-    """從 Grok 3 API 獲取完整回應（非流式）"""
-    full_response = ""
-    async for chunk in stream_grok3_response(text, retries=retries):
-        full_response += chunk
-    return full_response.strip()
