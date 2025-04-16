@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 import pytz
 from data_processor import process_user_question
+from grok3_client import get_grok3_response
 
 # 定義香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -44,6 +45,9 @@ async def chat_page():
         
         with st.spinner("正在處理您的問題..."):
             try:
+                # 儲存最新問題以供 Grok 3 使用
+                st.session_state.last_user_query = user_question
+                
                 # 解析用戶問題並抓取數據
                 result = await process_user_question(
                     user_question,
@@ -88,6 +92,16 @@ async def chat_page():
                 else:
                     answer = f"在 {selected_cat} 中未找到回覆數 ≥ {min_replies} 的帖子。"
                     logger.warning(f"無符合條件的帖子: 問題={user_question}, 分類={selected_cat}")
+                
+                # 可選：使用 Grok 3 增強回應
+                try:
+                    grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
+                    grok_response = await get_grok3_response(grok_context)
+                    if grok_response and not grok_response.startswith("錯誤:"):
+                        answer += f"\n#### Grok 3 建議：\n{grok_response}"
+                except Exception as e:
+                    logger.warning(f"Grok 3 增強失敗: 問題={user_question}, 錯誤={str(e)}")
+                    # 忽略 Grok 3 錯誤，繼續顯示帖子數據
                 
                 # 顯示回應
                 with st.chat_message("assistant"):
