@@ -1,6 +1,8 @@
 import streamlit as st
 import asyncio
 import streamlit.logger
+import time
+from datetime import datetime
 
 logger = streamlit.logger.get_logger(__name__)
 
@@ -9,9 +11,16 @@ from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 async def test_page():
     st.title("LIHKG 數據測試頁面")
     
-    # 初始化緩存
+    # 初始化緩存和速率限制狀態
     if "topic_list_cache" not in st.session_state:
         st.session_state.topic_list_cache = {}
+    if "rate_limit_until" not in st.session_state:
+        st.session_state.rate_limit_until = 0
+    
+    # 檢查是否處於速率限制中
+    if time.time() < st.session_state.rate_limit_until:
+        st.error(f"API 速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until)} 後重試。")
+        return
     
     cat_id_map = {
         "吹水台": 1,
