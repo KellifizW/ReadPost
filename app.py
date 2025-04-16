@@ -290,19 +290,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     today_start = datetime.now(HONG_KONG_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today_start.timestamp())
     
-    # 篩選條件：總回覆數 ≥ 125，且最後回覆時間在今日
-    filtered_items = [
-        item for item in items
-        if item.get("no_of_reply", 0) >= 125 and int(item.get("last_reply_time", 0)) >= today_timestamp
-    ]
-    logger.info(f"過濾後帖子數: cat_id={cat_id}, 符合條件數={len(filtered_items)}")
-    
-    if not filtered_items:
-        logger.warning(f"無有效帖子: 分類={cat_id}")
-        cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
-        return f"今日 {cat_name} 無符合條件的帖子（總回覆數 ≥ 125 且最後回覆在今日），建議查看熱門台（cat_id=2）。"
-    
-    # 準備元數據供 AI 排序
+    # 準備元數據
     metadata_list = [
         {
             "thread_id": item["thread_id"],
@@ -312,19 +300,38 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
             "like_count": int(item.get("like_count", "0")) if item.get("like_count") else 0,
             "dislike_count": int(item.get("dislike_count", "0")) if item.get("dislike_count") else 0,
         }
-        for item in filtered_items
+        for item in items
     ]
+    
+    # 檢查用戶問題是否為「列出所有帖子標題」
+    if "列出" in user_query and "所有" in user_query and "標題" in user_query:
+        logger.info(f"檢測到列出所有標題請求，跳過篩選和排序，直接列出所有帖子標題")
+        st.session_state.metadata = metadata_list
+        titles = [f"- {item['title']}" for item in metadata_list]
+        return f"以下是分類 {cat_id} 抓取到的所有帖子標題（共 {len(titles)} 篇）：\n" + "\n".join(titles)
+    
+    # 正常篩選條件：總回覆數 ≥ 125，且最後回覆時間在今日
+    filtered_items = [
+        item for item in metadata_list
+        if item["no_of_reply"] >= 125 and int(item["last_reply_time"]) >= today_timestamp
+    ]
+    logger.info(f"過濾後帖子數: cat_id={cat_id}, 符合條件數={len(filtered_items)}")
+    
+    if not filtered_items:
+        logger.warning(f"無有效帖子: 分類={cat_id}")
+        cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
+        return f"今日 {cat_name} 無符合條件的帖子（總回覆數 ≥ 125 且最後回覆在今日），建議查看熱門台（cat_id=2）。"
     
     metadata_text = "\n".join([
         f"帖子 ID: {item['thread_id']}, 標題: {item['title']}, 回覆數: {item['no_of_reply']}, 最後回覆: {item['last_reply_time']}, 正評: {item['like_count']}, 負評: {item['dislike_count']}"
-        for item in metadata_list
+        for item in filtered_items
     ])
     
     cat_name = {1: "吹水台", 2: "熱門台", 5: "時事台", 14: "上班台", 15: "財經台", 29: "成人台", 31: "創意台"}.get(cat_id, "未知分類")
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）篩選出的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），條件為總回覆數 ≥ 125 且最後回覆在今日：
+以下是 LIHKG 討論區今日（2025-04-16）篩選出的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），條件為總回覆數 ≥ 125 且最後回覆在今日：
 {metadata_text}
 
 以繁體中文回答，基於帖子標題和正負評數量，執行以下步驟：
@@ -347,7 +354,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
         response += chunk
     
     thread_ids = re.findall(r'\b(\d{5,})\b', response, re.MULTILINE)
-    valid_ids = [str(item["thread_id"]) for item in metadata_list]
+    valid_ids = [str(item["thread_id"]) for item in filtered_items]
     sorted_ids = [tid for tid in thread_ids if tid in valid_ids]
     
     logger.info(f"AI 排序後帖子: 提取={thread_ids}, 有效={sorted_ids}")
@@ -359,7 +366,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     # 根據 AI 排序的 ID 重新排列 metadata
     st.session_state.metadata = []
     for tid in sorted_ids:
-        for item in metadata_list:
+        for item in filtered_items:
             if str(item["thread_id"]) == tid:
                 st.session_state.metadata.append(item)
                 break
@@ -372,7 +379,7 @@ async def analyze_lihkg_metadata(user_query, cat_id=1, max_pages=5):
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）篩選並排序後的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），已按相關性排序：
+以下是 LIHKG 討論區今日（2025-04-16）篩選並排序後的帖子元數據，分類為 {cat_name}（cat_id={cat_id}），已按相關性排序：
 {metadata_text}
 
 以繁體中文回答，基於所有帖子標題，綜合分析討論區的廣泛意見，直接回答問題，禁止生成無關內容。執行以下步驟：
@@ -406,7 +413,7 @@ async def select_relevant_threads(user_query, max_threads=3):
     prompt = f"""
 使用者問題：{user_query}
 
-以下是 LIHKG 討論區今日（2025-04-15）已排序的帖子元數據：
+以下是 LIHKG 討論區今日（2025-04-16）已排序的帖子元數據：
 {metadata_text}
 
 基於標題，選擇與問題最相關的帖子 ID（每行一個數字），最多 {max_threads} 個。僅返回 ID，無其他內容。若無相關帖子，返回空列表。
@@ -676,7 +683,7 @@ def chat_page():
                         with st.chat_message("assistant"):
                             full_response = st.write_stream(async_to_sync_stream(stream_grok3_response(prompt, call_id=call_id)))
                         st.session_state.messages.append({"role": "assistant", "content": full_response})
-                        if not full_response.startswith("今日") and not full_response.startswith("錯誤"):
+                        if not full_response.startswith("今日") and not full_response.startswith("錯誤") and not full_response.startswith("以下是分類"):
                             response = "你需要我對某個帖子生成更深入的總結嗎？請輸入『需要』以自動選擇帖子、『ID 數字』以指定帖子，或『不需要』以結束。"
                             st.session_state.messages.append({"role": "assistant", "content": response})
                             with st.chat_message("assistant"):
