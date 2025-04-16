@@ -6,19 +6,10 @@ import logging.handlers
 import random
 import uuid
 import hashlib
+import streamlit.logger
 
-# 設置日誌
-try:
-    import streamlit.logger
-    logger = streamlit.logger.get_logger(__name__)
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
-    handler = logging.handlers.RotatingFileHandler("lihkg_api.log", maxBytes=10*1024*1024, backupCount=5)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+# 使用 Streamlit logger
+logger = streamlit.logger.get_logger(__name__)
 
 LIHKG_BASE_URL = "https://lihkg.com"
 
@@ -37,13 +28,14 @@ class RateLimiter:
         self.period = period  # 時間週期（秒）
         self.requests = []
 
-    async def acquire(self):
+    async def acquire(self, context: dict = None):
         now = time.time()
         # 移除過期的請求
         self.requests = [t for t in self.requests if now - t < self.period]
         if len(self.requests) >= self.max_requests:
             wait_time = self.period - (now - self.requests[0])
-            logger.warning(f"達到速率限制，等待 {wait_time:.2f} 秒")
+            context_info = f", 上下文={context}" if context else ""
+            logger.warning(f"達到內部速率限制，當前請求數={len(self.requests)}/{self.max_requests}，等待 {wait_time:.2f} 秒{context_info}")
             await asyncio.sleep(wait_time)
             self.requests = self.requests[1:]  # 移除最早的請求
         self.requests.append(now)
@@ -105,33 +97,37 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
             
             for attempt in range(max_retries):
                 try:
-                    await rate_limiter.acquire()  # 檢查全局速率限制
+                    await rate_limiter.acquire(context=fetch_conditions)  # 傳遞上下文
                     request_counter += 1
                     async with session.get(url, headers=headers, timeout=10) as response:
                         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                         if response.status == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            wait_time = int(retry_after) if retry_after else 5
+                            retry_after = response.headers.get("Retry-After", "未知")
+                            headers_info = dict(response.headers)
+                            wait_time = int(retry_after) if retry_after.isdigit() else 5
                             wait_time = min(wait_time * (2 ** attempt), 60) + random.uniform(0, 0.1)  # 指數退避 + 抖動
                             rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(
-                                f"{current_time} - 速率限制: cat_id={cat_id}, page={page}, "
-                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, 請求計數={request_counter}, "
-                                f"最後重置={datetime.fromtimestamp(last_reset)}"
+                                f"{current_time} - 伺服器速率限制: cat_id={cat_id}, page={page}, "
+                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, "
+                                f"Retry-After={retry_after}, 請求計數={request_counter}, "
+                                f"最後重置={datetime.fromtimestamp(last_reset)}, 標頭={headers_info}"
                             )
                             logger.warning(
-                                f"速率限制: cat_id={cat_id}, page={page}, 狀態碼=429, "
-                                f"等待 {wait_time:.2f} 秒, 條件={fetch_conditions}"
+                                f"伺服器速率限制: cat_id={cat_id}, page={page}, 狀態碼=429, "
+                                f"等待 {wait_time:.2f} 秒, Retry-After={retry_after}, 標頭={headers_info}, "
+                                f"條件={fetch_conditions}"
                             )
                             await asyncio.sleep(wait_time)
                             continue
                         
                         if response.status != 200:
+                            headers_info = dict(response.headers)
                             rate_limit_info.append(
-                                f"{current_time} - 抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}"
+                                f"{current_time} - 抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}"
                             )
                             logger.error(
-                                f"抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 條件={fetch_conditions}"
+                                f"抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}, 條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
                             break
@@ -256,34 +252,38 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             
             for attempt in range(max_retries):
                 try:
-                    await rate_limiter.acquire()  # 檢查全局速率限制
+                    await rate_limiter.acquire(context=fetch_conditions)  # 傳遞上下文
                     request_counter += 1
                     async with session.get(url, headers=headers, timeout=10) as response:
                         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                         if response.status == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            wait_time = int(retry_after) if retry_after else 5
+                            retry_after = response.headers.get("Retry-After", "未知")
+                            headers_info = dict(response.headers)
+                            wait_time = int(retry_after) if retry_after.isdigit() else 5
                             wait_time = min(wait_time * (2 ** attempt), 60) + random.uniform(0, 0.1)  # 指數退避 + 抖動
                             rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(
-                                f"{current_time} - 速率限制: thread_id={thread_id}, page={page}, "
-                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, 請求計數={request_counter}, "
-                                f"最後重置={datetime.fromtimestamp(last_reset)}"
+                                f"{current_time} - 伺服器速率限制: thread_id={thread_id}, page={page}, "
+                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, "
+                                f"Retry-After={retry_after}, 請求計數={request_counter}, "
+                                f"最後重置={datetime.fromtimestamp(last_reset)}, 標頭={headers_info}"
                             )
                             logger.warning(
-                                f"速率限制: thread_id={thread_id}, page={page}, 狀態碼=429, "
-                                f"等待 {wait_time:.2f} 秒, 條件={fetch_conditions}"
+                                f"伺服器速率限制: thread_id={thread_id}, page={page}, 狀態碼=429, "
+                                f"等待 {wait_time:.2f} 秒, Retry-After={retry_after}, 標頭={headers_info}, "
+                                f"條件={fetch_conditions}"
                             )
                             await asyncio.sleep(wait_time)
                             continue
                         
                         if response.status != 200:
+                            headers_info = dict(response.headers)
                             rate_limit_info.append(
-                                f"{current_time} - 抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}"
+                                f"{current_time} - 抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}"
                             )
                             logger.error(
                                 f"抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}, "
-                                f"條件={fetch_conditions}"
+                                f"標頭={headers_info}, 條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
                             break
