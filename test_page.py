@@ -55,7 +55,7 @@ async def test_page():
         st.markdown(f"- 最後重置時間: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
         st.markdown(
             f"- 速率限制解除時間: "
-            f"{datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y W-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else '無限制'}"
+            f"{datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else '無限制'}"
         )
         
         # 抓取數據
