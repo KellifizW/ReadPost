@@ -11,6 +11,8 @@ import streamlit.logger
 logger = streamlit.logger.get_logger(__name__)
 
 LIHKG_BASE_URL = "https://lihkg.com"
+LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"  # 恢復舊版固定設備 ID
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"  # 恢復舊版 Cookie
 
 # 隨機化的 User-Agent 列表
 USER_AGENTS = [
@@ -43,13 +45,11 @@ class RateLimiter:
 rate_limiter = RateLimiter(max_requests=20, period=60)
 
 async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, request_counter, last_reset, rate_limit_until):
-    # 生成隨機設備 ID
-    device_id = hashlib.sha1(str(uuid.uuid4()).encode()).hexdigest()
-
-    # 隨機選擇 User-Agent
+    # 使用固定設備 ID 和 Cookie
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
-        "X-LI-DEVICE": device_id,
+        "X-LI-DEVICE": LIHKG_DEVICE_ID,
+        "Cookie": LIHKG_COOKIE,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
         "Connection": "keep-alive",
@@ -87,7 +87,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                 "page": page,
                 "max_pages": max_pages,
                 "user_agent": headers["User-Agent"],
-                "device_id": device_id,
+                "device_id": LIHKG_DEVICE_ID,
                 "request_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "request_counter": request_counter,
                 "last_reset": datetime.fromtimestamp(last_reset).strftime("%Y-%m-%d %H:%M:%S"),
@@ -145,24 +145,29 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                             break
                         
                         new_items = data["response"]["items"]
-                        if not new_items:
+                        # 過濾可能無效的帖子
+                        filtered_items = [
+                            item for item in new_items
+                            if item.get("title") and item.get("no_of_reply", 0) > 0
+                        ]
+                        if not filtered_items:
                             break
                         
                         logger.info(
-                            f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(new_items)}, "
+                            f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(filtered_items)}, "
                             f"條件={fetch_conditions}"
                         )
                         
-                        if new_items:
-                            first_item = new_items[0]
-                            last_item = new_items[-1]
+                        if filtered_items:
+                            first_item = filtered_items[0]
+                            last_item = filtered_items[-1]
                             logger.info(
                                 f"排序檢查: cat_id={cat_id}, page={page}, "
                                 f"首帖 thread_id={first_item['thread_id']}, last_reply_time={first_item.get('last_reply_time', '未知')}, "
                                 f"末帖 thread_id={last_item['thread_id']}, last_reply_time={last_item.get('last_reply_time', '未知')}"
                             )
                         
-                        items.extend(new_items)
+                        items.extend(filtered_items)
                         break
                     
                 except Exception as e:
@@ -187,13 +192,11 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
     }
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0):
-    # 生成隨機設備 ID
-    device_id = hashlib.sha1(str(uuid.uuid4()).encode()).hexdigest()
-
-    # 隨機選擇 User-Agent
+    # 使用固定設備 ID 和 Cookie
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
-        "X-LI-DEVICE": device_id,
+        "X-LI-DEVICE": LIHKG_DEVICE_ID,
+        "Cookie": LIHKG_COOKIE,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
         "Connection": "keep-alive",
@@ -242,7 +245,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                 "cat_id": cat_id if cat_id else "無",
                 "page": page,
                 "user_agent": headers["User-Agent"],
-                "device_id": device_id,
+                "device_id": LIHKG_DEVICE_ID,
                 "request_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "request_counter": request_counter,
                 "last_reset": datetime.fromtimestamp(last_reset).strftime("%Y-%m-%d %H:%M:%S"),
@@ -291,6 +294,13 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         logger.debug(f"帖子內容 API 回應: thread_id={thread_id}, page={page}, 數據={data}")
                         if not data.get("success"):
                             error_message = data.get("error_message", "未知錯誤")
+                            rate_limit_info.append(
+                                f"{current_time} - API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}"
+                            )
+                            logger.warning(
+                                f"API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}, "
+                                f"條件={fetch_conditions}"
+                            )
                             if "998" in error_message:
                                 rate_limit_info.append(
                                     f"{current_time} - 帖子無效或無權訪問: thread_id={thread_id}, page={page}, 錯誤={error_message}"
@@ -308,12 +318,6 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                                     "last_reset": last_reset,
                                     "rate_limit_until": rate_limit_until
                                 }
-                            rate_limit_info.append(
-                                f"{current_time} - API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}"
-                            )
-                            logger.error(
-                                f"API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}, 條件={fetch_conditions}"
-                            )
                             await asyncio.sleep(1)
                             break
                         
