@@ -189,7 +189,7 @@ async def chat_page():
                 debug_info.append(f"- 使用緩存: {use_cache}")
                 logger.info("\n".join(debug_info))
                 
-                # 整合 Grok 3 回應
+                # 直接傳遞數據給 Grok 3
                 try:
                     grok_context = f"問題: {user_question}\n帖子數據:\n{answer}"
                     if len(grok_context) > 7000:
