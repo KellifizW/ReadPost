@@ -2,10 +2,9 @@ import streamlit as st
 import asyncio
 import time
 from datetime import datetime
-import random
 import pytz
 from lihkg_api import get_lihkg_topic_list
-import aiohttp
+import streamlit.logger
 
 # 使用 Streamlit 的 logger
 logger = st.logger.get_logger(__name__)
@@ -26,7 +25,7 @@ async def test_page():
     
     # 檢查是否處於速率限制中
     if time.time() < st.session_state.rate_limit_until:
-        st.error(f"API 速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until)} 後重試。")
+        st.error(f"API 速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')} 後重試。")
         return
     
     cat_id_map = {
@@ -53,10 +52,10 @@ async def test_page():
         # 顯示速率限制狀態
         st.markdown("#### 速率限制狀態")
         st.markdown(f"- 當前請求計數: {st.session_state.request_counter}")
-        st.markdown(f"- 最後重置時間: {datetime.fromtimestamp(st.session_state.last_reset)}")
+        st.markdown(f"- 最後重置時間: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
         st.markdown(
             f"- 速率限制解除時間: "
-            f"{datetime.fromtimestamp(st.session_state.rate_limit_until) if st.session_state.rate_limit_until > time.time() else '無限制'}"
+            f"{datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y W-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else '無限制'}"
         )
         
         # 抓取數據
