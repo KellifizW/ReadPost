@@ -4,49 +4,14 @@ import time
 from datetime import datetime
 import random
 import pytz
+from lihkg_api import get_lihkg_topic_list
+import aiohttp
 
 # 使用 Streamlit 的 logger
 logger = st.logger.get_logger(__name__)
 
-from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
-import aiohttp
-
 # 定義香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
-
-async def search_thread_by_id(thread_id):
-    """使用搜尋 API 查詢帖子詳細信息"""
-    headers = {
-        "User-Agent": random.choice([
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        ]),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
-        "Connection": "keep-alive",
-        "Referer": "https://lihkg.com/",
-    }
-    
-    url = f"https://lihkg.com/api_v2/thread/search?q={thread_id}&page=1&count=30&sort=score&type=thread"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers) as response:
-                if response.status != 200:
-                    logger.error(f"搜尋帖子失敗: thread_id={thread_id}, 狀態碼={response.status}")
-                    return None
-                data = await response.json()
-                if not data.get("success"):
-                    logger.error(f"搜尋帖子 API 返回失敗: thread_id={thread_id}, 錯誤={data.get('error_message', '未知錯誤')}")
-                    return None
-                items = data["response"].get("items", [])
-                if not items:
-                    logger.warning(f"搜尋帖子無結果: thread_id={thread_id}")
-                    return None
-                return items[0]
-        except Exception as e:
-            logger.error(f"搜尋帖子錯誤: thread_id={thread_id}, 錯誤={str(e)}")
-            return None
 
 async def test_page():
     st.title("LIHKG 數據測試頁面")
@@ -167,37 +132,3 @@ async def test_page():
                 else:
                     st.markdown("無符合條件的帖子。")
                     logger.warning("無符合條件的帖子，可能數據不足或篩選條件過嚴")
-        
-        # 查詢帖子回覆數
-        st.markdown("---")
-        st.markdown("### 查詢帖子回覆數")
-        thread_id_input = st.text_input("輸入帖子 ID", placeholder="例如：3913444")
-        if st.button("查詢回覆數"):
-            if thread_id_input:
-                try:
-                    thread_id = int(thread_id_input)
-                    with st.spinner(f"正在查詢帖子 {thread_id} 的信息..."):
-                        logger.info(f"查詢帖子信息: thread_id={thread_id}")
-                        thread_data = await search_thread_by_id(thread_id)
-                        
-                        if thread_data:
-                            thread_title = thread_data.get("title", "未知標題")
-                            reply_count = thread_data.get("no_of_reply", 0)
-                            last_reply_time = (
-                                datetime.fromtimestamp(int(thread_data.get("last_reply_time", 0)), tz=HONG_KONG_TZ)
-                                .strftime("%Y-%m-%d %H:%M:%S")
-                                if thread_data.get("last_reply_time")
-                                else "未知"
-                            )
-                            
-                            st.markdown("#### 查詢結果")
-                            st.markdown(f"- 帖子 ID: {thread_id}")
-                            st.markdown(f"- 標題: {thread_title}")
-                            st.markdown(f"- 回覆數: {reply_count}")
-                            st.markdown(f"- 最後回覆時間: {last_reply_time}")
-                        else:
-                            st.markdown(f"未找到帖子 ID {thread_id} 的信息。")
-                            logger.warning(f"查詢失敗: thread_id={thread_id}, 未找到帖子")
-                except ValueError:
-                    st.markdown("請輸入有效的帖子 ID（數字）。")
-                    logger.error(f"無效帖子 ID: {thread_id_input}")
