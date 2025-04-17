@@ -361,27 +361,3 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
         "last_reset": last_reset,
         "rate_limit_until": rate_limit_until
     }
-
-if __name__ == "__main__":
-    # 示例測試
-    async def main():
-        result = await get_lihkg_topic_list(
-            cat_id=1,
-            sub_cat_id=0,
-            start_page=1,
-            max_pages=1,
-            request_counter=0,
-            last_reset=time.time(),
-            rate_limit_until=0
-        )
-        print(result)
-        result = await get_lihkg_thread_content(
-            thread_id=123456,
-            cat_id=1,
-            request_counter=0,
-            last_reset=time.time(),
-            rate_limit_until=0
-        )
-        print(result)
-
-    asyncio.run(main())
