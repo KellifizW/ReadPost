@@ -9,29 +9,72 @@ logger = streamlit.logger.get_logger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 8000
 
-async def stream_grok3_response(text: str, retries: int = 3) -> AsyncGenerator[str, None]:
-    """以流式方式從 Grok 3 API 獲取回應"""
+async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=False, metadata=None, thread_data=None, initial_response=None):
+    """分析問題性質，決定抓取和處理策略"""
+    prompt = f"""
+    你是一個智能助手，任務是分析用戶問題，決定從 LIHKG 討論區抓取的數據和處理方式。以繁體中文回覆，輸出結構化 JSON。
+
+    輸入問題：{user_query}
+    用戶選擇的分類：{cat_name}（cat_id={cat_id})
+    {'初始數據和回應：' if is_advanced else ''}
+    {f'帖子數據：{json.dumps(metadata, ensure_ascii=False)}' if is_advanced and metadata else ''}
+    {f'回覆數據：{json.dumps(thread_data, ensure_ascii=False)}' if is_advanced and thread_data else ''}
+    {f'初始回應：{initial_response}' if is_advanced and initial_response else ''}
+
+    執行以下步驟：
+    1. 識別問題主題（例如，搞笑、財經）。
+    2. 判斷意圖（例如，總結、情緒分析）。
+    3. {'若為進階分析，評估初始數據和回應是否充分，建議後續策略。' if is_advanced else '根據主題、意圖和分類，決定：'}
+    {'- 是否需要進階分析（needs_advanced_analysis）。' if is_advanced else ''}
+    - category_ids：優先 cat_id={cat_id}，可添加其他分類（1=吹水台，2=熱門台，5=時事台，14=上班台，15=財經台，29=成人台，31=創意台）。
+    - data_type："title"、"replies"、"both"。
+    - post_limit：1-20。
+    - reply_limit：0-200。
+    - filters：min_replies, min_likes, recent_only。
+    - processing：summarize, sentiment, other。
+    4. 若無關 LIHKG，返回空 category_ids。
+    5. 提供 category_suggestion 或 reason。
+
+    輸出格式：
+    {'{'
+      '"needs_advanced_analysis": false,
+      "suggestions": {
+        "category_ids": [],
+        "data_type": "",
+        "post_limit": 0,
+        "reply_limit": 0,
+        "filters": {},
+        "processing": ""
+      },
+      "reason": ""
+    }' if is_advanced else '{'
+      '"category_ids": [],
+      "data_type": "",
+      "post_limit": 0,
+      "reply_limit": 0,
+      "filters": {},
+      "processing": "",
+      "category_suggestion": ""
+    }'}
+    """
+
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
         logger.error("Grok 3 API 密鑰缺失")
-        st.error("未找到 Grok 3 API 密鑰，請檢查配置")
-        yield "錯誤: 缺少 API 密鑰"
-        return
-    
-    char_count = len(text)
-    if char_count > GROK3_TOKEN_LIMIT:
-        logger.warning(f"輸入超限: 字元數={char_count}")
-        chunks = [text[i:i+3000] for i in range(0, len(text), 3000)]
-        logger.info(f"分塊處理: 分塊數={len(chunks)}")
-        for i, chunk in enumerate(chunks):
-            chunk_prompt = f"使用者問題：{st.session_state.get('last_user_query', '')}\n{chunk}"
-            if len(chunk_prompt) > GROK3_TOKEN_LIMIT:
-                chunk_prompt = chunk_prompt[:GROK3_TOKEN_LIMIT - 100] + "\n[已截斷]"
-                logger.warning(f"分塊超限: 子塊 {i}, 字元數={len(chunk_prompt)}")
-            async for chunk in stream_grok3_response(chunk_prompt, retries=retries):
-                yield chunk
-        return
+        return {
+            "category_ids": [cat_id],
+            "data_type": "both",
+            "post_limit": 5,
+            "reply_limit": 50,
+            "filters": {"min_replies": 50, "min_likes": 10, "recent_only": True},
+            "processing": "summarize",
+            "category_suggestion": "缺少 API 密鑰，使用默認策略。"
+        } if not is_advanced else {
+            "needs_advanced_analysis": False,
+            "suggestions": {},
+            "reason": "缺少 API 密鑰，無需進階分析。"
+        }
     
     headers = {
         "Content-Type": "application/json",
@@ -41,14 +84,124 @@ async def stream_grok3_response(text: str, retries: int = 3) -> AsyncGenerator[s
         "model": "grok-3-beta",
         "messages": [
             {"role": "system", "content": "你是 Grok 3，以繁體中文回答，確保回覆清晰、簡潔，僅基於提供數據。"},
-            {"role": "user", "content": text}
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 600,
+        "temperature": 0.7
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return json.loads(data["choices"][0]["message"]["content"])
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+        logger.error(f"問題分析失敗: 錯誤={str(e)}")
+        return {
+            "category_ids": [cat_id],
+            "data_type": "both",
+            "post_limit": 5,
+            "reply_limit": 50,
+            "filters": {"min_replies": 50, "min_likes": 10, "recent_only": True},
+            "processing": "summarize",
+            "category_suggestion": "分析失敗，使用默認策略。"
+        } if not is_advanced else {
+            "needs_advanced_analysis": False,
+            "suggestions": {},
+            "reason": "分析失敗，無需進階分析。"
+        }
+
+async def stream_grok3_response(user_query, metadata, thread_data, processing) -> AsyncGenerator[str, None]:
+    """以流式方式生成 Grok 3 回應"""
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+    except KeyError:
+        logger.error("Grok 3 API 密鑰缺失")
+        yield "錯誤: 缺少 API 密鑰"
+        return
+    
+    if processing == "summarize":
+        prompt = f"""
+        你是一個智能助手，任務是基於 LIHKG 數據總結網民觀點，回答用戶問題。以繁體中文回覆，150-200 字，僅用提供數據。
+
+        使用者問題：{user_query}
+        分類：{', '.join([f'{m["thread_id"]} ({m["title"]})' for m in metadata])}
+        帖子數據：
+        {json.dumps(metadata, ensure_ascii=False)}
+        回覆數據：
+        {json.dumps(thread_data, ensure_ascii=False)}
+
+        執行以下步驟：
+        1. 解析問題意圖。
+        2. 總結觀點，適配分類語氣（吹水台輕鬆，財經台專業）。
+        3. 引用正評 ≥ 5 的回覆。
+        4. 若數據不足，建議進階分析。
+
+        輸出格式：
+        - 總結：150-200 字。
+        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
+        """
+    elif processing == "sentiment":
+        prompt = f"""
+        你是一個智能助手，任務是基於 LIHKG 數據分析網民情緒，回答用戶問題。以繁體中文回覆，僅用提供數據。
+
+        使用者問題：{user_query}
+        分類：{', '.join([f'{m["thread_id"]} ({m["title"]})' for m in metadata])}
+        帖子數據：
+        {json.dumps(metadata, ensure_ascii=False)}
+        回覆數據：
+        {json.dumps(thread_data, ensure_ascii=False)}
+
+        執行以下步驟：
+        1. 解析問題意圖。
+        2. 分析標題和回覆，判斷情緒（正面、負面、中立），聚焦正負評 ≥ 5。
+        3. 返回情緒分佈（百分比）。
+        4. 若數據不足，建議進階分析。
+
+        輸出格式：
+        - 情緒分析：
+          - 正面：XX%
+          - 負面：XX%
+          - 中立：XX%
+        - 依據：...
+        - 進階分析建議：...
+        """
+    else:  # other
+        prompt = f"""
+        你是一個智能助手，任務是直接回答用戶問題，無需 LIHKG 數據。以繁體中文回覆，50-100 字。
+
+        使用者問題：{user_query}
+
+        執行以下步驟：
+        1. 解析問題意圖。
+        2. 提供簡潔回應。
+
+        輸出格式：
+        - 回應：...
+        """
+    
+    char_count = len(prompt)
+    if char_count > GROK3_TOKEN_LIMIT:
+        logger.warning(f"輸入超限: 字元數={char_count}")
+        prompt = prompt[:GROK3_TOKEN_LIMIT - 100] + "\n[已截斷]"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROK3_API_KEY}"
+    }
+    payload = {
+        "model": "grok-3-beta",
+        "messages": [
+            {"role": "system", "content": "你是 Grok 3，以繁體中文回答，確保回覆清晰、簡潔，僅基於提供數據。"},
+            {"role": "user", "content": prompt}
         ],
         "max_tokens": 600,
         "temperature": 0.7,
         "stream": True
     }
     
-    for attempt in range(retries):
+    for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
@@ -73,8 +226,8 @@ async def stream_grok3_response(text: str, retries: int = 3) -> AsyncGenerator[s
             return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning(f"Grok 3 請求失敗，第 {attempt+1} 次重試: 錯誤={str(e)}")
-            if attempt < retries - 1:
+            if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
                 continue
-            logger.error(f"Grok 3 異常: 錯誤={str(e)}")
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
+            return
