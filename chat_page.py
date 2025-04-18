@@ -106,7 +106,7 @@ async def chat_page():
                 
                 # 分析問題性質
                 logger.info(f"開始分析問題: 問題={user_question}, 分類={selected_cat}")
-                analysis = await analyze_question_nature(user_question, selected_cat, cat_id)
+                analysis = await analyze_question_nature(user_query=user_question, cat_name=selected_cat, cat_id=cat_id)
                 
                 if not analysis.get("category_ids"):
                     response = ""
@@ -140,13 +140,13 @@ async def chat_page():
                 
                 if not use_cache:
                     result = await process_user_question(
-                        user_question,
-                        cat_id_map,
-                        selected_cat,
-                        analysis,
-                        st.session_state.request_counter,
-                        st.session_state.last_reset,
-                        st.session_state.rate_limit_until
+                        user_question=user_question,
+                        cat_id_map=cat_id_map,
+                        selected_cat=selected_cat,
+                        analysis=analysis,
+                        request_counter=st.session_state.request_counter,
+                        last_reset=st.session_state.last_reset,
+                        rate_limit_until=st.session_state.rate_limit_until
                     )
                     st.session_state.topic_list_cache[cache_key] = {
                         "thread_data": result.get("thread_data", []),
@@ -233,9 +233,9 @@ async def chat_page():
                 
                 # 自動進階分析
                 analysis_advanced = await analyze_question_nature(
-                    user_question,
-                    question_cat,
-                    cat_id,
+                    user_query=user_question,
+                    cat_name=question_cat,
+                    cat_id=cat_id,
                     is_advanced=True,
                     metadata=metadata,
                     thread_data={item["thread_id"]: item for item in thread_data},
@@ -245,13 +245,13 @@ async def chat_page():
                     analysis_advanced["suggestions"]["filters"] = analysis_advanced["suggestions"].get("filters", {})
                     analysis_advanced["suggestions"]["filters"]["exclude_thread_ids"] = list(used_thread_ids)
                     result = await process_user_question(
-                        user_question,
-                        cat_id_map,
-                        question_cat,
-                        analysis_advanced["suggestions"],
-                        st.session_state.request_counter,
-                        st.session_state.last_reset,
-                        st.session_state.rate_limit_until
+                        user_question=user_question,
+                        cat_id_map=cat_id_map,
+                        selected_cat=question_cat,
+                        analysis=analysis_advanced["suggestions"],
+                        request_counter=st.session_state.request_counter,
+                        last_reset=st.session_state.last_reset,
+                        rate_limit_until=st.session_state.rate_limit_until
                     )
                     st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
                     st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
