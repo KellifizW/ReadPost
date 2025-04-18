@@ -26,7 +26,7 @@ async def chat_page():
         st.session_state.chat_history = []
     if "topic_list_cache" not in st.session_state:
         st.session_state.topic_list_cache = {}
-    if "thread_content_cache" not in st.session_state:  # 新增帖子內容緩存
+    if "thread_content_cache" not in st.session_state:
         st.session_state.thread_content_cache = {}
     if "rate_limit_until" not in st.session_state:
         st.session_state.rate_limit_until = 0
@@ -100,7 +100,7 @@ async def chat_page():
                 if is_new_conversation(user_question, st.session_state.last_user_query):
                     st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                     st.session_state.topic_list_cache = {}
-                    st.session_state.thread_content_cache = {}  # 清空帖子內容緩存
+                    st.session_state.thread_content_cache = {}
                     st.session_state.last_user_query = user_question
                     st.session_state.last_cat_id = cat_id
                 
@@ -109,7 +109,6 @@ async def chat_page():
                 analysis = await analyze_question_nature(user_question, selected_cat, cat_id)
                 
                 if not analysis.get("category_ids"):
-                    # 無關 LIHKG 的問題
                     response = ""
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
@@ -121,9 +120,9 @@ async def chat_page():
                     logger.info(f"無關 LIHKG 問題: 問題={user_question}, 回應={response[:50]}...")
                     return
                 
-                # 檢查緩存（分類級別）
+                # 檢查分類緩存
                 cache_key = f"{analysis['category_ids'][0]}"
-                cache_duration = 600  # 600 秒緩存
+                cache_duration = 600
                 use_cache = False
                 if cache_key in st.session_state.topic_list_cache:
                     cache_data = st.session_state.topic_list_cache[cache_key]
@@ -200,10 +199,10 @@ async def chat_page():
                     {
                         "thread_id": item["thread_id"],
                         "title": item["title"],
-                        "no_of_reply": item["no_of_reply"],
-                        "last_reply_time": item["last_reply_time"],
-                        "like_count": item["like_count"],
-                        "dislike_count": item["dislike_count"]
+                        "no_of_reply": item.get("no_of_reply", item.get("total_replies", 0)),
+                        "last_reply_time": item.get("last_reply_time", "0"),
+                        "like_count": item.get("like_count", 0),
+                        "dislike_count": item.get("dislike_count", 0)
                     }
                     for item in thread_data
                 ]
@@ -236,7 +235,7 @@ async def chat_page():
                     initial_response=response
                 )
                 if analysis_advanced.get("needs_advanced_analysis"):
-                    # 排除已使用的帖子
+                    analysis_advanced["suggestions"]["filters"] = analysis_advanced["suggestions"].get("filters", {})
                     analysis_advanced["suggestions"]["filters"]["exclude_thread_ids"] = list(used_thread_ids)
                     result = await process_user_question(
                         user_question,
@@ -252,7 +251,6 @@ async def chat_page():
                     st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
                     
                     thread_data_advanced = result.get("thread_data", [])
-                    # 過濾已緩存的進階帖子
                     filtered_thread_data_advanced = []
                     for item in thread_data_advanced:
                         thread_id = str(item["thread_id"])
@@ -271,7 +269,7 @@ async def chat_page():
                             "timestamp": time.time()
                         }
                     
-                    thread_data_advanced = filtered_thread_data_advanced[:2]  # 限制為 2 個帖子
+                    thread_data_advanced = filtered_thread_data_advanced[:2]
                     used_thread_ids.update(str(item["thread_id"]) for item in thread_data_advanced)
                     
                     if thread_data_advanced:
@@ -279,10 +277,10 @@ async def chat_page():
                             {
                                 "thread_id": item["thread_id"],
                                 "title": item["title"],
-                                "no_of_reply": item["no_of_reply"],
-                                "last_reply_time": item["last_reply_time"],
-                                "like_count": item["like_count"],
-                                "dislike_count": item["dislike_count"]
+                                "no_of_reply": item.get("no_of_reply", item.get("total_replies", 0)),
+                                "last_reply_time": item.get("last_reply_time", "0"),
+                                "like_count": item.get("like_count", 0),
+                                "dislike_count": item.get("dislike_count", 0)
                             }
                             for item in thread_data_advanced
                         ]
@@ -300,7 +298,6 @@ async def chat_page():
                                 response += chunk
                                 grok_container.markdown(response)
                         
-                        # 記錄進階分析調試信息
                         debug_info = [f"進階分析 - 分類: {result.get('selected_cat')}", f"帖子數: {len(thread_data_advanced)}"]
                         if result.get("rate_limit_info"):
                             debug_info.append("速率限制或錯誤：")
@@ -339,7 +336,7 @@ async def chat_page():
                 st.session_state.awaiting_response = False
             elif response_input.isdigit():
                 thread_id = response_input
-                thread_data = st.session_state.chat_history[-1]["thread_data"]
+                thread_data = st.session_state.chat_history[-1].get("thread_data", [])
                 if thread_id in [str(item["thread_id"]) for item in thread_data]:
                     response = f"帖子 ID: {thread_id}\n\n"
                     with st.chat_message("assistant"):
