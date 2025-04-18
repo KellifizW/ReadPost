@@ -120,9 +120,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                             rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(
                                 f"{current_time} - 伺服器速率限制: cat_id={cat_id}, page={page}, "
-                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, "
-                                f"Retry-After={retry_after}, 請求計數={request_counter}, "
-                                f"最後重置={datetime.fromtimestamp(last_reset)}, 標頭={headers_info}"
+                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒"
                             )
                             logger.warning(
                                 f"伺服器速率限制: cat_id={cat_id}, page={page}, 狀態碼=429, "
@@ -135,10 +133,11 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                         if response.status != 200:
                             headers_info = dict(response.headers)
                             rate_limit_info.append(
-                                f"{current_time} - 抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}"
+                                f"{current_time} - 抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}"
                             )
                             logger.error(
-                                f"抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}, 條件={fetch_conditions}"
+                                f"抓取失敗: cat_id={cat_id}, page={page}, 狀態碼={response.status}, "
+                                f"標頭={headers_info}, 條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
                             break
@@ -151,7 +150,8 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                                 f"{current_time} - API 返回失敗: cat_id={cat_id}, page={page}, 錯誤={error_message}"
                             )
                             logger.error(
-                                f"API 返回失敗: cat_id={cat_id}, page={page}, 錯誤={error_message}, 條件={fetch_conditions}"
+                                f"API 返回失敗: cat_id={cat_id}, page={page}, 錯誤={error_message}, "
+                                f"條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
                             break
@@ -165,8 +165,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                             break
                         
                         logger.info(
-                            f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(filtered_items)}, "
-                            f"條件={fetch_conditions}"
+                            f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(filtered_items)}"
                         )
                         
                         if filtered_items:
@@ -281,9 +280,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                             rate_limit_until = time.time() + wait_time
                             rate_limit_info.append(
                                 f"{current_time} - 伺服器速率限制: thread_id={thread_id}, page={page}, "
-                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒, "
-                                f"Retry-After={retry_after}, 請求計數={request_counter}, "
-                                f"最後重置={datetime.fromtimestamp(last_reset)}, 標頭={headers_info}"
+                                f"狀態碼=429, 第 {attempt+1} 次重試，等待 {wait_time:.2f} 秒"
                             )
                             logger.warning(
                                 f"伺服器速率限制: thread_id={thread_id}, page={page}, 狀態碼=429, "
@@ -296,7 +293,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         if response.status != 200:
                             headers_info = dict(response.headers)
                             rate_limit_info.append(
-                                f"{current_time} - 抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}, 標頭={headers_info}"
+                                f"{current_time} - 抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}"
                             )
                             logger.error(
                                 f"抓取帖子內容失敗: thread_id={thread_id}, page={page}, 狀態碼={response.status}, "
@@ -334,8 +331,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         page_replies = data["response"].get("item_data", [])
                         if not page_replies:
                             logger.info(
-                                f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, "
-                                f"回覆數=0, 條件={fetch_conditions}"
+                                f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數=0"
                             )
                             break
                         
@@ -345,8 +341,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                             reply["reply_time"] = reply.get("reply_time", "0")
                         
                         logger.info(
-                            f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, "
-                            f"回覆數={len(page_replies)}, 條件={fetch_conditions}"
+                            f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數={len(page_replies)}"
                         )
                         
                         replies.extend(page_replies)
