@@ -51,16 +51,15 @@ def get_category_name(cat_id):
     }
     return categories.get(str(cat_id), "未知分類")
 
-async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, request_counter, last_reset, rate_limit_until):
+async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page=1, max_pages=3, request_counter=0, last_reset=0, rate_limit_until=0):
+    """抓取指定分類的多頁帖子標題（30-90 個）"""
     timestamp = int(time.time())
-    url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={{page}}&count=60&type=now&order=now"
-    digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c').format(page=start_page)}${timestamp}".encode()).hexdigest()
+    url_template = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={{page}}&count=60&type=now&order=now"
     
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "X-LI-DEVICE": LIHKG_DEVICE_ID,
         "X-LI-REQUEST-TIME": str(timestamp),
-        "X-LI-DIGEST": digest,
         "Cookie": LIHKG_COOKIE,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
@@ -88,7 +87,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
                 request_counter = 0
                 last_reset = current_time
             
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now&order=now"
+            url = url_template.format(page=page)
             digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
             headers["X-LI-DIGEST"] = digest
             headers["X-LI-REQUEST-TIME"] = str(timestamp)
@@ -194,23 +193,22 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page, max_pages, reques
             current_time = time.time()
     
     return {
-        "items": items,
+        "items": items[:90],  # 限制最大 90 個標題
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
         "rate_limit_until": rate_limit_until
     }
 
-async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=175):
+async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=150, fetch_last_pages=0):
+    """抓取帖子回覆，支持首 3 頁和末 3 頁"""
     timestamp = int(time.time())
-    url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{{page}}?order=reply_time"
-    digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c').format(page=1)}${timestamp}".encode()).hexdigest()
+    url_template = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{{page}}?order=reply_time"
     
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "X-LI-DEVICE": LIHKG_DEVICE_ID,
         "X-LI-REQUEST-TIME": str(timestamp),
-        "X-LI-DIGEST": digest,
         "Cookie": LIHKG_COOKIE,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
@@ -226,6 +224,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     page = 1
     thread_title = None
     total_replies = None
+    total_pages = None
     rate_limit_info = []
     max_retries = 3
     per_page = 25  # 每頁最大回覆數
@@ -241,6 +240,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             "replies": replies,
             "title": thread_title,
             "total_replies": total_replies,
+            "total_pages": total_pages,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": last_reset,
@@ -248,23 +248,127 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
         }
     
     async with aiohttp.ClientSession() as session:
-        while len(replies) < max_replies:
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{page}?order=reply_time"
+        # 先抓取第一頁以獲取總頁數
+        url = url_template.format(page=1)
+        digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
+        headers["X-LI-DIGEST"] = digest
+        headers["X-LI-REQUEST-TIME"] = str(timestamp)
+        
+        fetch_conditions = {
+            "thread_id": thread_id,
+            "cat_id": cat_id if cat_id else "無",
+            "page": page,
+            "user_agent": headers["User-Agent"],
+            "device_id": LIHKG_DEVICE_ID,
+            "request_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "request_counter": request_counter,
+            "last_reset": datetime.fromtimestamp(last_reset).strftime("%Y-%m-%d %H:%M:%S"),
+            "rate_limit_until": datetime.fromtimestamp(rate_limit_until).strftime("%Y-%m-%d %H:%M:%S") if rate_limit_until > time.time() else "無"
+        }
+        
+        try:
+            await rate_limiter.acquire(context=fetch_conditions)
+            request_counter += 1
+            async with session.get(url, headers=headers, timeout=10) as response:
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                if response.status == 429:
+                    retry_after = response.headers.get("Retry-After", "5")
+                    wait_time = int(retry_after) if retry_after.isdigit() else 5
+                    rate_limit_until = time.time() + wait_time
+                    rate_limit_info.append(
+                        f"{current_time} - 伺服器速率限制: thread_id={thread_id}, page=1, 狀態碼=429, 等待 {wait_time:.2f} 秒"
+                    )
+                    logger.warning(f"伺服器速率限制: thread_id={thread_id}, page=1, 狀態碼=429, 等待 {wait_time:.2f} 秒")
+                    return {
+                        "replies": [],
+                        "title": None,
+                        "total_replies": 0,
+                        "total_pages": 0,
+                        "rate_limit_info": rate_limit_info,
+                        "request_counter": request_counter,
+                        "last_reset": last_reset,
+                        "rate_limit_until": rate_limit_until
+                    }
+                
+                if response.status != 200:
+                    rate_limit_info.append(
+                        f"{current_time} - 抓取帖子內容失敗: thread_id={thread_id}, page=1, 狀態碼={response.status}"
+                    )
+                    logger.error(f"抓取帖子內容失敗: thread_id={thread_id}, page=1, 狀態碼={response.status}")
+                    return {
+                        "replies": [],
+                        "title": None,
+                        "total_replies": 0,
+                        "total_pages": 0,
+                        "rate_limit_info": rate_limit_info,
+                        "request_counter": request_counter,
+                        "last_reset": last_reset,
+                        "rate_limit_until": rate_limit_until
+                    }
+                
+                data = await response.json()
+                if not data.get("success"):
+                    error_message = data.get("error_message", "未知錯誤")
+                    rate_limit_info.append(
+                        f"{current_time} - API 返回失敗: thread_id={thread_id}, page=1, 錯誤={error_message}"
+                    )
+                    logger.warning(f"API 返回失敗: thread_id={thread_id}, page=1, 錯誤={error_message}")
+                    return {
+                        "replies": [],
+                        "title": None,
+                        "total_replies": 0,
+                        "total_pages": 0,
+                        "rate_limit_info": rate_limit_info,
+                        "request_counter": request_counter,
+                        "last_reset": last_reset,
+                        "rate_limit_until": rate_limit_until
+                    }
+                
+                response_data = data.get("response", {})
+                thread_title = response_data.get("title") or response_data.get("thread", {}).get("title")
+                total_replies = response_data.get("total_replies") or response_data.get("total_reply", 0)
+                total_pages = response_data.get("total_page", 1)
+                
+                page_replies = response_data.get("item_data", [])
+                for reply in page_replies:
+                    reply["like_count"] = int(reply.get("like_count", "0")) if reply.get("like_count") else 0
+                    reply["dislike_count"] = int(reply.get("dislike_count", "0")) if reply.get("dislike_count") else 0
+                    reply["reply_time"] = reply.get("reply_time", "0")
+                replies.extend(page_replies)
+                logger.info(f"成功抓取帖子回覆: thread_id={thread_id}, page=1, 回覆數={len(page_replies)}")
+        
+        except Exception as e:
+            rate_limit_info.append(f"{current_time} - 抓取帖子內容錯誤: thread_id={thread_id}, page=1, 錯誤={str(e)}")
+            logger.error(f"抓取帖子內容錯誤: thread_id={thread_id}, page=1, 錯誤={str(e)}")
+            return {
+                "replies": [],
+                "title": None,
+                "total_replies": 0,
+                "total_pages": 0,
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until
+            }
+        
+        # 確定抓取頁數（首 3 頁 + 末 3 頁）
+        pages_to_fetch = list(range(1, min(4, total_pages + 1)))  # 首 3 頁
+        if fetch_last_pages > 0 and total_pages > 3:
+            last_pages = list(range(max(total_pages - fetch_last_pages + 1, 4), total_pages + 1))
+            pages_to_fetch.extend(last_pages)
+            pages_to_fetch = sorted(set(pages_to_fetch))  # 去重並排序
+        
+        # 抓取剩餘頁數
+        for page in pages_to_fetch[1:]:  # 跳過第一頁
+            if len(replies) >= max_replies:
+                break
+            
+            url = url_template.format(page=page)
             digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
             headers["X-LI-DIGEST"] = digest
             headers["X-LI-REQUEST-TIME"] = str(timestamp)
             
-            fetch_conditions = {
-                "thread_id": thread_id,
-                "cat_id": cat_id if cat_id else "無",
-                "page": page,
-                "user_agent": headers["User-Agent"],
-                "device_id": LIHKG_DEVICE_ID,
-                "request_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                "request_counter": request_counter,
-                "last_reset": datetime.fromtimestamp(last_reset).strftime("%Y-%m-%d %H:%M:%S"),
-                "rate_limit_until": datetime.fromtimestamp(rate_limit_until).strftime("%Y-%m-%d %H:%M:%S") if rate_limit_until > time.time() else "無"
-            }
+            fetch_conditions["page"] = page
             
             for attempt in range(max_retries):
                 try:
@@ -300,15 +404,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                                 f"標頭={headers_info}, 條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
-                            return {
-                                "replies": replies,
-                                "title": thread_title,
-                                "total_replies": total_replies,
-                                "rate_limit_info": rate_limit_info,
-                                "request_counter": request_counter,
-                                "last_reset": last_reset,
-                                "rate_limit_until": rate_limit_until
-                            }
+                            break
                         
                         data = await response.json()
                         logger.debug(f"帖子內容 API 回應: thread_id={thread_id}, page={page}, 數據={data}")
@@ -321,35 +417,14 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                                 f"API 返回失敗: thread_id={thread_id}, page={page}, 錯誤={error_message}, "
                                 f"條件={fetch_conditions}"
                             )
-                            return {
-                                "replies": [],
-                                "title": None,
-                                "total_replies": 0,
-                                "rate_limit_info": rate_limit_info,
-                                "request_counter": request_counter,
-                                "last_reset": last_reset,
-                                "rate_limit_until": rate_limit_until
-                            }
-                        
-                        if page == 1:
-                            response_data = data.get("response", {})
-                            thread_title = response_data.get("title") or response_data.get("thread", {}).get("title")
-                            total_replies = response_data.get("total_replies") or response_data.get("total_reply", 0)
+                            break
                         
                         page_replies = data["response"].get("item_data", [])
                         if not page_replies:
                             logger.info(
                                 f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數=0"
                             )
-                            return {
-                                "replies": replies,
-                                "title": thread_title,
-                                "total_replies": total_replies,
-                                "rate_limit_info": rate_limit_info,
-                                "request_counter": request_counter,
-                                "last_reset": last_reset,
-                                "rate_limit_until": rate_limit_until
-                            }
+                            break
                         
                         for reply in page_replies:
                             reply["like_count"] = int(reply.get("like_count", "0")) if reply.get("like_count") else 0
@@ -362,23 +437,13 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         
                         replies.extend(page_replies)
                         
-                        # 僅當當前頁回覆數達到每頁最大值 (25) 時才抓取下一頁
                         if len(page_replies) < per_page:
                             logger.info(
                                 f"終止抓取: thread_id={thread_id}, page={page}, "
                                 f"回覆數={len(page_replies)} 小於每頁最大值 {per_page}"
                             )
-                            return {
-                                "replies": replies[:max_replies],
-                                "title": thread_title,
-                                "total_replies": total_replies,
-                                "rate_limit_info": rate_limit_info,
-                                "request_counter": request_counter,
-                                "last_reset": last_reset,
-                                "rate_limit_until": rate_limit_until
-                            }
+                            break
                         
-                        page += 1
                         break
                     
                 except Exception as e:
@@ -390,26 +455,16 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         f"條件={fetch_conditions}"
                     )
                     await asyncio.sleep(1)
-                    return {
-                        "replies": replies,
-                        "title": thread_title,
-                        "total_replies": total_replies,
-                        "rate_limit_info": rate_limit_info,
-                        "request_counter": request_counter,
-                        "last_reset": last_reset,
-                        "rate_limit_until": rate_limit_until
-                    }
+                    break
             
             await asyncio.sleep(5)
             current_time = time.time()
-            
-            if len(replies) >= max_replies or (total_replies and len(replies) >= total_replies):
-                break
     
     return {
         "replies": replies[:max_replies],
         "title": thread_title,
         "total_replies": total_replies,
+        "total_pages": total_pages,
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
