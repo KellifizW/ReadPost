@@ -7,7 +7,7 @@ from typing import AsyncGenerator
 
 logger = streamlit.logger.get_logger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 40000  # 放寬至 40,000 字元
+GROK3_TOKEN_LIMIT = 40000
 
 async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=False, metadata=None, thread_data=None, initial_response=None):
     """分析問題性質，決定抓取和處理策略"""
@@ -30,7 +30,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     - data_type："title"、"replies"、"both"。
     - post_limit：1-20。
     - reply_limit：0-200。
-    - filters：min_replies, min_likes, recent_only, exclude_thread_ids（排除已使用的帖子 ID）。
+    - filters：min_replies, min_likes, recent_only, exclude_thread_ids。
     - processing：summarize, sentiment, other。
     4. 若無關 LIHKG，返回空 category_ids。
     5. 提供 category_suggestion 或 reason。
@@ -150,7 +150,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         - 依據：...
         - 進階分析建議：...
         """
-    else:  # other
+    else:
         prompt = f"""
         你是一個智能助手，任務是直接回答用戶問題，無需 LIHKG 數據。以繁體中文回覆，50-100 字。
 
@@ -167,7 +167,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
     char_count = len(prompt)
     if char_count > GROK3_TOKEN_LIMIT:
         logger.warning(f"輸入超限: 字元數={char_count}")
-        # 優先保留帖子數據和回覆數據，截斷較早的部分
         prompt = prompt[:1000] + "\n[部分上下文已截斷]\n" + prompt[-GROK3_TOKEN_LIMIT+1000:]
     
     headers = {
