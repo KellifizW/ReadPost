@@ -22,22 +22,23 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     {f'初始回應：{initial_response}' if is_advanced and initial_response else ''}
 
     執行以下步驟：
-    1. 識別問題主題（例如，搞笑、財經）。
-    2. 判斷意圖（例如，總結、情緒分析）。
+    1. 識別問題主題（例如，感動、搞笑、財經），並明確標記為 theme。
+    2. 判斷意圖（例如，總結、情緒分析、情感聚焦總結）。
     3. {'若為進階分析，評估初始數據和回應是否充分，建議後續策略。' if is_advanced else '根據主題、意圖和分類，決定：'}
     {'- 是否需要進階分析（needs_advanced_analysis）。' if is_advanced else ''}
+    - theme：問題主題（如「感動」、「搞笑」）。
     - category_ids：優先 cat_id={cat_id}，可添加其他分類（1=吹水台，2=熱門台，5=時事台，14=上班台，15=財經台，29=成人台，31=創意台）。
     - data_type："title"、"replies"、"both"。
     - post_limit：1-20。
     - reply_limit：0-200。
-    - filters：min_replies, min_likes, recent_only, exclude_thread_ids。
-    - processing：summarize, sentiment, other。
+    - filters：min_replies, min_likes, recent_only, exclude_thread_ids，對於感動主題優先高 like_count 且低 dislike_count。
+    - processing：summarize, sentiment, emotion_focused_summary（用於情感主題如感動），other。
     4. 若無關 LIHKG，返回空 category_ids。
     5. 提供 category_suggestion 或 reason。
 
     輸出格式：
     {{
-      {"\"needs_advanced_analysis\": false, \"suggestions\": { \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\" }, \"reason\": \"\"" if is_advanced else "\"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"category_suggestion\": \"\""}
+      {"\"needs_advanced_analysis\": false, \"suggestions\": { \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\" }, \"reason\": \"\"" if is_advanced else "\"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"category_suggestion\": \"\""}
     }}
     """
 
@@ -46,6 +47,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     except KeyError:
         logger.error("Grok 3 API 密鑰缺失")
         return {
+            "theme": "未知",
             "category_ids": [cat_id],
             "data_type": "both",
             "post_limit": 5,
@@ -82,6 +84,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         logger.error(f"問題分析失敗: 錯誤={str(e)}")
         return {
+            "theme": "未知",
             "category_ids": [cat_id],
             "data_type": "both",
             "post_limit": 5,
@@ -149,6 +152,27 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
           - 中立：XX%
         - 依據：...
         - 進階分析建議：...
+        """
+    elif processing == "emotion_focused_summary":
+        prompt = f"""
+        你是一個智能助手，任務是基於 LIHKG 數據總結感動或溫馨的帖子內容，回答用戶問題。以繁體中文回覆，150-200 字，僅用提供數據。
+
+        使用者問題：{user_query}
+        分類：{', '.join([f'{m["thread_id"]} ({m["title"]})' for m in metadata])}
+        帖子數據：
+        {json.dumps(metadata, ensure_ascii=False)}
+        回覆數據：
+        {json.dumps(thread_data, ensure_ascii=False)}
+
+        執行以下步驟：
+        1. 解析問題意圖，聚焦感動或溫馨主題。
+        2. 總結帖子內容，突出感動情緒，優先引用高正評（like_count ≥ 5 且 dislike_count 低）的回覆。
+        3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
+        4. 若數據不足，建議進階分析。
+
+        輸出格式：
+        - 總結：150-200 字，突出感動或溫馨內容。
+        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
         """
     else:
         prompt = f"""
