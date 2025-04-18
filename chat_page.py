@@ -26,6 +26,8 @@ async def chat_page():
         st.session_state.chat_history = []
     if "topic_list_cache" not in st.session_state:
         st.session_state.topic_list_cache = {}
+    if "thread_content_cache" not in st.session_state:  # 新增帖子內容緩存
+        st.session_state.thread_content_cache = {}
     if "rate_limit_until" not in st.session_state:
         st.session_state.rate_limit_until = 0
     if "request_counter" not in st.session_state:
@@ -98,6 +100,7 @@ async def chat_page():
                 if is_new_conversation(user_question, st.session_state.last_user_query):
                     st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                     st.session_state.topic_list_cache = {}
+                    st.session_state.thread_content_cache = {}  # 清空帖子內容緩存
                     st.session_state.last_user_query = user_question
                     st.session_state.last_cat_id = cat_id
                 
@@ -118,9 +121,9 @@ async def chat_page():
                     logger.info(f"無關 LIHKG 問題: 問題={user_question}, 回應={response[:50]}...")
                     return
                 
-                # 檢查緩存
+                # 檢查緩存（分類級別）
                 cache_key = f"{analysis['category_ids'][0]}"
-                cache_duration = 300
+                cache_duration = 600  # 600 秒緩存
                 use_cache = False
                 if cache_key in st.session_state.topic_list_cache:
                     cache_data = st.session_state.topic_list_cache[cache_key]
@@ -134,7 +137,7 @@ async def chat_page():
                             "selected_cat": selected_cat
                         }
                         use_cache = True
-                        logger.info(f"使用緩存: cat_id={cache_key}, 帖子數={len(result['thread_data'])}")
+                        logger.info(f"使用分類緩存: cat_id={cache_key}, 帖子數={len(result['thread_data'])}")
                 
                 if not use_cache:
                     result = await process_user_question(
@@ -150,7 +153,7 @@ async def chat_page():
                         "thread_data": result.get("thread_data", []),
                         "timestamp": time.time()
                     }
-                    logger.info(f"更新緩存: cat_id={cache_key}, 帖子數={len(result['thread_data'])}")
+                    logger.info(f"更新分類緩存: cat_id={cache_key}, 帖子數={len(result['thread_data'])}")
                 
                 # 更新速率限制
                 st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
@@ -171,7 +174,28 @@ async def chat_page():
                     st.session_state.awaiting_response = False
                     return
                 
-                # 生成回應並自動處理進階分析
+                # 過濾已緩存的帖子內容
+                used_thread_ids = set()
+                filtered_thread_data = []
+                for item in thread_data:
+                    thread_id = str(item["thread_id"])
+                    if thread_id in st.session_state.thread_content_cache:
+                        cache_data = st.session_state.thread_content_cache[thread_id]
+                        if time.time() - cache_data["timestamp"] < cache_duration:
+                            filtered_thread_data.append(cache_data["data"])
+                            used_thread_ids.add(thread_id)
+                            logger.info(f"使用帖子內容緩存: thread_id={thread_id}")
+                            continue
+                    filtered_thread_data.append(item)
+                    st.session_state.thread_content_cache[thread_id] = {
+                        "data": item,
+                        "timestamp": time.time()
+                    }
+                
+                thread_data = filtered_thread_data[:2]  # 限制為 2 個帖子
+                used_thread_ids.update(str(item["thread_id"]) for item in thread_data)
+                
+                # 生成回應
                 metadata = [
                     {
                         "thread_id": item["thread_id"],
@@ -183,15 +207,18 @@ async def chat_page():
                     }
                     for item in thread_data
                 ]
-                response = f"帖子 ID: {metadata[0]['thread_id']}\n\n"
+                response = f"以下分享兩個被認為『on9』（荒唐或幽默）的帖子：\n\n"
+                for meta in metadata:
+                    response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
+                response += "\n"
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     async for chunk in stream_grok3_response(user_question, metadata, {item["thread_id"]: item for item in thread_data}, analysis["processing"]):
-                        if "進階分析建議：" not in chunk:  # 過濾進階分析建議
+                        if "進階分析建議：" not in chunk:
                             response += chunk
                             grok_container.markdown(response)
                 
-                # 記錄調試信息到日誌
+                # 記錄調試信息
                 debug_info = [f"分類: {question_cat}", f"帖子數: {len(thread_data)}", f"使用緩存: {use_cache}"]
                 if rate_limit_info:
                     debug_info.append("速率限制或錯誤：")
@@ -209,6 +236,8 @@ async def chat_page():
                     initial_response=response
                 )
                 if analysis_advanced.get("needs_advanced_analysis"):
+                    # 排除已使用的帖子
+                    analysis_advanced["suggestions"]["filters"]["exclude_thread_ids"] = list(used_thread_ids)
                     result = await process_user_question(
                         user_question,
                         cat_id_map,
@@ -222,35 +251,61 @@ async def chat_page():
                     st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
                     st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
                     
-                    thread_data = result.get("thread_data", [])
-                    metadata = [
-                        {
-                            "thread_id": item["thread_id"],
-                            "title": item["title"],
-                            "no_of_reply": item["no_of_reply"],
-                            "last_reply_time": item["last_reply_time"],
-                            "like_count": item["like_count"],
-                            "dislike_count": item["dislike_count"]
+                    thread_data_advanced = result.get("thread_data", [])
+                    # 過濾已緩存的進階帖子
+                    filtered_thread_data_advanced = []
+                    for item in thread_data_advanced:
+                        thread_id = str(item["thread_id"])
+                        if thread_id in used_thread_ids:
+                            continue
+                        if thread_id in st.session_state.thread_content_cache:
+                            cache_data = st.session_state.thread_content_cache[thread_id]
+                            if time.time() - cache_data["timestamp"] < cache_duration:
+                                filtered_thread_data_advanced.append(cache_data["data"])
+                                used_thread_ids.add(thread_id)
+                                logger.info(f"使用進階帖子內容緩存: thread_id={thread_id}")
+                                continue
+                        filtered_thread_data_advanced.append(item)
+                        st.session_state.thread_content_cache[thread_id] = {
+                            "data": item,
+                            "timestamp": time.time()
                         }
-                        for item in thread_data
-                    ]
-                    response += "\n\n進階分析：\n"
-                    async for chunk in stream_grok3_response(
-                        user_question,
-                        metadata,
-                        {item["thread_id"]: item for item in thread_data},
-                        analysis_advanced["suggestions"]["processing"]
-                    ):
-                        if "進階分析建議：" not in chunk:
-                            response += chunk
-                            grok_container.markdown(response)
                     
-                    # 記錄進階分析調試信息
-                    debug_info = [f"進階分析 - 分類: {result.get('selected_cat')}", f"帖子數: {len(thread_data)}"]
-                    if result.get("rate_limit_info"):
-                        debug_info.append("速率限制或錯誤：")
-                        debug_info.extend(f"  - {info}" for info in result["rate_limit_info"])
-                    logger.info(f"進階分析調試信息: {', '.join(debug_info)}")
+                    thread_data_advanced = filtered_thread_data_advanced[:2]  # 限制為 2 個帖子
+                    used_thread_ids.update(str(item["thread_id"]) for item in thread_data_advanced)
+                    
+                    if thread_data_advanced:
+                        metadata_advanced = [
+                            {
+                                "thread_id": item["thread_id"],
+                                "title": item["title"],
+                                "no_of_reply": item["no_of_reply"],
+                                "last_reply_time": item["last_reply_time"],
+                                "like_count": item["like_count"],
+                                "dislike_count": item["dislike_count"]
+                            }
+                            for item in thread_data_advanced
+                        ]
+                        response += "\n\n更深入的『on9』帖子分析：\n\n"
+                        for meta in metadata_advanced:
+                            response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
+                        response += "\n"
+                        async for chunk in stream_grok3_response(
+                            user_question,
+                            metadata_advanced,
+                            {item["thread_id"]: item for item in thread_data_advanced},
+                            analysis_advanced["suggestions"]["processing"]
+                        ):
+                            if "進階分析建議：" not in chunk:
+                                response += chunk
+                                grok_container.markdown(response)
+                        
+                        # 記錄進階分析調試信息
+                        debug_info = [f"進階分析 - 分類: {result.get('selected_cat')}", f"帖子數: {len(thread_data_advanced)}"]
+                        if result.get("rate_limit_info"):
+                            debug_info.append("速率限制或錯誤：")
+                            debug_info.extend(f"  - {info}" for info in result["rate_limit_info"])
+                        logger.info(f"進階分析調試信息: {', '.join(debug_info)}")
                 
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.last_user_query = user_question
