@@ -36,26 +36,9 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     5. 提供 category_suggestion 或 reason。
 
     輸出格式：
-    {'{'
-      '"needs_advanced_analysis": false,
-      "suggestions": {
-        "category_ids": [],
-        "data_type": "",
-        "post_limit": 0,
-        "reply_limit": 0,
-        "filters": {},
-        "processing": ""
-      },
-      "reason": ""
-    }' if is_advanced else '{'
-      '"category_ids": [],
-      "data_type": "",
-      "post_limit": 0,
-      "reply_limit": 0,
-      "filters": {},
-      "processing": "",
-      "category_suggestion": ""
-    }'}
+    {{
+      {"\"needs_advanced_analysis\": false, \"suggestions\": { \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\" }, \"reason\": \"\"" if is_advanced else "\"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"category_suggestion\": \"\""}
+    }}
     """
 
     try:
