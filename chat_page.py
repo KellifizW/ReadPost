@@ -194,7 +194,9 @@ async def chat_page():
                 thread_data = filtered_thread_data[:2]  # 限制為 2 個帖子
                 used_thread_ids.update(str(item["thread_id"]) for item in thread_data)
                 
-                # 生成回應
+                # 動態生成回應主題
+                theme = analysis.get("theme", "相關")  # 從分析結果獲取主題，如「感動」、「搞笑」
+                response = f"以下分享兩個被認為『{theme}』的帖子：\n\n"
                 metadata = [
                     {
                         "thread_id": item["thread_id"],
@@ -206,7 +208,6 @@ async def chat_page():
                     }
                     for item in thread_data
                 ]
-                response = f"以下分享兩個被認為『on9』（荒唐或幽默）的帖子：\n\n"
                 for meta in metadata:
                     response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                 response += "\n"
@@ -284,7 +285,7 @@ async def chat_page():
                             }
                             for item in thread_data_advanced
                         ]
-                        response += "\n\n更深入的『on9』帖子分析：\n\n"
+                        response += f"\n\n更深入的『{theme}』帖子分析：\n\n"
                         for meta in metadata_advanced:
                             response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                         response += "\n"
