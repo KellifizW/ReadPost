@@ -228,7 +228,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     total_replies = None
     rate_limit_info = []
     max_retries = 3
-    per_page = 50
+    per_page = 25  # 每頁最大回覆數
     
     current_time = time.time()
     if current_time < rate_limit_until:
@@ -300,7 +300,15 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                                 f"標頭={headers_info}, 條件={fetch_conditions}"
                             )
                             await asyncio.sleep(1)
-                            break
+                            return {
+                                "replies": replies,
+                                "title": thread_title,
+                                "total_replies": total_replies,
+                                "rate_limit_info": rate_limit_info,
+                                "request_counter": request_counter,
+                                "last_reset": last_reset,
+                                "rate_limit_until": rate_limit_until
+                            }
                         
                         data = await response.json()
                         logger.debug(f"帖子內容 API 回應: thread_id={thread_id}, page={page}, 數據={data}")
@@ -333,7 +341,15 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                             logger.info(
                                 f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數=0"
                             )
-                            break
+                            return {
+                                "replies": replies,
+                                "title": thread_title,
+                                "total_replies": total_replies,
+                                "rate_limit_info": rate_limit_info,
+                                "request_counter": request_counter,
+                                "last_reset": last_reset,
+                                "rate_limit_until": rate_limit_until
+                            }
                         
                         for reply in page_replies:
                             reply["like_count"] = int(reply.get("like_count", "0")) if reply.get("like_count") else 0
@@ -345,6 +361,23 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         )
                         
                         replies.extend(page_replies)
+                        
+                        # 僅當當前頁回覆數達到每頁最大值 (25) 時才抓取下一頁
+                        if len(page_replies) < per_page:
+                            logger.info(
+                                f"終止抓取: thread_id={thread_id}, page={page}, "
+                                f"回覆數={len(page_replies)} 小於每頁最大值 {per_page}"
+                            )
+                            return {
+                                "replies": replies[:max_replies],
+                                "title": thread_title,
+                                "total_replies": total_replies,
+                                "rate_limit_info": rate_limit_info,
+                                "request_counter": request_counter,
+                                "last_reset": last_reset,
+                                "rate_limit_until": rate_limit_until
+                            }
+                        
                         page += 1
                         break
                     
@@ -357,7 +390,15 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         f"條件={fetch_conditions}"
                     )
                     await asyncio.sleep(1)
-                    break
+                    return {
+                        "replies": replies,
+                        "title": thread_title,
+                        "total_replies": total_replies,
+                        "rate_limit_info": rate_limit_info,
+                        "request_counter": request_counter,
+                        "last_reset": last_reset,
+                        "rate_limit_until": rate_limit_until
+                    }
             
             await asyncio.sleep(5)
             current_time = time.time()
