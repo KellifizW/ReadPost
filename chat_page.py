@@ -164,16 +164,14 @@ async def chat_page():
                 # 檢查數據
                 if not thread_data:
                     answer = f"在 {question_cat} 中未找到符合條件的帖子。"
-                    if rate_limit_info:
-                        answer += "\n#### 調試信息：\n" + "\n".join(f"- {info}" for info in rate_limit_info)
+                    logger.warning(f"無有效帖子: 問題={user_question}, 分類={question_cat}, 速率限制={rate_limit_info}")
                     with st.chat_message("assistant"):
                         st.markdown(answer)
                     st.session_state.chat_history[-1]["answer"] = answer
                     st.session_state.awaiting_response = False
-                    logger.warning(f"無有效帖子: 問題={user_question}, 分類={question_cat}")
                     return
                 
-                # 生成回應
+                # 生成回應並自動處理進階分析
                 metadata = [
                     {
                         "thread_id": item["thread_id"],
@@ -185,66 +183,37 @@ async def chat_page():
                     }
                     for item in thread_data
                 ]
-                response = ""
+                response = f"帖子 ID: {metadata[0]['thread_id']}\n\n"
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     async for chunk in stream_grok3_response(user_question, metadata, {item["thread_id"]: item for item in thread_data}, analysis["processing"]):
                         if "進階分析建議：" not in chunk:  # 過濾進階分析建議
                             response += chunk
                             grok_container.markdown(response)
-                    # 添加用戶友好提示
-                    response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看特定帖子。"
-                    grok_container.markdown(response)
-                # 單獨顯示調試信息
-                debug_info = [f"#### 調試信息：\n- 分類: {question_cat}", f"- 帖子數: {len(thread_data)}", f"- 使用緩存: {use_cache}"]
+                
+                # 記錄調試信息到日誌
+                debug_info = [f"分類: {question_cat}", f"帖子數: {len(thread_data)}", f"使用緩存: {use_cache}"]
                 if rate_limit_info:
-                    debug_info.append("- 速率限制或錯誤：")
+                    debug_info.append("速率限制或錯誤：")
                     debug_info.extend(f"  - {info}" for info in rate_limit_info)
-                with st.chat_message("assistant"):
-                    st.markdown("\n".join(debug_info))
+                logger.info(f"調試信息: {', '.join(debug_info)}")
                 
-                st.session_state.chat_history[-1]["answer"] = response
-                st.session_state.last_user_query = user_question
-                st.session_state.last_cat_id = cat_id
-                st.session_state.awaiting_response = False
-                
-            except Exception as e:
-                error_message = f"處理失敗，原因：{str(e)}\n\n#### 調試信息：\n- 錯誤: {str(e)}"
-                if 'result' in locals() and result.get("rate_limit_info"):
-                    error_message += "\n- 速率限制或錯誤：\n" + "\n".join(f"  - {info}" for info in result["rate_limit_info"])
-                with st.chat_message("assistant"):
-                    st.markdown(error_message)
-                st.session_state.chat_history[-1]["answer"] = error_message
-                st.session_state.awaiting_response = False
-                logger.error(f"處理錯誤: 問題={user_question}, 錯誤={str(e)}")
-    
-    # 處理後續交互
-    if st.session_state.awaiting_response and st.session_state.chat_history[-1]["answer"]:
-        response_input = st.chat_input("請輸入指令（繼續、修改分類、ID 數字、結束）：")
-        if response_input:
-            response_input = response_input.strip().lower()
-            if response_input == "結束":
-                final_answer = "分析已結束，感謝您的使用！"
-                with st.chat_message("assistant"):
-                    st.markdown(final_answer)
-                st.session_state.chat_history.append({"question": "結束", "answer": final_answer})
-                st.session_state.awaiting_response = False
-            elif response_input == "繼續":
-                analysis = await analyze_question_nature(
-                    st.session_state.last_user_query,
-                    get_category_name(st.session_state.last_cat_id),
-                    st.session_state.last_cat_id,
+                # 自動進階分析
+                analysis_advanced = await analyze_question_nature(
+                    user_question,
+                    question_cat,
+                    cat_id,
                     is_advanced=True,
-                    metadata=[{k: v for k, v in item.items() if k != "replies"} for item in st.session_state.chat_history[-1]["thread_data"]],
-                    thread_data={item["thread_id"]: item for item in st.session_state.chat_history[-1]["thread_data"]},
-                    initial_response=st.session_state.chat_history[-1]["answer"]
+                    metadata=metadata,
+                    thread_data={item["thread_id"]: item for item in thread_data},
+                    initial_response=response
                 )
-                if analysis.get("needs_advanced_analysis"):
+                if analysis_advanced.get("needs_advanced_analysis"):
                     result = await process_user_question(
-                        st.session_state.last_user_query,
+                        user_question,
                         cat_id_map,
-                        get_category_name(st.session_state.last_cat_id),
-                        analysis["suggestions"],
+                        question_cat,
+                        analysis_advanced["suggestions"],
                         st.session_state.request_counter,
                         st.session_state.last_reset,
                         st.session_state.rate_limit_until
@@ -265,34 +234,47 @@ async def chat_page():
                         }
                         for item in thread_data
                     ]
-                    response = ""
-                    with st.chat_message("assistant"):
-                        grok_container = st.empty()
-                        async for chunk in stream_grok3_response(
-                            st.session_state.last_user_query,
-                            metadata,
-                            {item["thread_id"]: item for item in thread_data},
-                            analysis["suggestions"]["processing"]
-                        ):
-                            if "進階分析建議：" not in chunk:  # 過濾進階分析建議
-                                response += chunk
-                                grok_container.markdown(response)
-                        # 添加用戶友好提示
-                        response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看特定帖子。"
-                        grok_container.markdown(response)
-                    debug_info = [f"#### 調試信息：\n- 分類: {result.get('selected_cat')}", f"- 帖子數: {len(thread_data)}"]
-                    if result.get("rate_limit_info"):
-                        debug_info.append("- 速率限制或錯誤：")
-                        debug_info.extend(f"  - {info}" for info in result["rate_limit_info"])
-                    with st.chat_message("assistant"):
-                        st.markdown("\n".join(debug_info))
+                    response += "\n\n進階分析：\n"
+                    async for chunk in stream_grok3_response(
+                        user_question,
+                        metadata,
+                        {item["thread_id"]: item for item in thread_data},
+                        analysis_advanced["suggestions"]["processing"]
+                    ):
+                        if "進階分析建議：" not in chunk:
+                            response += chunk
+                            grok_container.markdown(response)
                     
-                    st.session_state.chat_history.append({"question": "繼續", "answer": response, "thread_data": thread_data})
-                else:
-                    final_answer = "數據已充分，無需進一步分析。請輸入「結束」或新問題。"
-                    with st.chat_message("assistant"):
-                        st.markdown(final_answer)
-                    st.session_state.chat_history.append({"question": "繼續", "answer": final_answer})
+                    # 記錄進階分析調試信息
+                    debug_info = [f"進階分析 - 分類: {result.get('selected_cat')}", f"帖子數: {len(thread_data)}"]
+                    if result.get("rate_limit_info"):
+                        debug_info.append("速率限制或錯誤：")
+                        debug_info.extend(f"  - {info}" for info in result["rate_limit_info"])
+                    logger.info(f"進階分析調試信息: {', '.join(debug_info)}")
+                
+                st.session_state.chat_history[-1]["answer"] = response
+                st.session_state.last_user_query = user_question
+                st.session_state.last_cat_id = cat_id
+                st.session_state.awaiting_response = False
+                
+            except Exception as e:
+                error_message = f"處理失敗，原因：{str(e)}"
+                logger.error(f"處理錯誤: 問題={user_question}, 錯誤={str(e)}, 速率限制={result.get('rate_limit_info', []) if 'result' in locals() else []}")
+                with st.chat_message("assistant"):
+                    st.markdown(error_message)
+                st.session_state.chat_history[-1]["answer"] = error_message
+                st.session_state.awaiting_response = False
+    
+    # 處理後續交互
+    if st.session_state.awaiting_response and st.session_state.chat_history[-1]["answer"]:
+        response_input = st.chat_input("請輸入指令（修改分類、ID 數字、結束）：")
+        if response_input:
+            response_input = response_input.strip().lower()
+            if response_input == "結束":
+                final_answer = "分析已結束，感謝您的使用！"
+                with st.chat_message("assistant"):
+                    st.markdown(final_answer)
+                st.session_state.chat_history.append({"question": "結束", "answer": final_answer})
                 st.session_state.awaiting_response = False
             elif response_input == "修改分類":
                 final_answer = "請選擇新分類並輸入問題。"
@@ -303,25 +285,20 @@ async def chat_page():
             elif response_input.isdigit():
                 thread_id = response_input
                 thread_data = st.session_state.chat_history[-1]["thread_data"]
-                if thread_id in [item["thread_id"] for item in thread_data]:
-                    response = ""
+                if thread_id in [str(item["thread_id"]) for item in thread_data]:
+                    response = f"帖子 ID: {thread_id}\n\n"
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(
                             st.session_state.last_user_query,
-                            [item for item in thread_data if item["thread_id"] == thread_id],
-                            {thread_id: next(item for item in thread_data if item["thread_id"] == thread_id)},
+                            [item for item in thread_data if str(item["thread_id"]) == thread_id],
+                            {thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
                             "summarize"
                         ):
-                            if "進階分析建議：" not in chunk:  # 過濾進階分析建議
+                            if "進階分析建議：" not in chunk:
                                 response += chunk
                                 grok_container.markdown(response)
-                        # 添加用戶友好提示
-                        response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看其他帖子。"
-                        grok_container.markdown(response)
-                    debug_info = [f"#### 調試信息：\n- 帖子 ID: {thread_id}"]
-                    with st.chat_message("assistant"):
-                        st.markdown("\n".join(debug_info))
+                    logger.info(f"調試信息: 帖子 ID={thread_id}")
                     st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": response})
                 else:
                     final_answer = f"無效帖子 ID {thread_id}，請重新輸入。"
@@ -330,7 +307,7 @@ async def chat_page():
                     st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": final_answer})
                 st.session_state.awaiting_response = False
             else:
-                final_answer = "請輸入有效指令：繼續、修改分類、ID 數字、結束"
+                final_answer = "請輸入有效指令：修改分類、ID 數字、結束"
                 with st.chat_message("assistant"):
                     st.markdown(final_answer)
                 st.session_state.chat_history.append({"question": response_input, "answer": final_answer})
