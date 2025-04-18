@@ -107,7 +107,12 @@ async def chat_page():
                 
                 if not analysis.get("category_ids"):
                     # 無關 LIHKG 的問題
-                    response = await stream_grok3_response(user_question, [], {}, "other")
+                    response = ""
+                    with st.chat_message("assistant"):
+                        grok_container = st.empty()
+                        async for chunk in stream_grok3_response(user_question, [], {}, "other"):
+                            response += chunk
+                            grok_container.markdown(response)
                     with st.chat_message("assistant"):
                         st.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
@@ -182,7 +187,12 @@ async def chat_page():
                     }
                     for item in thread_data
                 ]
-                response = await stream_grok3_response(user_question, metadata, {item["thread_id"]: item for item in thread_data}, analysis["processing"])
+                response = ""
+                with st.chat_message("assistant"):
+                    grok_container = st.empty()
+                    async for chunk in stream_grok3_response(user_question, metadata, {item["thread_id"]: item for item in thread_data}, analysis["processing"]):
+                        response += chunk
+                        grok_container.markdown(response)
                 debug_info = [f"#### 調試信息：\n- 分類: {question_cat}", f"- 帖子數: {len(thread_data)}", f"- 使用緩存: {use_cache}"]
                 if rate_limit_info:
                     debug_info.append("- 速率限制或錯誤：")
@@ -198,7 +208,7 @@ async def chat_page():
                 
             except Exception as e:
                 error_message = f"處理失敗，原因：{str(e)}\n\n#### 調試信息：\n- 錯誤: {str(e)}"
-                if result.get("rate_limit_info"):
+                if 'result' in locals() and result.get("rate_limit_info"):
                     error_message += "\n- 速率限制或錯誤：\n" + "\n".join(f"  - {info}" for info in result["rate_limit_info"])
                 with st.chat_message("assistant"):
                     st.markdown(error_message)
@@ -253,12 +263,17 @@ async def chat_page():
                         }
                         for item in thread_data
                     ]
-                    response = await stream_grok3_response(
-                        st.session_state.last_user_query,
-                        metadata,
-                        {item["thread_id"]: item for item in thread_data},
-                        analysis["suggestions"]["processing"]
-                    )
+                    response = ""
+                    with st.chat_message("assistant"):
+                        grok_container = st.empty()
+                        async for chunk in stream_grok3_response(
+                            st.session_state.last_user_query,
+                            metadata,
+                            {item["thread_id"]: item for item in thread_data},
+                            analysis["suggestions"]["processing"]
+                        ):
+                            response += chunk
+                            grok_container.markdown(response)
                     debug_info = [f"#### 調試信息：\n- 分類: {result.get('selected_cat')}", f"- 帖子數: {len(thread_data)}"]
                     if result.get("rate_limit_info"):
                         debug_info.append("- 速率限制或錯誤：")
@@ -284,12 +299,17 @@ async def chat_page():
                 thread_id = response_input
                 thread_data = st.session_state.chat_history[-1]["thread_data"]
                 if thread_id in [item["thread_id"] for item in thread_data]:
-                    response = await stream_grok3_response(
-                        st.session_state.last_user_query,
-                        [item for item in thread_data if item["thread_id"] == thread_id],
-                        {thread_id: next(item for item in thread_data if item["thread_id"] == thread_id)},
-                        "summarize"
-                    )
+                    response = ""
+                    with st.chat_message("assistant"):
+                        grok_container = st.empty()
+                        async for chunk in stream_grok3_response(
+                            st.session_state.last_user_query,
+                            [item for item in thread_data if item["thread_id"] == thread_id],
+                            {thread_id: next(item for item in thread_data if item["thread_id"] == thread_id)},
+                            "summarize"
+                        ):
+                            response += chunk
+                            grok_container.markdown(response)
                     debug_info = [f"#### 調試信息：\n- 帖子 ID: {thread_id}"]
                     final_answer = response + "\n\n" + "\n".join(debug_info)
                     with st.chat_message("assistant"):
