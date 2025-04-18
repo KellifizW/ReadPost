@@ -113,8 +113,6 @@ async def chat_page():
                         async for chunk in stream_grok3_response(user_question, [], {}, "other"):
                             response += chunk
                             grok_container.markdown(response)
-                    with st.chat_message("assistant"):
-                        st.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
                     st.session_state.awaiting_response = False
                     logger.info(f"無關 LIHKG 問題: 問題={user_question}, 回應={response[:50]}...")
@@ -191,17 +189,21 @@ async def chat_page():
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     async for chunk in stream_grok3_response(user_question, metadata, {item["thread_id"]: item for item in thread_data}, analysis["processing"]):
-                        response += chunk
-                        grok_container.markdown(response)
+                        if "進階分析建議：" not in chunk:  # 過濾進階分析建議
+                            response += chunk
+                            grok_container.markdown(response)
+                    # 添加用戶友好提示
+                    response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看特定帖子。"
+                    grok_container.markdown(response)
+                # 單獨顯示調試信息
                 debug_info = [f"#### 調試信息：\n- 分類: {question_cat}", f"- 帖子數: {len(thread_data)}", f"- 使用緩存: {use_cache}"]
                 if rate_limit_info:
                     debug_info.append("- 速率限制或錯誤：")
                     debug_info.extend(f"  - {info}" for info in rate_limit_info)
-                final_answer = response + "\n\n" + "\n".join(debug_info)
-                
                 with st.chat_message("assistant"):
-                    st.markdown(final_answer)
-                st.session_state.chat_history[-1]["answer"] = final_answer
+                    st.markdown("\n".join(debug_info))
+                
+                st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.last_user_query = user_question
                 st.session_state.last_cat_id = cat_id
                 st.session_state.awaiting_response = False
@@ -272,17 +274,20 @@ async def chat_page():
                             {item["thread_id"]: item for item in thread_data},
                             analysis["suggestions"]["processing"]
                         ):
-                            response += chunk
-                            grok_container.markdown(response)
+                            if "進階分析建議：" not in chunk:  # 過濾進階分析建議
+                                response += chunk
+                                grok_container.markdown(response)
+                        # 添加用戶友好提示
+                        response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看特定帖子。"
+                        grok_container.markdown(response)
                     debug_info = [f"#### 調試信息：\n- 分類: {result.get('selected_cat')}", f"- 帖子數: {len(thread_data)}"]
                     if result.get("rate_limit_info"):
                         debug_info.append("- 速率限制或錯誤：")
                         debug_info.extend(f"  - {info}" for info in result["rate_limit_info"])
-                    final_answer = response + "\n\n" + "\n".join(debug_info)
-                    
                     with st.chat_message("assistant"):
-                        st.markdown(final_answer)
-                    st.session_state.chat_history.append({"question": "繼續", "answer": final_answer, "thread_data": thread_data})
+                        st.markdown("\n".join(debug_info))
+                    
+                    st.session_state.chat_history.append({"question": "繼續", "answer": response, "thread_data": thread_data})
                 else:
                     final_answer = "數據已充分，無需進一步分析。請輸入「結束」或新問題。"
                     with st.chat_message("assistant"):
@@ -308,13 +313,16 @@ async def chat_page():
                             {thread_id: next(item for item in thread_data if item["thread_id"] == thread_id)},
                             "summarize"
                         ):
-                            response += chunk
-                            grok_container.markdown(response)
+                            if "進階分析建議：" not in chunk:  # 過濾進階分析建議
+                                response += chunk
+                                grok_container.markdown(response)
+                        # 添加用戶友好提示
+                        response += "\n\n輸入「繼續」以深入分析，或輸入「ID 數字」查看其他帖子。"
+                        grok_container.markdown(response)
                     debug_info = [f"#### 調試信息：\n- 帖子 ID: {thread_id}"]
-                    final_answer = response + "\n\n" + "\n".join(debug_info)
                     with st.chat_message("assistant"):
-                        st.markdown(final_answer)
-                    st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": final_answer})
+                        st.markdown("\n".join(debug_info))
+                    st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": response})
                 else:
                     final_answer = f"無效帖子 ID {thread_id}，請重新輸入。"
                     with st.chat_message("assistant"):
