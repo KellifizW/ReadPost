@@ -112,7 +112,7 @@ async def chat_page():
                     response = ""
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
-                        async for chunk in stream_grok3_response(user_question, [], {}, "other"):
+                        async for chunk in stream_grok3_response(user_question, [], {}, "summarize"):
                             response += chunk
                             grok_container.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
@@ -191,12 +191,18 @@ async def chat_page():
                         "timestamp": time.time()
                     }
                 
-                thread_data = filtered_thread_data[:2]  # 限制為 2 個帖子
+                # 使用 analysis["post_limit"] 和 top_thread_ids 控制帖子數量
+                post_limit = analysis.get("post_limit", 2)
+                top_thread_ids = analysis.get("top_thread_ids", [])
+                thread_data = [
+                    item for item in filtered_thread_data
+                    if str(item["thread_id"]) in top_thread_ids
+                ][:post_limit]
                 used_thread_ids.update(str(item["thread_id"]) for item in thread_data)
                 
                 # 動態生成回應主題
-                theme = analysis.get("theme", "相關")  # 從分析結果獲取主題，如「感動」、「搞笑」
-                response = f"以下分享兩個被認為『{theme}』的帖子：\n\n"
+                theme = analysis.get("theme", "相關")
+                response = f"以下分享{post_limit}個被認為『{theme}』的帖子：\n\n"
                 metadata = [
                     {
                         "thread_id": item["thread_id"],
@@ -270,7 +276,10 @@ async def chat_page():
                             "timestamp": time.time()
                         }
                     
-                    thread_data_advanced = filtered_thread_data_advanced[:2]
+                    thread_data_advanced = [
+                        item for item in filtered_thread_data_advanced
+                        if str(item["thread_id"]) in analysis_advanced["suggestions"].get("top_thread_ids", [])
+                    ][:post_limit]
                     used_thread_ids.update(str(item["thread_id"]) for item in thread_data_advanced)
                     
                     if thread_data_advanced:
