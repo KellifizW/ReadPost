@@ -7,7 +7,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - process_user_question：處理用戶問題，抓取並分析帖子。
 - clean_html：清理 HTML 標籤。
 硬編碼參數（優化建議：移至配置文件或介面）：
-- post_limit=2, max=10
+- post_limit=2, max=20
 - reply_limit=75/200, max_replies=25
 - min_replies=20/50, min_likes=10/20
 - target_pages=60%
@@ -56,7 +56,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     1. 識別主題（感動、搞笑、財經等），標記為 theme。
     2. 判斷意圖（總結、情緒分析、幽默總結）。
     3. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
-       {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 從標題選10個候選（candidate_thread_ids），再選top_thread_ids，確保每個ID唯一。'}
+       {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 從標題選20個候選（candidate_thread_ids），再選top_thread_ids，確保每個ID唯一。'}
     4. 設置參數：
        - theme：問題主題。
        - category_ids：[cat_id]。
@@ -65,7 +65,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - reply_limit：{200 if is_advanced else 75}。
        - filters：根據主題（感動：like_count≥5；搞笑：like_count≥10；財經：like_count≥10；其他：min_replies≥20，min_likes≥10）。
        - processing：emotion_focused_summary、humor_focused_summary、professional_summary、summarize、sentiment。
-       - candidate_thread_ids：10個候選ID，確保唯一。
+       - candidate_thread_ids：20個候選ID，確保唯一。
        - top_thread_ids：最終選定ID，確保唯一。
     5. 若無關LIHKG，返回空category_ids。
 
@@ -228,7 +228,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
-    post_limit = min(analysis.get("post_limit", 2), 20)  # 修改：最大20，Grok3動態選擇
+    post_limit = min(analysis.get("post_limit", 2), 20)  # 硬編碼：最大20，Grok3動態選擇
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)  # 硬編碼：建議可配置
     filters = analysis.get("filters", {})
     min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)  # 硬編碼：建議可配置
@@ -330,7 +330,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     analysis = await analyze_and_screen(user_query=user_question, cat_name=selected_cat, cat_id=cat_id, thread_titles=filtered_items[:90], metadata=None, thread_data=None)
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))  # 確保唯一
     if not top_thread_ids and filtered_items:
-        top_thread_ids = list(set([item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items))])))  # 確保唯一
+        top_thread_ids = list(set([item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]))  # 修復：補全random.sample
         logger.warning(f"No top_thread_ids, randomly selected: {top_thread_ids}")
     
     seen_ids = set()
