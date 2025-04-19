@@ -190,8 +190,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         for item in metadata if isinstance(item, dict) and "thread_id" in item and "title" in item
     ]
     
-    logger.info(f"stream_grok3_response: metadata={json.dumps(filtered_metadata, ensure_ascii=False)}, "
-                f"thread_data={json.dumps(filtered_thread_data, ensure_ascii=False)}")
+    logger.info(f"stream_grok3_response: metadata_count={len(filtered_metadata)}, thread_data_count={len(filtered_thread_data)}, reply_counts={[len(data['replies']) for data in filtered_thread_data.values()]}")
     
     needs_advanced_analysis = False
     reason = ""
@@ -265,8 +264,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
         logger.info(f"Truncated prompt: length={len(prompt)}")
     
-    logger.info(f"Generated prompt: {prompt}")
-    
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
@@ -336,7 +333,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         for thread_id in previous_thread_ids:
             cached_data = previous_thread_data.get(thread_id) if previous_thread_data else None
             if not cached_data or "thread_id" not in cached_data:
-                logger.warning(f"Invalid cached data for thread_id={thread_id}: {json.dumps(cached_data, ensure_ascii=False)}")
+                logger.warning(f"Invalid cached data for thread_id={thread_id}")
                 continue
             fetched_pages = cached_data.get("fetched_pages", [])
             existing_replies = cached_data.get("replies", [])
@@ -347,7 +344,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             remaining_pages = max(0, target_pages - len(fetched_pages))
             
             if remaining_pages <= 0:
-                logger.info(f"Thread {thread_id} meets 60% page threshold: {len(fetched_pages)}/{target_pages}")
+                logger.info(f"Thread {thread_id} fetch complete: pages={len(fetched_pages)}/{target_pages}, replies={len(existing_replies)}")
                 thread_data.append({
                     "thread_id": str(thread_id), 
                     "title": cached_data.get("title", "未知標題"),
@@ -370,7 +367,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             
             replies = thread_result.get("replies", [])
             if not replies and thread_result.get("total_replies", 0) >= min_replies:
-                logger.warning(f"Invalid thread: {thread_id}")
+                logger.warning(f"Failed to fetch thread content: thread_id={thread_id}")
                 continue
             
             all_replies = existing_replies + [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in replies]
@@ -385,7 +382,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "replies": sorted_replies[:10], 
                 "fetched_pages": all_fetched_pages
             })
-            logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
+            logger.info(f"Advanced thread fetch: thread_id={thread_id}, pages={len(all_fetched_pages)}/{target_pages}, replies={len(sorted_replies)}")
             await asyncio.sleep(0.5)
         
         return {
@@ -407,9 +404,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info.extend(result.get("rate_limit_info", []))
         items = result.get("items", [])
         initial_threads.extend([item for item in items if "thread_id" in item])
-        logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(items)}")
+        logger.info(f"Fetched category: cat_id={cat_id}, page={page}, items={len(items)}")
         if not items:
-            logger.warning(f"Failed to fetch items for cat_id={cat_id}, page={page}. Stopping fetch.")
+            logger.warning(f"No items fetched for cat_id={cat_id}, page={page}")
             break
         if len(initial_threads) >= 180:
             initial_threads = initial_threads[:180]
@@ -422,11 +419,11 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         "thread_id" in item
     ]
     filtered_items.sort(key=lambda x: (x.get("no_of_reply", 0), x.get("last_reply_time", 0)), reverse=True)
-    logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}, items={json.dumps(filtered_items, ensure_ascii=False)}")
+    logger.info(f"Filtered threads: cat_id={cat_id}, initial_count={len(initial_threads)}, filtered_count={len(filtered_items)}")
     
     for item in initial_threads:
         if "thread_id" not in item:
-            logger.warning(f"Missing thread_id in item: {json.dumps(item, ensure_ascii=False)}")
+            logger.warning(f"Missing thread_id in item: cat_id={cat_id}")
             continue
         thread_id = str(item["thread_id"])
         st.session_state.thread_cache[thread_id] = {
@@ -442,7 +439,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         }
     
     if not top_thread_ids and filtered_items:
-        logger.info(f"No top_thread_ids, re-analyzing with thread_titles")
+        logger.info(f"Re-analyzing with thread titles: cat_id={cat_id}, thread_count={len(filtered_items)}")
         analysis = await analyze_and_screen(
             user_query=user_question, 
             cat_name=selected_cat, 
@@ -457,7 +454,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ] if top_thread_ids else filtered_items[:post_limit]
     
     if not valid_threads:
-        logger.warning(f"No valid threads found for cat_id={cat_id}. Falling back to direct_answer.")
+        logger.warning(f"No valid threads found: cat_id={cat_id}, post_limit={post_limit}")
         direct_answer = ""
         async for content in stream_grok3_response(
             user_query=user_question, 
@@ -479,7 +476,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     for item in valid_threads[:post_limit]:
         if "thread_id" not in item:
-            logger.warning(f"Missing thread_id in valid_thread: {json.dumps(item, ensure_ascii=False)}")
+            logger.warning(f"Missing thread_id in valid thread: cat_id={cat_id}")
             continue
         thread_id = str(item["thread_id"])
         thread_result = await get_lihkg_thread_content(
@@ -498,7 +495,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         
         replies = thread_result.get("replies", [])
         if not replies and thread_result.get("total_replies", 0) >= min_replies:
-            logger.warning(f"Invalid thread: {thread_id}")
+            logger.warning(f"Failed to fetch thread content: thread_id={thread_id}")
             continue
         
         sorted_replies = sorted(replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
@@ -515,7 +512,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "fetched_pages": thread_data[-1]["fetched_pages"]
         })
         st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
-        logger.info(f"Fetched thread {thread_id}: replies={len(replies)}")
+        logger.info(f"Fetched thread: thread_id={thread_id}, replies={len(replies)}, pages={len(thread_result.get('fetched_pages', []))}")
         await asyncio.sleep(0.5)
     
     return {
