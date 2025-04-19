@@ -20,10 +20,9 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 
 import aiohttp
 import asyncio
-import json
+import json  # 添加 json 導入
 import re
 import math
-import json
 import time
 import logging
 import streamlit as st
@@ -54,7 +53,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - 若要求列出帖子，指定篩選條件（如所有帖子、熱門帖子、含特定主題的帖子）。
        - 若要求總結或分析，選擇相關帖子並指定處理方式（如摘要、情緒分析）。
     3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多20個），並說明篩選依據。
-    4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件。
+    4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件，post_limit 不超過 20。
     5. 若問題與分類無關，設置 category_ids 為空，並建議直接回答。
 
     輸出：
