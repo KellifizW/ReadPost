@@ -44,15 +44,15 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
        - reply_limit：0-75，初始分析 25 條，最終分析 75 條。
        - filters：根據主題動態設置：
          - 感動：高 like_count（≥ 5），低 dislike_count（< 20），近期帖子，優先溫馨、感人、互助內容。
-         - 搞笑：高 like_count（≥ 20），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
+         - 搞笑：高 like_count（≥ 10），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
          - 財經：高 like_count（≥ 10），低 dislike_count（< 5），優先專業、數據驅動內容。
-         - 其他主題：根據語義相關性，設置高互動性（min_replies ≥ 50，min_likes ≥ 10）。
+         - 其他主題：根據語義相關性，設置高互動性（min_replies ≥ 20，min_likes ≥ 10）。
        - processing：根據主題選擇：
          - 感動：emotion_focused_summary。
          - 搞笑：humor_focused_summary。
          - 財經：professional_summary。
          - 其他：summarize 或 sentiment（若涉及情緒分析）。
-       - candidate_thread_ids：10 個候選帖子 ID。
+       - candidate_thread_ids：10 個候選帖子 ID（必須來自實際抓取的帖子）。
        - top_thread_ids：最終選定的 N 個帖子 ID（若為進階分析，優先使用 metadata 中的 thread_ids）。
     5. 若無關 LIHKG，返回空 category_ids。
     6. 提供 category_suggestion 或 reason。
@@ -73,7 +73,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
             "data_type": "both",
             "post_limit": post_limit,
             "reply_limit": 50,
-            "filters": {"min_replies": 50, "min_likes": 10, "recent_only": True},
+            "filters": {"min_replies": 20, "min_likes": 10, "recent_only": True},
             "processing": "summarize",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
@@ -112,6 +112,11 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
                     result["category_ids"] = [cat_id]
                 reason = result.get("reason", "無原因提供")
                 logger.info(f"Grok 3 API 回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}..., reason={reason}")
+                # 檢查 candidate_thread_ids
+                candidate_ids = result.get("candidate_thread_ids", [])
+                if candidate_ids and not all(isinstance(id, (int, str)) and str(id).isdigit() for id in candidate_ids):
+                    logger.warning(f"無效 candidate_thread_ids: {candidate_ids}")
+                    result["candidate_thread_ids"] = []
                 return result
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         logger.error(f"問題分析失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
@@ -121,7 +126,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
             "data_type": "both",
             "post_limit": post_limit,
             "reply_limit": 50,
-            "filters": {"min_replies": 50, "min_likes": 10, "recent_only": True},
+            "filters": {"min_replies": 20, "min_likes": 10, "recent_only": True},
             "processing": "summarize",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
@@ -166,14 +171,15 @@ async def screen_thread_titles(
     執行以下步驟：
     1. 分析用戶問題，確定主題（例如，搞笑、感動、財經）。
     2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
-       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 20），允許 dislike_count（< 20）。
+       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 10），允許 dislike_count（< 20）。
        - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 5），低 dislike_count（< 20）。
        - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（≥ 10），低 dislike_count（< 5）。
-       - 其他主題：根據語義相關性和高互動性（no_of_reply ≥ 50，like_count ≥ 10）。
-    3. 判斷是否需要抓取回覆（need_replies）：
+       - 其他主題：根據語義相關性和高互動性（no_of_reply ≥ 20，like_count ≥ 10）。
+    3. 確保 top_thread_ids 只包含輸入數據中的 thread_id。
+    4. 判斷是否需要抓取回覆（need_replies）：
        - 若標題足以回答問題（例如，標題明確且互動性低），設置 need_replies=False。
        - 若需要回覆來驗證內容（例如，標題含關鍵詞但語義模糊），設置 need_replies=True。
-    4. 提供篩選理由（reason），說明為何選擇這些帖子。
+    5. 提供篩選理由（reason），說明為何選擇這些帖子。
 
     輸出格式：
     {{
@@ -236,6 +242,14 @@ async def screen_thread_titles(
                 logger.info(f"Grok 3 API 原始回應: 狀態碼={status_code}, 內容={content[:200]}...")
                 try:
                     result = json.loads(content)
+                    # 驗證 top_thread_ids
+                    valid_thread_ids = [str(item["thread_id"]) for item in valid_titles]
+                    top_thread_ids = [id for id in result.get("top_thread_ids", []) if str(id) in valid_thread_ids]
+                    result["top_thread_ids"] = top_thread_ids
+                    if not top_thread_ids and valid_titles:
+                        top_thread_ids = [item["thread_id"] for item in random.sample(valid_titles, min(post_limit, len(valid_titles)))]
+                        result["top_thread_ids"] = top_thread_ids
+                        result["reason"] = f"API 返回無效 ID，隨機選擇帖子：{top_thread_ids}"
                     logger.info(f"Grok 3 API 標題篩選回應: 回應摘要={str(result)[:50]}...")
                     return result
                 except json.JSONDecodeError:
@@ -245,7 +259,8 @@ async def screen_thread_titles(
                     if match:
                         try:
                             ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                            top_thread_ids = ids[:post_limit]
+                            valid_thread_ids = [str(item["thread_id"]) for item in valid_titles]
+                            top_thread_ids = [id for id in ids if str(id) in valid_thread_ids][:post_limit]
                         except ValueError:
                             logger.warning("正則提取 ID 失敗")
                     result = {
