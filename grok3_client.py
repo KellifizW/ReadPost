@@ -9,15 +9,14 @@ from typing import AsyncGenerator, Dict, List, Any
 
 logger = streamlit.logger.get_logger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 100000  # 放寬到 100000
+GROK3_TOKEN_LIMIT = 100000
 
 async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=False, metadata=None, thread_data=None, initial_response=None):
     """分析問題性質，決定抓取和處理策略"""
-    # 解析用戶要求的帖子數量
     post_limit = 2
     match = re.search(r'(\d+)個', user_query)
     if match:
-        post_limit = min(int(match.group(1)), 10)  # 最大 10 個帖子
+        post_limit = min(int(match.group(1)), 10)
     
     prompt = f"""
     你是一個智能助手，任務是分析用戶問題，決定從 LIHKG 討論區抓取的數據和處理方式。以繁體中文回覆，輸出結構化 JSON。
@@ -37,14 +36,14 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
        - 候選名單：從 30-90 個標題中，根據主題的語義相關性，選出 10 個候選帖子，優先包含與主題相關的關鍵詞（例如，感動：溫馨、感人、互助；搞笑：幽默、搞亂、on9；財經：股票、投資、經濟）。
        - 關聯性分析：抓取 10 個候選帖子的首頁回覆（每帖 25 條），分析與問題主題的語義相關性，排序並選出關聯性最高的 N 個帖子（N 由 post_limit 指定）。
        - 最終抓取：對於選定的 N 個帖子，抓取首 1 頁（每頁 25 條）和末 2 頁回覆，總計最多 75 條回覆。
-    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。' if is_advanced else '決定以下參數：'}
+    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。設置 needs_advanced_analysis=False 若已提供至少 3 個帖子且感動內容充分（每篇帖子有至少 10 條具情感共鳴的回覆，like_count ≥ 5）。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
        - category_ids：僅包含 cat_id={cat_id}，不得包含其他分類。
        - data_type："title"、"replies"、"both"。
        - post_limit：從問題中提取（如「3個」→ 3），默認 2，最大 10。
        - reply_limit：0-75，初始分析 25 條，最終分析 75 條。
        - filters：根據主題動態設置：
-         - 感動：高 like_count（≥ 20），低 dislike_count（< 5），近期帖子，優先溫馨、感人、互助內容。
+         - 感動：高 like_count（≥ 5），低 dislike_count（< 20），近期帖子，優先溫馨、感人、互助內容。
          - 搞笑：高 like_count（≥ 20），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
          - 財經：高 like_count（≥ 10），低 dislike_count（< 5），優先專業、數據驅動內容。
          - 其他主題：根據語義相關性，設置高互動性（min_replies ≥ 50，min_likes ≥ 10）。
@@ -107,12 +106,10 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
                 status_code = response.status
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                # 強制 category_ids 只包含用戶選擇的 cat_id
                 if is_advanced:
                     result["suggestions"]["category_ids"] = [cat_id]
                 else:
                     result["category_ids"] = [cat_id]
-                # 完整記錄 reason 字段
                 reason = result.get("reason", "無原因提供")
                 logger.info(f"Grok 3 API 回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}..., reason={reason}")
                 return result
@@ -146,14 +143,14 @@ async def screen_thread_titles(
     以繁體中文回覆，輸出結構化 JSON。
 
     輸入問題：{user_query}
-    帖子標題數據：{json.dumps(thread_titles, ensure_ascii=False)}
+    帝子標題數據：{json.dumps(thread_titles, ensure_ascii=False)}
     所需帖子數量：{post_limit}
 
     執行以下步驟：
     1. 分析用戶問題，確定主題（例如，搞笑、感動、財經）。
     2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
        - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 20），允許 dislike_count（< 20）。
-       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 20），低 dislike_count（< 5）。
+       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 5），低 dislike_count（< 20）。
        - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（≥ 10），低 dislike_count（< 5）。
        - 其他主題：根據語義相關性和高互動性（no_of_reply ≥ 50，like_count ≥ 10）。
     3. 判斷是否需要抓取回覆（need_replies）：
@@ -203,7 +200,7 @@ async def screen_thread_titles(
     char_count = len(prompt)
     if char_count > GROK3_TOKEN_LIMIT:
         logger.warning(f"標題篩選輸入超限: 字元數={char_count}")
-        thread_titles = thread_titles[:60]  # 截斷至 60 個標題
+        thread_titles = thread_titles[:60]
         prompt = prompt.replace(
             json.dumps(thread_titles, ensure_ascii=False),
             json.dumps(thread_titles[:60], ensure_ascii=False)
@@ -223,7 +220,6 @@ async def screen_thread_titles(
                 return result
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         logger.error(f"標題篩選失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
-        # 隨機選擇備用帖子
         if thread_titles:
             top_thread_ids = [item["thread_id"] for item in random.sample(thread_titles, min(post_limit, len(thread_titles)))]
             logger.warning(f"標題篩選失敗，隨機選擇帖子: top_thread_ids={top_thread_ids}")
@@ -247,13 +243,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 篩選正評或負評不為零的回覆（最多 25 條）
     filtered_thread_data = {}
     for thread_id, data in thread_data.items():
         replies = [
             r for r in data.get("replies", [])
             if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0
-        ][:25]  # 最多 25 條
+        ][:25]
         filtered_thread_data[thread_id] = {
             "thread_id": data["thread_id"],
             "title": data["title"],
@@ -264,7 +259,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
             "replies": replies
         }
     
-    # 修改回應字數為 300-500 字
     if processing == "emotion_focused_summary":
         prompt = f"""
         你是一個智能助手，任務是基於 LIHKG 數據總結與感動或溫馨相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅用提供數據。
@@ -280,11 +274,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         1. 解析問題意圖，聚焦感動或溫馨主題。
         2. 綜合每篇帖子的回覆，總結內容，突出感動情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容溫馨或感人。
         3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
-        4. 若數據不足或帖子與感動無關，說明原因並建議進階分析。
+        4. 判斷數據是否足夠：
+           - 若已提供至少 3 個帖子且每篇帖子有至少 10 條具情感共鳴的回覆（like_count ≥ 5），說明數據已足夠，無需進階分析。
+           - 若帖子數少於 3 或感動內容不足，說明原因並建議一次進階分析，抓取更多創意台（cat_id=31）帖子。
+        5. 若為進階分析，明確標記「已完成進階分析」，避免進一步分析。
 
         輸出格式：
         - 總結：300-500 字，突出感動或溫馨內容。
-        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
+        - 進階分析建議：
+          - needs_advanced_analysis：true 或 false。
+          - reason：說明是否需要進階分析或數據已足夠。
         """
     elif processing == "humor_focused_summary":
         prompt = f"""
@@ -391,10 +390,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
     char_count = len(prompt)
     if char_count > GROK3_TOKEN_LIMIT:
         logger.warning(f"輸入超限: 字元數={char_count}")
-        # 改進截斷邏輯，保留每篇帖子的標題和部分回覆
         truncated_thread_data = {}
         for thread_id, data in filtered_thread_data.items():
-            replies = data.get("replies", [])[:10]  # 每篇帖子保留 10 條回覆
+            replies = data.get("replies", [])[:10]
             truncated_thread_data[thread_id] = {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
