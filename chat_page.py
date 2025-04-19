@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import asyncio
 import time
@@ -374,4 +373,3 @@ async def chat_page():
 
 if __name__ == "__main__":
     asyncio.run(chat_page())
-```
