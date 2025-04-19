@@ -1,9 +1,10 @@
+```python
 import aiohttp
 import random
 import asyncio
 import time
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
-from grok3_client import screen_thread_titles  # 新增：導入標題篩選函數
+from grok3_client import screen_thread_titles
 from utils import clean_html
 import streamlit.logger
 from datetime import datetime
@@ -13,7 +14,7 @@ logger = streamlit.logger.get_logger(__name__)
 async def process_user_question(user_question, cat_id_map, selected_cat, analysis, request_counter, last_reset, rate_limit_until):
     """處理用戶問題，實現分階段篩選和回覆抓取"""
     # 提取分析參數
-    category_ids = analysis.get("category_ids", [cat_id_map[selected_cat]])
+    category_ids = [cat_id_map[selected_cat]]  # 僅使用用戶選擇的分類
     data_type = analysis.get("data_type", "both")
     post_limit = min(analysis.get("post_limit", 2), 10)  # 最大 10 個帖子
     reply_limit = min(analysis.get("reply_limit", 150), 150)  # 最大 150 條回覆
@@ -36,7 +37,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             cat_id = cat_id_val
             break
     if cat_id not in category_ids:
-        category_ids = [cat_id] + [c for c in category_ids if c != cat_id]
+        category_ids = [cat_id]
     
     thread_data = []
     rate_limit_info = []
@@ -47,25 +48,23 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     
     # 階段 1：抓取 30-90 個標題
     initial_threads = []
-    for cat_id in category_ids[:2]:
-        result = await get_lihkg_topic_list(
-            cat_id=cat_id,
-            sub_cat_id=0,
-            start_page=1,
-            max_pages=3,
-            request_counter=request_counter,
-            last_reset=last_reset,
-            rate_limit_until=rate_limit_until
-        )
-        
-        request_counter = result.get("request_counter", request_counter)
-        last_reset = result.get("last_reset", last_reset)
-        rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-        rate_limit_info.extend(result.get("rate_limit_info", []))
-        
-        items = result.get("items", [])
-        initial_threads.extend(items)
-        logger.info(f"初始抓取: cat_id={cat_id}, 帖子數={len(items)}")
+    result = await get_lihkg_topic_list(
+        cat_id=cat_id,
+        sub_cat_id=0,
+        start_page=1,
+        max_pages=3,
+        request_counter=request_counter,
+        last_reset=last_reset,
+        rate_limit_until=rate_limit_until
+    )
+    
+    request_counter = result.get("request_counter", request_counter)
+    last_reset = result.get("last_reset", last_reset)
+    rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+    rate_limit_info.extend(result.get("rate_limit_info", []))
+    
+    initial_threads = result.get("items", [])
+    logger.info(f"初始抓取: cat_id={cat_id}, 帖子數={len(initial_threads)}")
     
     # 階段 2：篩選候選帖子（本地篩選）
     filtered_items = []
@@ -104,13 +103,18 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     # 階段 2.5：Grok 3 標題篩選
     title_screening = await screen_thread_titles(
         user_query=user_question,
-        thread_titles=filtered_items[:90],  # 限制最多 90 個標題
+        thread_titles=filtered_items[:90],
         post_limit=post_limit
     )
     top_thread_ids = title_screening.get("top_thread_ids", [])
     need_replies = title_screening.get("need_replies", True)
     screening_reason = title_screening.get("reason", "未知")
     logger.info(f"Grok 3 標題篩選: top_thread_ids={top_thread_ids}, need_replies={need_replies}, 理由={screening_reason}")
+    
+    # 若標題篩選失敗，隨機選擇備用帖子
+    if not top_thread_ids and filtered_items:
+        top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
+        logger.warning(f"標題篩選無結果，隨機選擇帖子: top_thread_ids={top_thread_ids}")
     
     # 階段 3：抓取候選帖子的首頁回覆（若需要）
     candidate_data = {}
@@ -248,3 +252,4 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         "last_reset": last_reset,
         "rate_limit_until": rate_limit_until
     }
+```
