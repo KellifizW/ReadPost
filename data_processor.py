@@ -8,6 +8,7 @@ from grok3_client import screen_thread_titles
 from utils import clean_html
 import streamlit.logger
 from datetime import datetime
+import math
 
 logger = streamlit.logger.get_logger(__name__)
 
@@ -51,6 +52,30 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             cached_data = previous_thread_data.get(thread_id) if previous_thread_data else None
             fetched_pages = cached_data.get("fetched_pages", []) if cached_data else []
             existing_replies = cached_data.get("replies", []) if cached_data else []
+            total_replies = cached_data.get("no_of_reply", 0) if cached_data else 0
+            
+            # 計算總頁數和目標頁數（60%）
+            total_pages = (total_replies + 24) // 25
+            target_pages = math.ceil(total_pages * 0.6)
+            remaining_pages = max(0, target_pages - len(fetched_pages))
+            
+            # 若無需抓取更多頁，跳過
+            if remaining_pages <= 0:
+                logger.info(f"帖子已達60%頁數: thread_id={thread_id}, 已抓取頁數={len(fetched_pages)}, 目標頁數={target_pages}")
+                thread_data.append({
+                    "thread_id": str(thread_id),
+                    "title": cached_data.get("title", "未知標題"),
+                    "no_of_reply": total_replies,
+                    "last_reply_time": cached_data.get("last_reply_time", 0),
+                    "like_count": cached_data.get("like_count", 0),
+                    "dislike_count": cached_data.get("dislike_count", 0),
+                    "replies": existing_replies,
+                    "fetched_pages": fetched_pages
+                })
+                continue
+            
+            # 從最後抓取的頁面繼續
+            start_page = max(fetched_pages, default=1) + 1 if fetched_pages else 1
             
             thread_result = await get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -59,8 +84,8 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
                 max_replies=reply_limit,
-                fetch_last_pages=2,
-                start_page=max(fetched_pages, default=1) + 1 if fetched_pages else 1
+                fetch_last_pages=remaining_pages,
+                start_page=start_page
             )
             
             request_counter = thread_result.get("request_counter", request_counter)
@@ -91,12 +116,12 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             
             # 更新已抓取頁面
             new_fetched_pages = thread_result.get("fetched_pages", [])
-            all_fetched_pages = list(set(fetched_pages + new_fetched_pages))
+            all_fetched_pages = sorted(list(set(fetched_pages + new_fetched_pages)))
             
             thread_data.append({
                 "thread_id": str(thread_id),
                 "title": thread_result.get("title", cached_data.get("title", "未知標題") if cached_data else "未知標題"),
-                "no_of_reply": thread_result.get("total_replies", cached_data.get("no_of_reply", 0) if cached_data else 0),
+                "no_of_reply": thread_result.get("total_replies", total_replies),
                 "last_reply_time": thread_result.get("last_reply_time", cached_data.get("last_reply_time", 0) if cached_data else 0),
                 "like_count": thread_result.get("like_count", cached_data.get("like_count", 0) if cached_data else 0),
                 "dislike_count": thread_result.get("dislike_count", cached_data.get("dislike_count", 0) if cached_data else 0),
@@ -104,7 +129,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
                 "fetched_pages": all_fetched_pages
             })
             
-            logger.info(f"進階帖子數據: thread_id={thread_id}, 回覆數={len(sorted_replies)}, 已抓取頁面={all_fetched_pages}")
+            logger.info(f"進階帖子數據: thread_id={thread_id}, 回覆數={len(sorted_replies)}, 已抓取頁數={len(all_fetched_pages)}, 目標頁數={target_pages}")
             await asyncio.sleep(5)
         
         return {
