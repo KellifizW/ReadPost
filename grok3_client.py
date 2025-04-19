@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import streamlit.logger
 import aiohttp
@@ -38,7 +39,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
        - 最終抓取：對於選定的 N 個帖子，抓取首 3 頁（每頁 25 條）和末 3 頁回覆，總計最多 150 條回覆。
     4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
-       - category_ids：優先 cat_id={cat_id}，可添加其他分類（1=吹水台，2=熱門台，5=時事台，14=上班台，15=財經台，29=成人台，31=創意台）。
+       - category_ids：僅包含 cat_id={cat_id}，避免添加其他分類。
        - data_type："title"、"replies"、"both"。
        - post_limit：從問題中提取（如「3個」→ 3），默認 2，最大 10。
        - reply_limit：0-150，初始分析 25 條，最終分析 150 條。
@@ -156,9 +157,17 @@ async def screen_thread_titles(
     輸出格式：
     ```json
     {
-        "top_thread_ids": [int],
-        "need_replies": bool,
-        "reason": "string"
+        "top_thread_ids": [],
+        "need_replies": true,
+        "reason": ""
+    }
+    ```
+    示例：
+    ```json
+    {
+        "top_thread_ids": [12345, 67890],
+        "need_replies": true,
+        "reason": "選擇了包含搞笑關鍵詞且高互動的帖子"
     }
     ```
     """
@@ -225,7 +234,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 修改回應字數為 300-500 字（基於你先前的要求）
+    # 修改回應字數為 300-500 字
     if processing == "emotion_focused_summary":
         prompt = f"""
         你是一個智能助手，任務是基於 LIHKG 數據總結與感動或溫馨相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅用提供數據。
@@ -404,3 +413,4 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
                 continue
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
             return
+```
