@@ -241,6 +241,7 @@ async def chat_page():
                     initial_response=response
                 )
                 if analysis_advanced.get("needs_advanced_analysis"):
+                    logger.info(f"觸發進階分析: 原因={analysis_advanced.get('suggestions', {}).get('reason', '未知')}")
                     analysis_advanced["suggestions"]["filters"] = analysis_advanced["suggestions"].get("filters", {})
                     analysis_advanced["suggestions"]["filters"]["exclude_thread_ids"] = list(used_thread_ids)
                     result = await process_user_question(
@@ -290,7 +291,7 @@ async def chat_page():
                             }
                             for item in thread_data_advanced
                         ]
-                        response += f"\n\n更深入的『{theme}』帖子分析：\n\n"
+                        response += f"\n\n進階分析補充（更多『{theme}』帖子）：\n\n"
                         for meta in metadata_advanced:
                             response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                         response += "\n"
