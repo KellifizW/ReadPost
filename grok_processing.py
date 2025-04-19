@@ -26,12 +26,10 @@ import aiohttp
 import asyncio
 import json
 import re
-import random
 import math
 import time
 import logging
 import streamlit as st
-from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 logger = logging.getLogger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -56,11 +54,13 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     步驟：
     1. 提取問題的關鍵詞（例如名詞、主題焦點，如「美股」「點睇」），若未提供關鍵詞，則自行分析，標記為 keywords。
     2. 識別主題（感動、搞笑、財經等）及子主題（例如財經下的「美股」「房地產」），標記為 theme 和 sub_theme。
-    3. 判斷意圖（總結、情緒分析、幽默總結等），標記為 intent。
+    3. 判斷意圖（總結、情緒分析、幽默總結、列出所有帖子等），標記為 intent。若問題包含「列出」「所有」「帖子」「標題」，設置 intent 為 list_all_threads。
     4. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
-       {'- 若無標題，設置初始抓取（30-180個標題）。' if not thread_titles else '- 根據關鍵詞和子主題，從標題選20個候選（candidate_thread_ids），按與關鍵詞的相關性排序，確保每個ID唯一。'}
-    5. 從候選帖子中選出 top_thread_ids（數量由 post_limit 決定，默認5，最大20），優先選擇標題或內容與關鍵詞和子主題高度匹配的帖子，確保每個ID唯一。
-    6. 若無與關鍵詞或子主題相關的帖子，返回空 category_ids，並設置 category_suggestion 為「無相關帖子，建議直接回答問題」。
+       {'- 若無標題，設置初始抓取（30-180個標題）。' if not thread_titles else ''}
+       - 若 intent 為 list_all_threads，選擇所有符合 min_replies 和 min_likes 條件的帖子（最多180個）作為 top_thread_ids。
+       - 否則，根據關鍵詞和子主題，從標題選20個候選（candidate_thread_ids），按與關鍵詞的相關性排序，確保每個ID唯一。
+    5. 若 intent 為 list_all_threads，top_thread_ids 包含所有候選帖子 ID（最多180個）；否則，從候選帖子中選出 top_thread_ids（數量由 post_limit 決定，默認5，最大20），優先選擇標題或內容與關鍵詞和子主題高度匹配的帖子，確保每個ID唯一。
+    6. 若無與關鍵詞或子主題相關的帖子（且 intent 不是 list_all_threads），返回空 category_ids，並設置 category_suggestion 為「無相關帖子，建議直接回答問題」。
 
     輸出：
     {{
@@ -104,12 +104,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     }
     
     try:
-        logger.info(f"Grok 3 API request: url={GROK3_API_URL}, prompt_length={len(prompt)}, prompt_summary={prompt[:50]}...")
+        logger.info(f"Grok 3 API request: url={GROK3_API_URL}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
         async with aiohttp.ClientSession() as session:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                 data = await response.json()
+                logger.info(f"Grok 3 API response: status={response.status}, response={json.dumps(data, ensure_ascii=False)}")
                 result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"Grok 3 API response: status={response.status}, response_summary={str(data)[:50]}...")
                 if is_advanced:
                     result["suggestions"]["category_ids"] = [cat_id]
                 else:
@@ -132,6 +132,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
+        logger.error("Grok 3 API key missing")
         yield "錯誤: 缺少 API 密鑰"
         return
     
@@ -222,6 +223,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
         1. 基於關鍵詞和問題，提供簡潔、專業的回答。
         2. 若需要外部數據，說明「當前數據不足，建議查閱最新資訊」。
         輸出：回應
+        """,
+        "list_all_threads": f"""
+        列出所有 LIHKG 帖子標題。問題：{user_query}
+        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        步驟：
+        1. 將所有提供的帖子標題整理成清單，格式為「帖子 ID: {thread_id}\n標題: {title}\n」。
+        2. 若無帖子數據，說明「未找到任何帖子」。
+        輸出：帖子清單
         """
     }
     
@@ -243,7 +252,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
     
     for attempt in range(3):
         try:
-            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, attempt={attempt+1}, prompt_length={len(prompt)}, prompt_summary={prompt[:50]}...")
+            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, attempt={attempt+1}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     async for line in response.content:
@@ -258,7 +267,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
                                     if content and "進階分析建議：" not in content:
                                         yield content
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error: {str(e)}, line={line_str}")
+                                    logger.warning(f"JSON decode error: error={str(e)}, line={line_str}")
                                     continue
                     logger.info(f"Grok 3 API response: status={response.status}, stream_completed=True")
                     return
@@ -271,9 +280,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
-    stop_words = ["怎看", "大家", "最近", "的", "分享", "點睇"]
-    keywords = [word for word in user_question.split() if len(word) > 1 and word not in stop_words]
-    logger.info(f"Extracted keywords: {keywords}")
+    # 檢查是否為「列出所有帖子」意圖
+    list_all_keywords = ["列出", "所有", "帖子", "標題"]
+    is_list_all = any(keyword in user_question for keyword in list_all_keywords) and analysis.get("intent") == "list_all_threads"
+    
+    # 提取關鍵詞（僅在非 list_all_threads 時使用）
+    stop_words = ["怎看", "大家", "最近", "的", "分享", "點睇", "請你", "看到"]
+    keywords = [] if is_list_all else [word for word in user_question.split() if len(word) > 1 and word not in stop_words]
+    logger.info(f"Extracted keywords: {keywords}, is_list_all={is_list_all}")
 
     post_limit = min(analysis.get("post_limit", 5), 20)
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
@@ -379,6 +393,50 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     )
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
     
+    # 處理「列出所有帖子」意圖
+    if is_list_all:
+        valid_threads = filtered_items[:post_limit]  # 限制數量
+        if not valid_threads:
+            logger.warning(f"No threads found for cat_id={cat_id}")
+            direct_answer = f"在 {selected_cat} 中未找到任何帖子。"
+            return {
+                "selected_cat": selected_cat, "thread_data": [], "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+                "direct_answer": direct_answer
+            }
+        
+        thread_data = [
+            {
+                "thread_id": str(item["thread_id"]), "title": item["title"],
+                "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", 0),
+                "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0),
+                "replies": [], "fetched_pages": []
+            } for item in valid_threads
+        ]
+        
+        metadata = [
+            {
+                "thread_id": item["thread_id"], "title": item["title"],
+                "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"),
+                "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)
+            } for item in thread_data
+        ]
+        
+        direct_answer = ""
+        logger.info(f"Calling stream_grok3_response for list_all_threads: thread_count={len(thread_data)}")
+        async for content in stream_grok3_response(
+            user_query=user_question, metadata=metadata, thread_data={item["thread_id"]: item for item in thread_data},
+            processing="list_all_threads", keywords=keywords, sub_theme=analysis.get("sub_theme", "")
+        ):
+            direct_answer += content
+        
+        return {
+            "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+            "direct_answer": direct_answer
+        }
+    
+    # 普通篩選邏輯
     valid_threads = [
         item for item in filtered_items
         if str(item["thread_id"]) in map(str, top_thread_ids) and any(keyword in item["title"] for keyword in keywords)
