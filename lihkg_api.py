@@ -11,10 +11,10 @@ LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 - max_pages=3
 - count=60
 - items[:90]
-- max_requests=20, period=60
+- max_requests=30, period=60
 - max_retries=3
 - timeout=10
-- sleep=1
+- sleep=0.5
 """
 
 import aiohttp
@@ -54,7 +54,7 @@ class RateLimiter:
             self.requests = self.requests[1:]
         self.requests.append(now)
 
-rate_limiter = RateLimiter(max_requests=20, period=60)  # 硬編碼：建議移至配置文件
+rate_limiter = RateLimiter(max_requests=30, period=60)  # 修改：放寬至30次/60秒
 
 def get_category_name(cat_id):
     categories = {
@@ -131,7 +131,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
                 except Exception as e:
                     logger.error(f"Fetch error: cat_id={cat_id}, page={page}, attempt={attempt+1}, error={str(e)}")
                     break
-            await asyncio.sleep(1)  # 硬編碼：建議可配置
+            await asyncio.sleep(0.5)  # 修改：放寬至0.5秒
     return {
         "items": items[:90],  # 硬編碼：建議可配置
         "rate_limit_info": rate_limit_info,
@@ -309,7 +309,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             replies.extend(page_replies)
             fetched_pages.append(fetched_page)
             rate_limit_info.extend(page_rate_limit_info)
-            await asyncio.sleep(1)  # 硬編碼：建議可配置
+            await asyncio.sleep(0.5)  # 修改：放寬至0.5秒
     
     return {
         "replies": replies, "title": thread_title, "total_replies": total_replies,
