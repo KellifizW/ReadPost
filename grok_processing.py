@@ -61,7 +61,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - theme：問題主題。
        - category_ids：[cat_id]。
        - data_type："title"、"replies"、"both"。
-       - post_limit：從問題提取（默認2，最大10）。
+       - post_limit：從問題提取（默認2，最大20，根據問題複雜度動態選擇1-20）。
        - reply_limit：{200 if is_advanced else 75}。
        - filters：根據主題（感動：like_count≥5；搞笑：like_count≥10；財經：like_count≥10；其他：min_replies≥20，min_likes≥10）。
        - processing：emotion_focused_summary、humor_focused_summary、professional_summary、summarize、sentiment。
@@ -228,7 +228,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
-    post_limit = min(analysis.get("post_limit", 2), 10)  # 硬編碼：建議允許用戶配置
+    post_limit = min(analysis.get("post_limit", 2), 20)  # 修改：最大20，Grok3動態選擇
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)  # 硬編碼：建議可配置
     filters = analysis.get("filters", {})
     min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)  # 硬編碼：建議可配置
@@ -333,7 +333,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         top_thread_ids = list(set([item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items))])))  # 確保唯一
         logger.warning(f"No top_thread_ids, randomly selected: {top_thread_ids}")
     
-    # 確保候選帖子唯一
     seen_ids = set()
     candidate_threads = []
     for item in filtered_items:
@@ -375,4 +374,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         })
         st.session_state.thread_cache[thread_id]["data"].update({
             "replies": thread_data[-1]["replies"], "fetched_pages": thread_data[-1]["fetched_pages"]
-       
+        })
+    
+    return {
+        "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
+        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+    }
