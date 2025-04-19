@@ -18,8 +18,8 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - GROK3_TOKEN_LIMIT=100000
 - retries=3
 - retry_sleep=2^attempt
-- fetch_pages=1-3
-- sleep=0.5
+- fetch_pages=1-6
+- sleep=1
 """
 
 import aiohttp
@@ -54,12 +54,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 提取問題的關鍵詞（例如名詞、主題焦點，如「美股」「表現」），若未提供關鍵詞，則自行分析，標記為 keywords。
+    1. 提取問題的關鍵詞（例如名詞、主題焦點，如「美股」「點睇」），若未提供關鍵詞，則自行分析，標記為 keywords。
     2. 識別主題（感動、搞笑、財經等）及子主題（例如財經下的「美股」「房地產」），標記為 theme 和 sub_theme。
     3. 判斷意圖（總結、情緒分析、幽默總結等），標記為 intent。
     4. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
-       {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 根據關鍵詞和子主題，從標題選20個候選（candidate_thread_ids），按與關鍵詞的相關性排序，確保每個ID唯一。'}
-    5. 從候選帖子中選出 top_thread_ids（數量由 post_limit 決定），優先選擇標題或內容與關鍵詞和子主題高度匹配的帖子，確保每個ID唯一。
+       {'- 若無標題，設置初始抓取（30-180個標題）。' if not thread_titles else '- 根據關鍵詞和子主題，從標題選20個候選（candidate_thread_ids），按與關鍵詞的相關性排序，確保每個ID唯一。'}
+    5. 從候選帖子中選出 top_thread_ids（數量由 post_limit 決定，默認5，最大20），優先選擇標題或內容與關鍵詞和子主題高度匹配的帖子，確保每個ID唯一。
     6. 若無與關鍵詞或子主題相關的帖子，返回空 category_ids，並設置 category_suggestion 為「無相關帖子，建議直接回答問題」。
 
     輸出：
@@ -271,7 +271,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, k
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
-    keywords = [word for word in user_question.split() if len(word) > 1 and word not in ["怎看", "大家", "最近", "的"]]
+    stop_words = ["怎看", "大家", "最近", "的", "分享", "點睇"]
+    keywords = [word for word in user_question.split() if len(word) > 1 and word not in stop_words]
     logger.info(f"Extracted keywords: {keywords}")
 
     post_limit = min(analysis.get("post_limit", 5), 20)
@@ -284,10 +285,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
 
     thread_data = []
     rate_limit_info = []
-    direct_answer = None
 
     if is_advanced and top_thread_ids:
-        logger.info(f"Advanced analysis: thread_ids={top_thread_ids}, previous_data={bool(previous_thread_data)}")
         for thread_id in top_thread_ids:
             cached_data = previous_thread_data.get(thread_id) if previous_thread_data else None
             fetched_pages = cached_data.get("fetched_pages", []) if cached_data else []
@@ -308,7 +307,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 })
                 continue
             
-            logger.info(f"Fetching remaining pages for thread_id={thread_id}: remaining={remaining_pages}")
             start_page = max(fetched_pages, default=1) + 1 if fetched_pages else 1
             thread_result = await get_lihkg_thread_content(
                 thread_id=thread_id, cat_id=cat_id, request_counter=request_counter, last_reset=last_reset,
@@ -337,16 +335,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "replies": sorted_replies, "fetched_pages": all_fetched_pages
             })
             logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
         
         return {
             "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
-            "direct_answer": direct_answer
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
         }
     
     initial_threads = []
-    for page in range(1, 4):
+    max_pages = 6
+    for page in range(1, max_pages + 1):
         result = await get_lihkg_topic_list(cat_id=cat_id, start_page=page, max_pages=1, request_counter=request_counter, last_reset=last_reset, rate_limit_until=rate_limit_until)
         request_counter = result.get("request_counter", request_counter)
         last_reset = result.get("last_reset", last_reset)
@@ -354,8 +352,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info.extend(result.get("rate_limit_info", []))
         initial_threads.extend(result.get("items", []))
         logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(result.get('items', []))}")
-        if len(initial_threads) >= 90:
-            initial_threads = initial_threads[:90]
+        if len(initial_threads) >= 180:
+            initial_threads = initial_threads[:180]
             break
     
     filtered_items = [
@@ -377,7 +375,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     analysis = await analyze_and_screen(
         user_query=user_question, cat_name=selected_cat, cat_id=cat_id,
-        thread_titles=filtered_items[:90], metadata=None, thread_data=None, keywords=keywords
+        thread_titles=filtered_items[:180], metadata=None, thread_data=None, keywords=keywords
     )
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
     
@@ -399,16 +397,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "direct_answer": direct_answer
         }
     
-    seen_ids = set()
-    candidate_threads = []
-    for item in filtered_items:
-        if str(item["thread_id"]) in map(str, top_thread_ids) and item["thread_id"] not in seen_ids:
-            candidate_threads.append(item)
-            seen_ids.add(item["thread_id"])
-            if len(candidate_threads) >= post_limit:
-                break
-    
-    logger.info(f"Selected candidate threads: thread_ids={[item['thread_id'] for item in candidate_threads]}")
+    candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
     
     for item in candidate_threads:
         thread_id = str(item["thread_id"])
@@ -437,9 +426,44 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         st.session_state.thread_cache[thread_id]["data"].update({
             "replies": thread_data[-1]["replies"], "fetched_pages": thread_data[-1]["fetched_pages"]
         })
+        st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
+        logger.info(f"Fetched candidate thread {thread_id}: replies={len(replies)}")
+        await asyncio.sleep(1)
+    
+    final_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
+    
+    for item in final_threads:
+        thread_id = str(item["thread_id"])
+        thread_result = await get_lihkg_thread_content(
+            thread_id=thread_id, cat_id=cat_id, request_counter=request_counter, last_reset=last_reset,
+            rate_limit_until=rate_limit_until, max_replies=reply_limit, fetch_last_pages=2
+        )
+        request_counter = thread_result.get("request_counter", request_counter)
+        last_reset = thread_result.get("last_reset", last_reset)
+        rate_limit_until = thread_result.get("rate_limit_until", rate_limit_until)
+        rate_limit_info.extend(thread_result.get("rate_limit_info", []))
+        
+        replies = thread_result.get("replies", [])
+        if not replies and thread_result.get("total_replies", 0) >= min_replies:
+            logger.warning(f"Invalid thread: {thread_id}")
+            continue
+        
+        sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
+        thread_data.append({
+            "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
+            "last_reply_time": item.get("last_reply_time", 0), "like_count": item.get("like_count", 0),
+            "dislike_count": item.get("dislike_count", 0),
+            "replies": [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in sorted_replies],
+            "fetched_pages": thread_result.get("fetched_pages", [1])
+        })
+        st.session_state.thread_cache[thread_id]["data"].update({
+            "replies": thread_data[-1]["replies"], "fetched_pages": thread_data[-1]["fetched_pages"]
+        })
+        st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
+        logger.info(f"Fetched final thread {thread_id}: replies={len(replies)}")
+        await asyncio.sleep(1)
     
     return {
         "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
-        "direct_answer": direct_answer
+        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
     }
