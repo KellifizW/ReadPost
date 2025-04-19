@@ -19,6 +19,7 @@ LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 
 import aiohttp
 import asyncio
+import json
 import time
 from datetime import datetime
 import random
