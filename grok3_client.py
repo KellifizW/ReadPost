@@ -31,12 +31,12 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     執行以下步驟：
     1. 識別問題主題（例如，感動、搞笑、財經、時事），並明確標記為 theme。
     2. 判斷意圖（例如，總結、情緒分析、主題聚焦總結）。
-    3. {'若為進階分析，評估初始數據和回應是否充分，建議後續策略。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
+    3. {'若為進階分析，檢查初始數據是否涵蓋帖子80%的回覆數量（no_of_reply * 0.8）。若任一帖子未達標，設置 needs_advanced_analysis=True，建議抓取剩餘回覆。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
        - 初始抓取：瀏覽 30-90 個帖子標題，根據分類活躍度調整（例如，吹水台 90 個，創意台 30 個）。
        - 候選名單：從 30-90 個標題中，根據主題的語義相關性，選出 10 個候選帖子，優先包含與主題相關的關鍵詞（例如，感動：溫馨、感人、互助；搞笑：幽默、搞亂、on9；財經：股票、投資、經濟）。
        - 關聯性分析：抓取 10 個候選帖子的首頁回覆（每帖 25 條），分析與問題主題的語義相關性，排序並選出關聯性最高的 N 個帖子（N 由 post_limit 指定）。
        - 最終抓取：對於選定的 N 個帖子，抓取首 1 頁（每頁 25 條）和末 2 頁回覆，總計最多 75 條回覆。
-    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。設置 needs_advanced_analysis=False 若已提供至少 3 個帖子且感動內容充分（每篇帖子有至少 10 條具情感共鳴的回覆，like_count ≥ 5）。' if is_advanced else '決定以下參數：'}
+    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。若所有帖子回覆數量已達80%，設置 needs_advanced_analysis=False。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
        - category_ids：僅包含 cat_id={cat_id}，不得包含其他分類。
        - data_type："title"、"replies"、"both"。
@@ -138,7 +138,6 @@ async def screen_thread_titles(
     post_limit: int
 ) -> Dict[str, Any]:
     """篩選 LIHKG 帖子標題，選出與用戶問題最相關的帖子"""
-    # 驗證 thread_titles 數據結構
     valid_titles = [
         item for item in thread_titles
         if isinstance(item, dict) and
@@ -241,7 +240,6 @@ async def screen_thread_titles(
                     return result
                 except json.JSONDecodeError:
                     logger.warning(f"API 回應非有效 JSON: 內容={content[:200]}...")
-                    # 嘗試提取 top_thread_ids
                     match = re.search(r'"top_thread_ids"\s*:\s*\[\s*([0-9,\s]*)\s*\]', content, re.DOTALL)
                     top_thread_ids = []
                     if match:
@@ -301,6 +299,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
             "replies": replies
         }
     
+    # 檢查是否需要進階分析（回覆數量未達80%）
+    needs_advanced_analysis = False
+    reason = ""
+    for thread_id, data in filtered_thread_data.items():
+        reply_count = len(data["replies"])
+        total_replies = data["no_of_reply"]
+        if reply_count < total_replies * 0.8:
+            needs_advanced_analysis = True
+            reason += f"帖子 {thread_id} 僅抓取 {reply_count}/{total_replies} 條回覆，未達80%。"
+    
     if processing == "emotion_focused_summary":
         prompt = f"""
         你是一個智能助手，任務是基於 LIHKG 數據總結與感動或溫馨相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅用提供數據。
@@ -317,15 +325,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，突出感動情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容溫馨或感人。
         3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
         4. 判斷數據是否足夠：
-           - 若已提供至少 3 個帖子且每篇帖子有至少 10 條具情感共鳴的回覆（like_count ≥ 5），說明數據已足夠，無需進階分析。
-           - 若帖子數少於 3 或感動內容不足，說明原因並建議一次進階分析，抓取更多創意台（cat_id=31）帖子。
+           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
+           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
         5. 若為進階分析，明確標記「已完成進階分析」，避免進一步分析。
 
         輸出格式：
         - 總結：300-500 字，突出感動或溫馨內容。
         - 進階分析建議：
-          - needs_advanced_analysis：true 或 false。
-          - reason：說明是否需要進階分析或數據已足夠。
+          - needs_advanced_analysis：{needs_advanced_analysis}。
+          - reason：{reason}。
         """
     elif processing == "humor_focused_summary":
         prompt = f"""
@@ -342,11 +350,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         1. 解析問題意圖，聚焦幽默或搞笑主題。
         2. 綜合每篇帖子的回覆，總結內容，突出幽默或誇張情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容搞笑或諷刺。
         3. 適配分類語氣（吹水台輕鬆，成人台大膽）。
-        4. 若數據不足或帖子與搞笑無關，說明原因並建議進階分析。
+        4. 判斷數據是否足夠：
+           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
+           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
 
         輸出格式：
         - 總結：300-500 字，突出幽默或搞笑內容。
-        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
+        - 進階分析建議：
+          - needs_advanced_analysis：{needs_advanced_analysis}。
+          - reason：{reason}。
         """
     elif processing == "professional_summary":
         prompt = f"""
@@ -363,11 +375,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         1. 解析問題意圖，聚焦財經、時事等專業主題。
         2. 綜合每篇帖子的回覆，總結內容，突出專業觀點或數據驅動討論，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容客觀或權威。
         3. 適配分類語氣（財經台專業，時事台嚴肅）。
-        4. 若數據不足或帖子與專業主題無關，說明原因並建議進階分析。
+        4. 判斷數據是否足夠：
+           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
+           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
 
         輸出格式：
         - 總結：300-500 字，突出專業或數據驅動內容。
-        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
+        - 進階分析建議：
+          - needs_advanced_analysis：{needs_advanced_analysis}。
+          - reason：{reason}。
         """
     elif processing == "summarize":
         prompt = f"""
@@ -384,11 +400,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         1. 解析問題意圖，識別主題（若無明確主題，視為通用）。
         2. 綜合每篇帖子的回覆，總結內容，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容與問題主題相關。
         3. 適配分類語氣（吹水台輕鬆，財經台專業）。
-        4. 若數據不足或帖子與問題無關，說明原因並建議進階分析。
+        4. 判斷數據是否足夠：
+           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
+           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
 
         輸出格式：
         - 總結：300-500 字，突出與問題主題相關的內容。
-        - 進階分析建議：是否需要更多數據或改變處理方式，說明理由。
+        - 進階分析建議：
+          - needs_advanced_analysis：{needs_advanced_analysis}。
+          - reason：{reason}。
         """
     elif processing == "sentiment":
         prompt = f"""
@@ -405,7 +425,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         1. 解析問題意圖。
         2. 分析標題和回覆，判斷情緒（正面、負面、中立），聚焦正負評不為 0 的回覆。
         3. 返回情緒分佈（百分比）。
-        4. 若數據不足，建議進階分析。
+        4. 判斷數據是否足夠：
+           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
+           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
 
         輸出格式：
         - 情緒分析：
@@ -413,7 +435,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
           - 負面：XX%
           - 中立：XX%
         - 依據：...
-        - 進階分析建議：...
+        - 進階分析建議：
+          - needs_advanced_analysis：{needs_advanced_analysis}。
+          - reason：{reason}。
         """
     else:
         prompt = f"""
