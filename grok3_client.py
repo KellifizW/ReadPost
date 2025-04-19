@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 import random
+import math
 from typing import AsyncGenerator, Dict, List, Any
 
 logger = streamlit.logger.get_logger(__name__)
@@ -31,21 +32,21 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     執行以下步驟：
     1. 識別問題主題（例如，感動、搞笑、財經、時事），並明確標記為 theme。
     2. 判斷意圖（例如，總結、情緒分析、主題聚焦總結）。
-    3. {'若為進階分析，檢查初始數據是否涵蓋帖子80%的回覆數量（no_of_reply * 0.8）。若任一帖子未達標，設置 needs_advanced_analysis=True，建議抓取剩餘回覆。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
+    3. {'若為進階分析，檢查每個帖子是否已抓取60%的回覆頁數（總頁數 * 0.6，向上取整）。若任一帖子未達標，設置 needs_advanced_analysis=True，建議抓取剩餘頁數。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
        - 初始抓取：瀏覽 30-90 個帖子標題，根據分類活躍度調整（例如，吹水台 90 個，創意台 30 個）。
        - 候選名單：從 30-90 個標題中，根據主題的語義相關性，選出 10 個候選帖子，優先包含與主題相關的關鍵詞（例如，感動：溫馨、感人、互助；搞笑：幽默、搞亂、on9；財經：股票、投資、經濟）。
        - 關聯性分析：抓取 10 個候選帖子的首頁回覆（每帖 25 條），分析與問題主題的語義相關性，排序並選出關聯性最高的 N 個帖子（N 由 post_limit 指定）。
        - 最終抓取：對於選定的 N 個帖子，抓取首 1 頁（每頁 25 條）和末 2 頁回覆，總計最多 75 條回覆。
-    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。若所有帖子回覆數量已達80%，設置 needs_advanced_analysis=False。' if is_advanced else '決定以下參數：'}
+    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。若所有帖子已抓取60%頁數，設置 needs_advanced_analysis=False。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
        - category_ids：僅包含 cat_id={cat_id}，不得包含其他分類。
        - data_type："title"、"replies"、"both"。
        - post_limit：從問題中提取（如「3個」→ 3），默認 2，最大 10。
        - reply_limit：0-75，初始分析 25 條，最終分析 75 條。
        - filters：根據主題動態設置：
-         - 感動：高 like_count（≥ 5），低 dislike_count（< 20），近期帖子，優先溫馨、感人、互助內容。
-         - 搞笑：高 like_count（≥ 10），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
-         - 財經：高 like_count（≥ 10），低 dislike_count（< 5），優先專業、數據驅動內容。
+         - 感動：高 like_count（≥ 5），近期帖子，優先溫馨、感人、互助內容。
+         - 搞笑：高 like_count（≥ 10），優先幽默、誇張、諷刺內容。
+         - 財經：高 like_count（≥ 10），優先專業、數據驅動內容。
          - 其他主題：根據語義相關性，設置高互動性（min_replies ≥ 20，min_likes ≥ 10）。
        - processing：根據主題選擇：
          - 感動：emotion_focused_summary。
@@ -171,9 +172,9 @@ async def screen_thread_titles(
     執行以下步驟：
     1. 分析用戶問題，確定主題（例如，搞笑、感動、財經）。
     2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
-       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 10），允許 dislike_count（< 20）。
-       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 5），低 dislike_count（< 20）。
-       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（≥ 10），低 dislike_count（< 5）。
+       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 10）。
+       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 5）。
+       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（≥ 10）。
        - 其他主題：根據語義相關性和高互動性（no_of_reply ≥ 20，like_count ≥ 10）。
     3. 確保 top_thread_ids 只包含輸入數據中的 thread_id。
     4. 判斷是否需要抓取回覆（need_replies）：
@@ -311,18 +312,21 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
             "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": replies
+            "replies": replies,
+            "fetched_pages": data.get("fetched_pages", [])
         }
     
-    # 檢查是否需要進階分析（回覆數量未達80%）
+    # 檢查是否需要進階分析（未達60%回覆頁數）
     needs_advanced_analysis = False
     reason = ""
     for thread_id, data in filtered_thread_data.items():
-        reply_count = len(data["replies"])
         total_replies = data["no_of_reply"]
-        if reply_count < total_replies * 0.8:
+        total_pages = (total_replies + 24) // 25
+        target_pages = math.ceil(total_pages * 0.6)
+        fetched_pages = len(data["fetched_pages"])
+        if fetched_pages < target_pages:
             needs_advanced_analysis = True
-            reason += f"帖子 {thread_id} 僅抓取 {reply_count}/{total_replies} 條回覆，未達80%。"
+            reason += f"帖子 {thread_id} 僅抓取 {fetched_pages}/{total_pages} 頁，未達60%（目標 {target_pages} 頁）。"
     
     if processing == "emotion_focused_summary":
         prompt = f"""
@@ -340,8 +344,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，突出感動情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容溫馨或感人。
         3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
         4. 判斷數據是否足夠：
-           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
-           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
+           - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已足夠，無需進階分析。
+           - 若任一帖子未達60%頁數，建議抓取剩餘頁數。
         5. 若為進階分析，明確標記「已完成進階分析」，避免進一步分析。
 
         輸出格式：
@@ -366,8 +370,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，突出幽默或誇張情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容搞笑或諷刺。
         3. 適配分類語氣（吹水台輕鬆，成人台大膽）。
         4. 判斷數據是否足夠：
-           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
-           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
+           - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已足夠，無需進階分析。
+           - 若任一帖子未達60%頁數，建議抓取剩餘頁數。
 
         輸出格式：
         - 總結：300-500 字，突出幽默或搞笑內容。
@@ -391,8 +395,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，突出專業觀點或數據驅動討論，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容客觀或權威。
         3. 適配分類語氣（財經台專業，時事台嚴肅）。
         4. 判斷數據是否足夠：
-           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
-           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
+           - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已 - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已足夠，無需進階分析。
+           - 若任一帖子未達60%頁數，建議抓取剩餘頁數。
 
         輸出格式：
         - 總結：300-500 字，突出專業或數據驅動內容。
@@ -416,8 +420,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容與問題主題相關。
         3. 適配分類語氣（吹水台輕鬆，財經台專業）。
         4. 判斷數據是否足夠：
-           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
-           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
+           - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已足夠，無需進階分析。
+           - 若任一帖子未達60%頁數，建議抓取剩餘頁數。
 
         輸出格式：
         - 總結：300-500 字，突出與問題主題相關的內容。
@@ -441,8 +445,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 分析標題和回覆，判斷情緒（正面、負面、中立），聚焦正負評不為 0 的回覆。
         3. 返回情緒分佈（百分比）。
         4. 判斷數據是否足夠：
-           - 若每篇帖子回覆數量已達80%（no_of_reply * 0.8），說明數據已足夠，無需進階分析。
-           - 若任一帖子回覆數量不足80%，建議抓取剩餘回覆。
+           - 若每篇帖子已抓取60%回覆頁數（總頁數 * 0.6，向上取整），說明數據已足夠，無需進階分析。
+           - 若任一帖子未達60%頁數，建議抓取剩餘頁數。
 
         輸出格式：
         - 情緒分析：
