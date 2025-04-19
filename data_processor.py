@@ -10,7 +10,7 @@ from datetime import datetime
 
 logger = streamlit.logger.get_logger(__name__)
 
-async def process_user_question(user_question, cat_id_map, selected_cat, analysis, request_counter, last_reset, rate_limit_until):
+async def process_user_question(user_question, cat_id_map, selected_cat, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None):
     """處理用戶問題，實現分階段篩選和回覆抓取"""
     # 提取分析參數
     category_ids = [cat_id_map[selected_cat]]  # 僅使用用戶選擇的分類
@@ -19,7 +19,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     reply_limit = min(analysis.get("reply_limit", 75), 75)  # 最大 75 條回覆（3 頁）
     filters = analysis.get("filters", {})
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
-    top_thread_ids = analysis.get("top_thread_ids", [])
+    top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
     
     # 放寬過濾條件
     min_replies = filters.get("min_replies", 10)
@@ -45,6 +45,67 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today.timestamp())
     
+    # 進階分析：優先抓取 previous_thread_ids 的回覆
+    if is_advanced and top_thread_ids:
+        logger.info(f"進階分析：優先抓取第一次回應的帖子: top_thread_ids={top_thread_ids}")
+        for thread_id in top_thread_ids:
+            logger.info(f"開始抓取進階帖子回覆: thread_id={thread_id}")
+            thread_result = await get_lihkg_thread_content(
+                thread_id=thread_id,
+                cat_id=cat_id,
+                request_counter=request_counter,
+                last_reset=last_reset,
+                rate_limit_until=rate_limit_until,
+                max_replies=reply_limit,
+                fetch_last_pages=2
+            )
+            
+            request_counter = thread_result.get("request_counter", request_counter)
+            last_reset = thread_result.get("last_reset", last_reset)
+            rate_limit_until = thread_result.get("rate_limit_until", rate_limit_until)
+            rate_limit_info.extend(thread_result.get("rate_limit_info", []))
+            
+            replies = thread_result.get("replies", [])
+            if not replies and thread_result.get("total_replies", 0) >= min_replies:
+                logger.warning(f"帖子無效或無權訪問: thread_id={thread_id}")
+                continue
+            
+            sorted_replies = sorted(
+                replies,
+                key=lambda x: x.get("like_count", 0),
+                reverse=True
+            )[:reply_limit]
+            
+            thread_data.append({
+                "thread_id": str(thread_id),
+                "title": thread_result.get("title", "未知標題"),
+                "no_of_reply": thread_result.get("total_replies", 0),
+                "last_reply_time": thread_result.get("last_reply_time", 0),
+                "like_count": thread_result.get("like_count", 0),
+                "dislike_count": thread_result.get("dislike_count", 0),
+                "replies": [
+                    {
+                        "msg": clean_html(reply["msg"]),
+                        "like_count": reply.get("like_count", 0),
+                        "dislike_count": reply.get("dislike_count", 0),
+                        "reply_time": reply.get("reply_time", 0)
+                    }
+                    for reply in sorted_replies
+                ]
+            })
+            
+            logger.info(f"進階帖子數據: thread_id={thread_id}, 回覆數={len(replies)}")
+            await asyncio.sleep(5)
+        
+        return {
+            "selected_cat": selected_cat,
+            "thread_data": thread_data,
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until
+        }
+    
     # 階段 1：抓取 30-90 個標題
     initial_threads = []
     result = await get_lihkg_topic_list(
@@ -63,6 +124,8 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     rate_limit_info.extend(result.get("rate_limit_info", []))
     
     initial_threads = result.get("items", [])
+    # 過濾分類，確保只包含用戶選擇的 cat_id
+    initial_threads = [item for item in initial_threads if item.get("cat_id") == cat_id]
     logger.info(f"初始抓取: cat_id={cat_id}, 帖子數={len(initial_threads)}")
     
     # 階段 2：篩選候選帖子（本地篩選）
@@ -99,7 +162,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
                 f"非近期帖子={filter_debug['recent_only_failed']}, "
                 f"被排除={filter_debug['excluded_failed']}")
     
-    # 階段 2.5：Grok 3 標題篩選
+    # 階段 2.5：Grok 3 標題篪選
     title_screening = await screen_thread_titles(
         user_query=user_question,
         thread_titles=filtered_items[:90],
@@ -110,10 +173,26 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     screening_reason = title_screening.get("reason", "未知")
     logger.info(f"Grok 3 標題篩選: top_thread_ids={top_thread_ids}, need_replies={need_replies}, 理由={screening_reason}")
     
-    # 若標題篩選失敗，隨機選擇備用帖子
+    # 若標題篩選失敗，隨機選擇符合主題的備用帖子
     if not top_thread_ids and filtered_items:
-        top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
-        logger.warning(f"標題篩選無結果，隨機選擇帖子: top_thread_ids={top_thread_ids}")
+        # 根據主題篩選關鍵詞
+        theme = analysis.get("theme", "未知")
+        keywords = {
+            "感動": ["溫馨", "感人", "互助", "愛", "緣分"],
+            "搞笑": ["幽默", "搞亂", "on9", "爆笑"],
+            "財經": ["股票", "投資", "經濟"],
+            "時事": ["新聞", "政治", "事件"]
+        }.get(theme, [])
+        
+        theme_items = [
+            item for item in filtered_items
+            if any(keyword in item["title"] for keyword in keywords) or not keywords
+        ]
+        if theme_items:
+            top_thread_ids = [item["thread_id"] for item in random.sample(theme_items, min(post_limit, len(theme_items)))]
+        else:
+            top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
+        logger.warning(f"標題篩選無結果，隨機選擇帖子: top_thread_ids={top_thread_ids}, 主題={theme}")
     
     # 階段 3：抓取候選帖子的首頁回覆（若需要）
     candidate_data = {}
@@ -199,7 +278,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             last_reset=last_reset,
             rate_limit_until=rate_limit_until,
             max_replies=reply_limit,
-            fetch_last_pages=2  # 改為抓取最後兩頁
+            fetch_last_pages=2
         )
         
         request_counter = thread_result.get("request_counter", request_counter)
