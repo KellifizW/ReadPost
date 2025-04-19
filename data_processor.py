@@ -16,7 +16,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     category_ids = [cat_id_map[selected_cat]]  # 僅使用用戶選擇的分類
     data_type = analysis.get("data_type", "both")
     post_limit = min(analysis.get("post_limit", 2), 10)  # 最大 10 個帖子
-    reply_limit = min(analysis.get("reply_limit", 150), 150)  # 最大 150 條回覆
+    reply_limit = min(analysis.get("reply_limit", 75), 75)  # 最大 75 條回覆（3 頁）
     filters = analysis.get("filters", {})
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
     top_thread_ids = analysis.get("top_thread_ids", [])
@@ -179,7 +179,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             }
             logger.info(f"抓取候選回覆: thread_id={thread_id}, 回覆數={len(replies)}")
     
-    # 階段 4：選取最終帖子並抓取首 3 頁和末 3 頁回覆
+    # 階段 4：選取最終帖子並抓取首 1 頁和末 2 頁回覆
     final_threads = [
         item for item in filtered_items
         if str(item["thread_id"]) in map(str, top_thread_ids)
@@ -199,7 +199,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             last_reset=last_reset,
             rate_limit_until=rate_limit_until,
             max_replies=reply_limit,
-            fetch_last_pages=3
+            fetch_last_pages=2  # 改為抓取最後兩頁
         )
         
         request_counter = thread_result.get("request_counter", request_counter)
