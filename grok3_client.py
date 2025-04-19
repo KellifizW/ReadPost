@@ -165,10 +165,10 @@ async def screen_thread_titles(
     執行以下步驟：
     1. 分析用戶問題，確定主題（例如，搞笑、感動、財經）。
     2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
-       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（>= 20），允許 dislike_count（< 20）。
-       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（>= 5），低 dislike_count（< 20）。
-       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（>= 10），低 dislike_count（< 5）。
-       - 其他主題：根據語義相關性和高互動性（no_of_reply >= 50，like_count >= 10）。
+       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（>= 20）。
+       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（>= 5）。
+       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（>= 10）。
+       - 其他主題：根據語義相關性和高互動性（no_of_reply >= 10，like_count >= 10）。
     3. 判斷是否需要抓取回覆（need_replies）：
        - 若標題足以回答問題（例如，標題明確且互動性低），設置 need_replies=False。
        - 若需要回覆來驗證內容（例如，標題含關鍵詞但語義模糊），設置 need_replies=True。
@@ -185,7 +185,7 @@ async def screen_thread_titles(
     {
         "top_thread_ids": [12345, 67890],
         "need_replies": true,
-        "reason": "選擇了包含搞笑關鍵詞且高互動的帖子"
+        "reason": "選擇了包含熱門關鍵詞且高互動的帖子"
     }
     """
 
@@ -231,20 +231,23 @@ async def screen_thread_titles(
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
                 status_code = response.status
                 data = await response.json()
-                content = data["choices"][0]["message"]["content"]
+                content = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"Grok 3 API 原始回應: 狀態碼={status_code}, 內容={content[:200]}...")
                 try:
                     result = json.loads(content)
+                    logger.info(f"Grok 3 API 標題篩選回應: 回應摘要={str(result)[:50]}...")
+                    return result
                 except json.JSONDecodeError:
-                    logger.warning(f"API 回應非有效 JSON: 內容={content[:100]}...")
+                    logger.warning(f"API 回應非有效 JSON: 內容={content[:200]}...")
                     # 嘗試提取 top_thread_ids
-                    match = re.search(r'"top_thread_ids":\s*\[([^\]]*)\]', content)
+                    match = re.search(r'"top_thread_ids"\s*:\s*\[\s*([0-9,\s]*)\s*\]', content, re.DOTALL)
                     top_thread_ids = []
                     if match:
                         try:
                             ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
                             top_thread_ids = ids[:post_limit]
                         except ValueError:
-                            pass
+                            logger.warning("正則提取 ID 失敗")
                     result = {
                         "top_thread_ids": top_thread_ids,
                         "need_replies": True,
@@ -254,8 +257,7 @@ async def screen_thread_titles(
                         top_thread_ids = [item["thread_id"] for item in random.sample(valid_titles, min(post_limit, len(valid_titles)))]
                         result["top_thread_ids"] = top_thread_ids
                         logger.warning(f"無法提取 ID，隨機選擇帖子: top_thread_ids={top_thread_ids}")
-                logger.info(f"Grok 3 API 標題篩選回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}...")
-                return result
+                    return result
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.error(f"標題篩選失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
         if valid_titles:
