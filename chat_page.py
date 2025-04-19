@@ -173,6 +173,9 @@ async def chat_page():
                     st.session_state.awaiting_response = False
                     return
                 
+                # 日誌記錄thread_data
+                logger.info(f"thread_data內容: {[{k: v for k, v in item.items() if k != 'replies'} for item in thread_data]}")
+                
                 # 過濾已緩存的帖子內容
                 used_thread_ids = set()
                 filtered_thread_data = []
@@ -191,13 +194,9 @@ async def chat_page():
                         "timestamp": time.time()
                     }
                 
-                # 使用 analysis["post_limit"] 和 top_thread_ids 控制帖子數量
+                # 使用post_limit控制帖子數量，忽略無效的top_thread_ids
                 post_limit = analysis.get("post_limit", 2)
-                top_thread_ids = analysis.get("top_thread_ids", [])
-                thread_data = [
-                    item for item in filtered_thread_data
-                    if str(item["thread_id"]) in top_thread_ids
-                ][:post_limit]
+                thread_data = filtered_thread_data[:post_limit]
                 used_thread_ids.update(str(item["thread_id"]) for item in thread_data)
                 
                 # 動態生成回應主題
@@ -231,7 +230,7 @@ async def chat_page():
                     debug_info.extend(f"  - {info}" for info in rate_limit_info)
                 logger.info(f"調試信息: {', '.join(debug_info)}")
                 
-                # 自動進階分析
+                # 進階分析（僅當必要時執行）
                 analysis_advanced = await analyze_question_nature(
                     user_query=user_question,
                     cat_name=question_cat,
@@ -276,10 +275,7 @@ async def chat_page():
                             "timestamp": time.time()
                         }
                     
-                    thread_data_advanced = [
-                        item for item in filtered_thread_data_advanced
-                        if str(item["thread_id"]) in analysis_advanced["suggestions"].get("top_thread_ids", [])
-                    ][:post_limit]
+                    thread_data_advanced = filtered_thread_data_advanced[:post_limit]
                     used_thread_ids.update(str(item["thread_id"]) for item in thread_data_advanced)
                     
                     if thread_data_advanced:
