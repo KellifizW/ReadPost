@@ -136,12 +136,30 @@ async def screen_thread_titles(
     thread_titles: List[Dict[str, Any]],
     post_limit: int
 ) -> Dict[str, Any]:
+    # 驗證 thread_titles 數據結構
+    valid_titles = [
+        item for item in thread_titles
+        if isinstance(item, dict) and
+           item.get("thread_id") and
+           isinstance(item.get("title"), str) and
+           item.get("no_of_reply", 0) >= 0 and
+           item.get("like_count", 0) >= 0
+    ]
+    
+    if not valid_titles:
+        logger.warning(f"標題篩選失敗: 無有效帖子，問題={user_query}, 原始帖子數={len(thread_titles)}")
+        return {
+            "top_thread_ids": [],
+            "need_replies": False,
+            "reason": "無有效帖子，數據結構無效或篩選條件過嚴。"
+        }
+    
     prompt = f"""
     你是一個智能助手，任務是從 LIHKG 討論區的帖子標題中篩選與用戶問題最相關的帖子。
     以繁體中文回覆，輸出結構化 JSON。
 
     輸入問題：{user_query}
-    帖子標題數據：{json.dumps(thread_titles, ensure_ascii=False)}
+    帖子標題數據：{json.dumps(valid_titles, ensure_ascii=False)}
     所需帖子數量：{post_limit}
 
     執行以下步驟：
@@ -198,10 +216,10 @@ async def screen_thread_titles(
     char_count = len(prompt)
     if char_count > GROK3_TOKEN_LIMIT:
         logger.warning(f"標題篩選輸入超限: 字元數={char_count}")
-        thread_titles = thread_titles[:60]
+        valid_titles = valid_titles[:60]
         prompt = prompt.replace(
-            json.dumps(thread_titles, ensure_ascii=False),
-            json.dumps(thread_titles[:60], ensure_ascii=False)
+            json.dumps(valid_titles, ensure_ascii=False),
+            json.dumps(valid_titles[:60], ensure_ascii=False)
         )
         char_count = len(prompt)
         logger.info(f"截斷後字元數: {char_count}")
@@ -213,13 +231,35 @@ async def screen_thread_titles(
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
                 status_code = response.status
                 data = await response.json()
-                result = json.loads(data["choices"][0]["message"]["content"])
+                content = data["choices"][0]["message"]["content"]
+                try:
+                    result = json.loads(content)
+                except json.JSONDecodeError:
+                    logger.warning(f"API 回應非有效 JSON: 內容={content[:100]}...")
+                    # 嘗試提取 top_thread_ids
+                    match = re.search(r'"top_thread_ids":\s*\[([^\]]*)\]', content)
+                    top_thread_ids = []
+                    if match:
+                        try:
+                            ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
+                            top_thread_ids = ids[:post_limit]
+                        except ValueError:
+                            pass
+                    result = {
+                        "top_thread_ids": top_thread_ids,
+                        "need_replies": True,
+                        "reason": "API 回應格式無效，嘗試提取 ID 或隨機選擇"
+                    }
+                    if not top_thread_ids and valid_titles:
+                        top_thread_ids = [item["thread_id"] for item in random.sample(valid_titles, min(post_limit, len(valid_titles)))]
+                        result["top_thread_ids"] = top_thread_ids
+                        logger.warning(f"無法提取 ID，隨機選擇帖子: top_thread_ids={top_thread_ids}")
                 logger.info(f"Grok 3 API 標題篩選回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}...")
                 return result
-    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.error(f"標題篩選失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
-        if thread_titles:
-            top_thread_ids = [item["thread_id"] for item in random.sample(thread_titles, min(post_limit, len(thread_titles)))]
+        if valid_titles:
+            top_thread_ids = [item["thread_id"] for item in random.sample(valid_titles, min(post_limit, len(valid_titles)))]
             logger.warning(f"標題篩選失敗，隨機選擇帖子: top_thread_ids={top_thread_ids}")
             return {
                 "top_thread_ids": top_thread_ids,
