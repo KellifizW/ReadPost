@@ -19,9 +19,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     
     min_replies = filters.get("min_replies", 10)
     min_likes = 10 if cat_id_map[selected_cat] == 2 else filters.get("min_likes", 20)
-    dislike_count_max = 20 if cat_id_map[selected_cat] == 2 else filters.get("dislike_count_max", 5)
-    recent_only = False
-    exclude_thread_ids = filters.get("exclude_thread_ids", [])
+    recent_only = filters.get("recent_only", True)  # 默認近期帖子
     
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
     top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
@@ -128,13 +126,12 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             sample_item = page_items[0]
             logger.info(f"抓取數據樣本: thread_id={sample_item.get('thread_id')}, cat_id={sample_item.get('cat_id')}, title={sample_item.get('title')[:50]}...")
         
-        filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "dislike_count_failed": 0, "recent_only_failed": 0, "excluded_failed": 0}
+        filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "recent_only_failed": 0}
         page_filtered_count = 0
         for item in page_items:
             thread_id = str(item.get("thread_id", ""))
             no_of_reply = item.get("no_of_reply", 0)
             like_count = int(item.get("like_count", 0))
-            dislike_count = int(item.get("dislike_count", 0))
             last_reply_time = int(item.get("last_reply_time", 0))
             
             if not thread_id:
@@ -146,14 +143,8 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             if like_count < min_likes:
                 filter_debug["min_likes_failed"] += 1
                 continue
-            if dislike_count > dislike_count_max:
-                filter_debug["dislike_count_failed"] += 1
-                continue
             if recent_only and last_reply_time < today_timestamp:
                 filter_debug["recent_only_failed"] += 1
-                continue
-            if thread_id in exclude_thread_ids:
-                filter_debug["excluded_failed"] += 1
                 continue
             filtered_items.append(item)
             page_filtered_count += 1
@@ -161,9 +152,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         logger.info(f"頁面 {page} 篩選: 總數={len(page_items)}, 符合條件={page_filtered_count}, "
                     f"篩選失敗詳情: 回覆數不足={filter_debug['min_replies_failed']}, "
                     f"點讚數不足={filter_debug['min_likes_failed']}, "
-                    f"負評過多={filter_debug['dislike_count_failed']}, "
-                    f"非近期帖子={filter_debug['recent_only_failed']}, "
-                    f"被排除={filter_debug['excluded_failed']}")
+                    f"非近期帖子={filter_debug['recent_only_failed']}")
         
         if len(filtered_items) >= 90:
             filtered_items = filtered_items[:90]
