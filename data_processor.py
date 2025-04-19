@@ -17,11 +17,10 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     reply_limit = min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
     
-    # 放寬篩選條件，適配熱門台
     min_replies = filters.get("min_replies", 10)
     min_likes = 10 if cat_id_map[selected_cat] == 2 else filters.get("min_likes", 20)
     dislike_count_max = 20 if cat_id_map[selected_cat] == 2 else filters.get("dislike_count_max", 5)
-    recent_only = False  # 移除 recent_only，適配熱門台
+    recent_only = False
     exclude_thread_ids = filters.get("exclude_thread_ids", [])
     
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
@@ -103,7 +102,6 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             "rate_limit_until": rate_limit_until
         }
     
-    # 逐頁抓取和篩選，收集最多 90 個帖子
     filtered_items = []
     total_fetched = 0
     for page in range(1, 4):
@@ -126,13 +124,12 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         total_fetched += len(page_items)
         logger.info(f"成功抓取: cat_id={cat_id}, page={page}, 帖子數={len(page_items)}")
         
-        # 記錄數據結構
         if page_items:
             sample_item = page_items[0]
             logger.info(f"抓取數據樣本: thread_id={sample_item.get('thread_id')}, cat_id={sample_item.get('cat_id')}, title={sample_item.get('title')[:50]}...")
         
-        # 篩選當前頁帖子
         filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "dislike_count_failed": 0, "recent_only_failed": 0, "excluded_failed": 0}
+        page_filtered_count = 0
         for item in page_items:
             thread_id = str(item.get("thread_id", ""))
             no_of_reply = item.get("no_of_reply", 0)
@@ -159,8 +156,9 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
                 filter_debug["excluded_failed"] += 1
                 continue
             filtered_items.append(item)
+            page_filtered_count += 1
         
-        logger.info(f"頁面 {page} 篩選: 總數={len(page_items)}, 符合條件={len(filtered_items) - len(filtered_items[:-len(page_items)] if filtered_items else 0}, "
+        logger.info(f"頁面 {page} 篩選: 總數={len(page_items)}, 符合條件={page_filtered_count}, "
                     f"篩選失敗詳情: 回覆數不足={filter_debug['min_replies_failed']}, "
                     f"點讚數不足={filter_debug['min_likes_failed']}, "
                     f"負評過多={filter_debug['dislike_count_failed']}, "
@@ -184,7 +182,6 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             "rate_limit_until": rate_limit_until
         }
     
-    # 標題篩選
     title_screening = await screen_thread_titles(
         user_query=user_question,
         thread_titles=filtered_items[:90],
@@ -215,7 +212,6 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
         logger.warning(f"標題篩選無結果，隨機選擇帖子: top_thread_ids={top_thread_ids}, 主題={theme}")
     
-    # 抓取候選帖子首頁回覆
     candidate_data = {}
     candidate_threads = [
         item for item in filtered_items
@@ -279,7 +275,6 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             }
             logger.info(f"抓取候選回覆: thread_id={thread_id}, 回覆數={len(replies)}")
     
-    # 抓取最終帖子回覆
     final_threads = [
         item for item in filtered_items
         if str(item["thread_id"]) in map(str, top_thread_ids)
