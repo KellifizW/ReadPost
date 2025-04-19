@@ -284,6 +284,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
 
     thread_data = []
     rate_limit_info = []
+    direct_answer = None
 
     if is_advanced and top_thread_ids:
         logger.info(f"Advanced analysis: thread_ids={top_thread_ids}, previous_data={bool(previous_thread_data)}")
@@ -340,7 +341,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         
         return {
             "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+            "direct_answer": direct_answer
         }
     
     initial_threads = []
@@ -385,12 +387,17 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ]
     if not valid_threads and filtered_items:
         logger.warning(f"No relevant threads for keywords {keywords}, falling back to direct answer")
+        direct_answer = ""
         async for content in stream_grok3_response(
             user_query=user_question, metadata={}, thread_data={},
             processing="direct_answer", keywords=keywords, sub_theme=analysis.get("sub_theme", "")
         ):
-            yield content
-        return
+            direct_answer += content
+        return {
+            "selected_cat": selected_cat, "thread_data": [], "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+            "direct_answer": direct_answer
+        }
     
     seen_ids = set()
     candidate_threads = []
@@ -433,5 +440,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     return {
         "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+        "direct_answer": direct_answer
     }
