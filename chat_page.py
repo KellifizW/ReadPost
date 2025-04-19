@@ -6,7 +6,6 @@ from data_processor import process_user_question
 from typing import Dict, List, Any
 import json
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 async def main():
@@ -66,8 +65,8 @@ async def main():
             request_counter=st.session_state.request_counter,
             last_reset=st.session_state.last_reset,
             rate_limit_until=st.session_state.rate_limit_until,
-            fetch_last_pages=1,  # Modified: Fetch only first and last page
-            max_replies=60      # Modified: Limit to 60 replies per thread
+            fetch_last_pages=1,
+            max_replies=60
         )
         
         # Update session state
@@ -75,7 +74,7 @@ async def main():
         st.session_state.cached_thread_data[cat_id] = thread_data
         
         # Log initial thread data
-        total_replies = sum(item.get("no_of_reply", 0) for item in thread_data)
+        total_replies = sum(len(item.get("replies", [])) for item in thread_data)
         logger.info(f"初次分析詳情: 帖子數={len(thread_data)}, 總回覆數={total_replies}")
         
         # Generate initial response
@@ -96,7 +95,7 @@ async def main():
         
         # Advanced analysis check
         post_limit = analysis.get("post_limit", 5)
-        if post_limit > 3:  # Modified: Skip advanced analysis if post_limit <= 3
+        if post_limit > 3:
             analysis_advanced = await analyze_question_nature(
                 user_query=user_question,
                 cat_name=question_cat,
@@ -112,7 +111,7 @@ async def main():
                 logger.info(f"觸發進階分析: 原因={reason}")
                 
                 # Reuse initial thread_data for advanced analysis
-                thread_data_advanced = thread_data  # Modified: Reuse initial posts
+                thread_data_advanced = thread_data
                 used_thread_ids = set(str(item["thread_id"]) for item in thread_data_advanced)
                 
                 # Fetch remaining replies for initial threads
@@ -125,9 +124,9 @@ async def main():
                     request_counter=st.session_state.request_counter,
                     last_reset=st.session_state.last_reset,
                     rate_limit_until=st.session_state.rate_limit_until,
-                    fetch_last_pages=0,           # Modified: Fetch specific remaining pages
-                    max_replies=100,             # Modified: Limit to 100 replies
-                    fetch_remaining_pages=True   # Modified: Fetch remaining pages
+                    fetch_last_pages=0,
+                    max_replies=100,
+                    fetch_remaining_pages=True
                 )
                 
                 # Generate advanced response
