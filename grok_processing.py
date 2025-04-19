@@ -37,9 +37,22 @@ def clean_html(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False):
-    # 根據問題長度動態設置 max_tokens 和 temperature
     max_tokens = 300 if len(user_query) < 50 else 1000
     temperature = 0.5 if "列出" in user_query else 0.9
+
+    # 精簡 thread_data 和 metadata
+    slim_thread_data = {
+        tid: {
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),
+            "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
+        } for tid, data in (thread_data or {}).items()
+    } if thread_data else {}
+    slim_metadata = [
+        {"thread_id": m["thread_id"], "title": m["title"], "no_of_reply": m.get("no_of_reply", 0)}
+        for m in (metadata or [])[:20]
+    ] if metadata else []
 
     prompt = f"""
     你是一個智能助手，分析用戶問題並為 LIHKG 論壇數據生成篩選和處理策略。以繁體中文回覆，輸出 JSON。
@@ -47,8 +60,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     問題：{user_query}
     分類：{cat_name}（cat_id={cat_id})
     {'帖子標題：' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else '無帖子標題數據'}
-    {'元數據：' + json.dumps(metadata, ensure_ascii=False) if metadata else ''}
-    {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
+    {'元數據：' + json.dumps(slim_metadata, ensure_ascii=False) if slim_metadata else ''}
+    {'回覆數據：' + json.dumps(slim_thread_data, ensure_ascii=False) if slim_thread_data else ''}
 
     任務：
     1. 理解用戶問題的意圖（例如列出帖子、總結討論、分析情緒等）。
@@ -119,7 +132,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     if response.status == 429:
                         wait_time = int(response.headers.get("Retry-After", 2 * (2 ** attempt)))
-                        wait_time = min(wait_time, 10)  # 最大等待 10 秒
+                        wait_time = min(wait_time, 10)
                         logger.warning(f"Rate limit hit, waiting {wait_time} seconds")
                         await asyncio.sleep(wait_time)
                         continue
@@ -161,13 +174,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
+    # 精簡 thread_data
     filtered_thread_data = {
         tid: {
-            "thread_id": data["thread_id"], "title": data["title"], "no_of_reply": data.get("no_of_reply", 0),
-            "last_reply_time": data.get("last_reply_time", 0), "like_count": data.get("like_count", 0),
-            "dislike_count": data.get("dislike_count", 0),
-            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0][:25],
-            "fetched_pages": data.get("fetched_pages", [])
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),
+            "last_reply_time": data.get("last_reply_time", 0),
+            "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
         } for tid, data in thread_data.items()
     }
     
@@ -176,9 +190,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     for data in filtered_thread_data.values():
         total_pages = (data["no_of_reply"] + 24) // 25
         target_pages = math.ceil(total_pages * 0.6)
-        if len(data["fetched_pages"]) < target_pages:
+        fetched_pages = data.get("fetched_pages", [])
+        if len(fetched_pages) < target_pages:
             needs_advanced_analysis = True
-            reason += f"帖子 {data['thread_id']} 僅抓取 {len(data['fetched_pages'])}/{total_pages} 頁，未達60%。"
+            reason += f"帖子 {data['thread_id']} 僅抓取 {len(fetched_pages)}/{target_pages} 頁，未達60%。"
     
     strategy = strategy or {"intent": "direct_answer", "filters": {}, "processing": "direct_answer"}
     max_tokens = 300 if len(user_query) < 50 else 1000
@@ -228,8 +243,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     prompt = prompt_templates.get(processing, prompt_templates["direct_answer"])
     if len(prompt) > GROK3_TOKEN_LIMIT:
-        for tid in filtered_thread_data:
-            filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
+        filtered_thread_data = {
+            tid: {k: v for k, v in data.items() if k != "replies"} for tid, data in filtered_thread_data.items()
+        }
         prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
         logger.info(f"Truncated prompt: length={len(prompt)}")
     
@@ -298,7 +314,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     thread_data = []
     rate_limit_info = []
     
-    # 進階分析：處理已有帖子數據
     if is_advanced and previous_thread_ids:
         for thread_id in previous_thread_ids:
             cached_data = previous_thread_data.get(thread_id) if previous_thread_data else None
@@ -317,8 +332,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 thread_data.append({
                     "thread_id": str(thread_id), "title": cached_data.get("title", "未知標題"),
                     "no_of_reply": total_replies, "last_reply_time": cached_data.get("last_reply_time", 0),
-                    "like_count": cached_data.get("like_count", 0), "dislike_count": cached_data.get("dislike_count", 0),
-                    "replies": existing_replies, "fetched_pages": fetched_pages
+                    "replies": existing_replies[:10], "fetched_pages": fetched_pages
                 })
                 continue
             
@@ -337,16 +351,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 logger.warning(f"Invalid thread: {thread_id}")
                 continue
             
-            all_replies = existing_replies + [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in replies]
+            all_replies = existing_replies + [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in replies]
             sorted_replies = sorted(all_replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
             all_fetched_pages = sorted(set(fetched_pages + thread_result.get("fetched_pages", [])))
             
             thread_data.append({
                 "thread_id": str(thread_id), "title": thread_result.get("title", cached_data.get("title", "未知標題")),
                 "no_of_reply": thread_result.get("total_replies", total_replies), "last_reply_time": thread_result.get("last_reply_time", cached_data.get("last_reply_time", 0)),
-                "like_count": thread_result.get("like_count", cached_data.get("like_count", 0)),
-                "dislike_count": thread_result.get("dislike_count", cached_data.get("dislike_count", 0)),
-                "replies": sorted_replies, "fetched_pages": all_fetched_pages
+                "replies": sorted_replies[:10], "fetched_pages": all_fetched_pages
             })
             logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
             await asyncio.sleep(0.5)
@@ -356,7 +368,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
         }
     
-    # 初始抓取帖子
     initial_threads = []
     max_pages = 6
     for page in range(1, max_pages + 1):
@@ -368,14 +379,13 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         items = result.get("items", [])
         initial_threads.extend(items)
         logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(items)}")
-        if not items:  # 若抓取失敗或無數據，中止
+        if not items:
             logger.warning(f"Failed to fetch items for cat_id={cat_id}, page={page}. Stopping fetch.")
             break
         if len(initial_threads) >= 180:
             initial_threads = initial_threads[:180]
             break
     
-    # 篩選帖子（移除 min_likes 限制）
     filtered_items = [
         item for item in initial_threads
         if item.get("no_of_reply", 0) >= min_replies and
@@ -383,19 +393,19 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ]
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
     
-    # 緩存帖子數據
     for item in initial_threads:
-        thread_id = str(item["thread_id"])
+        thread_id = str(item.get("thread_id", ""))
+        if not thread_id:
+            logger.warning(f"Missing thread_id in item: {json.dumps(item, ensure_ascii=False)}")
+            continue
         st.session_state.thread_cache[thread_id] = {
             "data": {
                 "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
-                "last_reply_time": item.get("last_reply_time", 0), "like_count": item.get("like_count", 0),
-                "dislike_count": item.get("dislike_count", 0), "replies": [], "fetched_pages": []
+                "last_reply_time": item.get("last_reply_time", 0), "replies": [], "fetched_pages": []
             },
             "timestamp": time.time()
         }
     
-    # 若無 top_thread_ids，重新分析
     if not top_thread_ids and filtered_items:
         logger.info(f"No top_thread_ids, re-analyzing with thread_titles")
         analysis = await analyze_and_screen(
@@ -405,13 +415,12 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         strategy = analysis.get("strategy", strategy)
         top_thread_ids = list(set(strategy.get("top_thread_ids", [])))
     
-    # 處理帖子
     valid_threads = filtered_items[:post_limit] if not top_thread_ids else [
         item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)
     ]
     
     if not valid_threads:
-        logger.warning(f"No valid threads found for cat_id={cat_id}")
+        logger.warning(f"No valid threads found for cat_id={cat_id}. Falling back to direct_answer.")
         direct_answer = ""
         async for content in stream_grok3_response(
             user_query=user_question, metadata={}, thread_data={}, processing="direct_answer", strategy=strategy
@@ -424,7 +433,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         }
     
     for item in valid_threads[:post_limit]:
-        thread_id = str(item["thread_id"])
+        thread_id = str(item.get("thread_id", ""))
+        if not thread_id:
+            logger.warning(f"Missing thread_id in valid_thread: {json.dumps(item, ensure_ascii=False)}")
+            continue
         thread_result = await get_lihkg_thread_content(
             thread_id=thread_id, cat_id=cat_id, request_counter=request_counter, last_reset=last_reset,
             rate_limit_until=rate_limit_until, max_replies=reply_limit, fetch_last_pages=2
@@ -442,9 +454,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         sorted_replies = sorted(replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
         thread_data.append({
             "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
-            "last_reply_time": item.get("last_reply_time", 0), "like_count": item.get("like_count", 0),
-            "dislike_count": item.get("dislike_count", 0),
-            "replies": [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in sorted_replies],
+            "last_reply_time": item.get("last_reply_time", 0),
+            "replies": [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:10],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
         st.session_state.thread_cache[thread_id]["data"].update({
