@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import json
 import re
+import random
 from typing import AsyncGenerator, Dict, List, Any
 
 logger = streamlit.logger.get_logger(__name__)
@@ -154,21 +155,18 @@ async def screen_thread_titles(
     4. 提供篩選理由（reason），說明為何選擇這些帖子。
 
     輸出格式：
-    ```json
-    {
+    {{
         "top_thread_ids": [],
         "need_replies": true,
         "reason": ""
-    }
-    ```
+    }}
+
     示例：
-    ```json
-    {
+    {{
         "top_thread_ids": [12345, 67890],
         "need_replies": true,
         "reason": "選擇了包含搞笑關鍵詞且高互動的帖子"
-    }
-    ```
+    }}
     """
 
     try:
@@ -218,10 +216,19 @@ async def screen_thread_titles(
                 return result
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         logger.error(f"標題篩選失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
+        # 隨機選擇備用帖子
+        if thread_titles:
+            top_thread_ids = [item["thread_id"] for item in random.sample(thread_titles, min(post_limit, len(thread_titles)))]
+            logger.warning(f"標題篩選失敗，隨機選擇帖子: top_thread_ids={top_thread_ids}")
+            return {
+                "top_thread_ids": top_thread_ids,
+                "need_replies": True,
+                "reason": f"篩選失敗，隨機選擇帖子：{str(e)}"
+            }
         return {
             "top_thread_ids": [],
             "need_replies": False,
-            "reason": f"篩選失敗，錯誤：{str(e)}"
+            "reason": f"篩選失敗，無可用帖子：{str(e)}"
         }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing) -> AsyncGenerator[str, None]:
@@ -278,7 +285,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         """
     elif processing == "professional_summary":
         prompt = f"""
-        你是一個智能助手，任務是基於 LIHKG 數據總結與財經、時事等專業主題相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅用提供數據。
+        你是一個智能助手，任務是基於 LIHKG 數據總結與財經、時事等專業主題相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅 estavam提供數據。
 
         使用者問題：{user_query}
         分類：{', '.join([f'{m["thread_id"]} ({m["title"]})' for m in metadata])}
