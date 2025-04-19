@@ -38,7 +38,7 @@ def clean_html(text):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False):
     max_tokens = 300 if len(user_query) < 50 else 1000
-    temperature = 0.5 if "列出" in user_query else 0.9
+    temperature = 0.5 if "列出" in user_query or "熱門" in user_query else 0.9
 
     slim_thread_data = {
         tid: {
@@ -63,22 +63,22 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(slim_thread_data, ensure_ascii=False) if slim_thread_data else ''}
 
     任務：
-    1. 理解用戶問題的意圖（例如列出帖子、總結討論、分析情緒等）。
+    1. 理解用戶問題的意圖（例如列出熱門帖子、總結討論、表達個人偏好等）。
     2. 根據問題語義，生成篩選策略：
-       - 若要求列出帖子，指定篩選條件（如所有帖子、熱門帖子、含特定主題的帖子）。
+       - 若要求「熱門帖子」，選擇回覆數高（min_replies=20）或近期活躍的帖子，無需嚴格關鍵詞。
+       - 若要求表達偏好（如「你最中意」），選擇回覆數高且內容有趣的帖子，並在 processing 中說明。
        - 若要求總結或分析，選擇相關帖子並指定處理方式（如摘要、情緒分析）。
-       - 若問題涉及「熱門」，優先選擇回覆數高或近期活躍的帖子。
-       - 篩選僅基於回覆數（min_replies）和關鍵詞，不考慮點贊數。
-    3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多20個），並說明篩選依據。
-    4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件，post_limit 不超過 20。
+       - 篩選僅基於回覆數（min_replies）和寬鬆關鍵詞（如問題中的「熱門」），不考慮點贊數。
+    3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多10個），並說明篩選依據。
+    4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件，post_limit 不超過 10。
     5. 若問題與分類無關，設置 category_ids 為空，並建議直接回答。
-    6. 根據問題複雜度，動態建議 post_limit（簡單問題 5，複雜問題 20）和 reply_limit（簡單問題 50，複雜問題 200）。
+    6. 根據問題複雜度，動態建議 post_limit（簡單問題 5，複雜問題 10）和 reply_limit（簡單問題 50，複雜問題 200）。
 
     輸出：
     {{
       {'"needs_advanced_analysis": false, "reason": "",' if is_advanced else ''}
       "strategy": {{
-        "intent": "描述問題意圖（如 list_threads, list_hot_threads, summarize, analyze_sentiment）",
+        "intent": "描述問題意圖（如 list_hot_threads, summarize, analyze_sentiment, express_preference）",
         "filters": {{
           "min_replies": 0,
           "keywords": [],
@@ -86,7 +86,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         }},
         "post_limit": 0,
         "reply_limit": 0,
-        "processing": "描述處理方式（如 list, summarize, sentiment）",
+        "processing": "描述處理方式（如 list_with_summary, summarize, sentiment, express_preference）",
         "top_thread_ids": []
       }},
       "category_ids": [],
@@ -101,7 +101,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         return {
             "strategy": {
                 "intent": "direct_answer",
-                "filters": {"min_replies": 10 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
+                "filters": {"min_replies": 20 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
                 "post_limit": 5,
                 "reply_limit": 50,
                 "processing": "direct_answer",
@@ -150,7 +150,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             return {
                 "strategy": {
                     "intent": "direct_answer",
-                    "filters": {"min_replies": 10 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
+                    "filters": {"min_replies": 20 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
                     "post_limit": 5,
                     "reply_limit": 50,
                     "processing": "direct_answer",
@@ -181,7 +181,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0),
-            "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:5]]
+            "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
         } for tid, data in thread_data.items() if "thread_id" in data and "title" in data
     }
     # 過濾 metadata，確保包含 thread_id 和 title
@@ -205,25 +205,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     strategy = strategy or {"intent": "direct_answer", "filters": {}, "processing": "direct_answer"}
     max_tokens = 300 if len(user_query) < 50 else 1000
-    temperature = 0.5 if strategy.get("intent") in ["list_threads", "list_hot_threads"] else 0.9
+    temperature = 0.5 if strategy.get("intent") in ["list_hot_threads", "express_preference"] else 0.9
     
     prompt_templates = {
-        "list": f"""
-        列出 LIHKG 熱門帖子，並提供簡短內容概述。問題：{user_query}
+        "list_with_summary": f"""
+        列出 LIHKG 熱門帖子，提供內容概述，並回答用戶偏好。問題：{user_query}
         篩選策略：{json.dumps(strategy, ensure_ascii=False)}
         帖子元數據：{json.dumps(filtered_metadata, ensure_ascii=False)}
         帖子回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         步驟：
-        1. 根據篩選策略（如回覆數、關鍵詞），選擇熱門帖子（按回覆數或最新回覆時間排序）。
+        1. 根據篩選策略（如回覆數、最新回覆時間），選擇熱門帖子（最多10個，按回覆數或活躍度排序）。
         2. 對每個帖子，生成格式：
            - 帖子 ID: {{item["thread_id"]}}
            - 標題: {{item["title"]}}
            - 回覆數: {{item["no_of_reply"]}}
-           - 內容概述: 基於回覆數據（thread_data）生成 50-100 字概述，突出熱門話題或主要討論點。
-        3. 若無帖子或回覆數據，說明「未找到任何帖子，請稍後重試」。
-        4. 確保每個帖子數據包含 thread_id、title 和回覆數據，若缺少則跳過。
-        5. 最多列出 10 個帖子，優先選擇回覆數高或近期活躍的帖子。
-        輸出：熱門帖子清單及概述
+           - 內容概述: 基於回覆數據（thread_data）生成 50-100 字概述，突出主要討論點或熱門話題，確保內容來自回覆。
+        3. 若問題包含「你最中意」，從帖子中選擇一個（基於回覆數或內容趣味性），並說明偏好原因（50-100字），必須基於回覆數據。
+        4. 若無帖子或回覆數據，說明「未找到任何帖子，請稍後重試」。
+        5. 確保每個帖子數據包含 thread_id、title 和回覆數據，若缺少則跳過。
+        輸出：熱門帖子清單及概述\n偏好（若適用）：[帖子 ID, 標題, 偏好原因]
         """,
         "summarize": f"""
         總結 LIHKG 帖子，300-500字。問題：{user_query}
@@ -257,13 +257,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         """
     }
     
-    prompt = prompt_templates.get(processing, prompt_templates["direct_answer"])
+    prompt = prompt_templates.get(processing, prompt_templates["list_with_summary"])
     if len(prompt) > GROK3_TOKEN_LIMIT:
         filtered_thread_data = {
             tid: {k: v for k, v in data.items() if k != "replies"} for tid, data in filtered_thread_data.items()
         }
         prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
         logger.info(f"Truncated prompt: length={len(prompt)}")
+    
+    logger.info(f"Generated prompt: {prompt}")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -311,18 +313,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
     strategy = analysis.get("strategy", {
-        "intent": "direct_answer",
-        "filters": {"min_replies": 10 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
+        "intent": "list_hot_threads",
+        "filters": {"min_replies": 20 if cat_id == 1 else 20, "keywords": [], "sub_theme": ""},
         "post_limit": 10,
         "reply_limit": 50,
-        "processing": "list",
+        "processing": "list_with_summary",
         "top_thread_ids": []
     })
     
     post_limit = min(strategy.get("post_limit", 10), 20)
     reply_limit = 200 if is_advanced else min(strategy.get("reply_limit", 50), 50)
     filters = strategy.get("filters", {})
-    min_replies = filters.get("min_replies", 10 if cat_id == 1 else 20)
+    min_replies = filters.get("min_replies", 20 if cat_id == 1 else 20)
     keywords = filters.get("keywords", [])
     sub_theme = filters.get("sub_theme", "")
     top_thread_ids = list(set(strategy.get("top_thread_ids", [])))
@@ -351,7 +353,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "title": cached_data.get("title", "未知標題"),
                     "no_of_reply": total_replies, 
                     "last_reply_time": cached_data.get("last_reply_time", 0),
-                    "replies": existing_replies[:5], 
+                    "replies": existing_replies[:10], 
                     "fetched_pages": fetched_pages
                 })
                 continue
@@ -380,7 +382,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "title": thread_result.get("title", cached_data.get("title", "未知標題")),
                 "no_of_reply": thread_result.get("total_replies", total_replies), 
                 "last_reply_time": thread_result.get("last_reply_time", cached_data.get("last_reply_time", 0)),
-                "replies": sorted_replies[:5], 
+                "replies": sorted_replies[:10], 
                 "fetched_pages": all_fetched_pages
             })
             logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
@@ -505,7 +507,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "title": item.get("title", "未知標題"), 
             "no_of_reply": item.get("no_of_reply", 0),
             "last_reply_time": item.get("last_reply_time", 0),
-            "replies": [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:5],
+            "replies": [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:10],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
         st.session_state.thread_cache[thread_id]["data"].update({
