@@ -171,7 +171,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         }
         logger.info(f"抓取候選回覆: thread_id={thread_id}, 回覆數={len(replies)}")
     
-    # 階段 4：選取最終帖子並抓取首 3 頁和末 3 頁回覆
+    # 階段 4：選取最終帖子並抓取回覆
     final_threads = [
         item for item in filtered_items
         if str(item["thread_id"]) in top_thread_ids
@@ -181,6 +181,10 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     if not final_threads:
         final_threads = candidate_threads[:post_limit]
         logger.info(f"無匹配top_thread_ids，使用候選帖子: 數量={len(final_threads)}")
+    
+    # 根據post_limit決定抓取頁數
+    fetch_last_pages = 2 if post_limit >= 3 else 3
+    logger.info(f"最終帖子抓取: post_limit={post_limit}, fetch_last_pages={fetch_last_pages}")
     
     for item in final_threads:
         thread_id = str(item["thread_id"])
@@ -192,7 +196,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             last_reset=last_reset,
             rate_limit_until=rate_limit_until,
             max_replies=reply_limit,
-            fetch_last_pages=3
+            fetch_last_pages=fetch_last_pages
         )
         
         request_counter = thread_result.get("request_counter", request_counter)
@@ -229,7 +233,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             ]
         })
         
-        logger.info(f"最終帖子數據: thread_id={thread_id}, 回覆數={len(replies)}")
+        logger.info(f"最終帖子數據: thread_id={thread_id}, 回覆數={len(replies)}, 抓取頁數={thread_result.get('fetched_pages', 0)}")
         await asyncio.sleep(5)
     
     if not thread_data:
