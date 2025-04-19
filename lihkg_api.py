@@ -200,7 +200,7 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page=1, max_pages=3, re
         "rate_limit_until": rate_limit_until
     }
 
-async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=150, fetch_last_pages=0, specific_pages=None, start_page=1):
+async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=600, fetch_last_pages=0, specific_pages=None, start_page=1):
     """抓取帖子回覆，支持首頁、末頁、指定頁面或從指定起始頁開始"""
     timestamp = int(time.time())
     url_template = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{{page}}?order=reply_time"
