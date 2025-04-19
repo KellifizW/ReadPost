@@ -47,11 +47,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
             "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
-        } for tid, data in (thread_data or {}).items()
+        } for tid, data in (thread_data or {}).items() if "thread_id" in data
     } if thread_data else {}
     slim_metadata = [
         {"thread_id": m["thread_id"], "title": m["title"], "no_of_reply": m.get("no_of_reply", 0)}
-        for m in (metadata or [])[:20]
+        for m in (metadata or [])[:20] if "thread_id" in m
     ] if metadata else []
 
     prompt = f"""
@@ -127,7 +127,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     for attempt in range(3):
         try:
-            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
+            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, prompt_length={len(prompt)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     if response.status == 429:
@@ -137,13 +137,13 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         await asyncio.sleep(wait_time)
                         continue
                     data = await response.json()
-                    logger.info(f"Grok 3 API response: status={response.status}, response={json.dumps(data, ensure_ascii=False)}")
+                    logger.info(f"Grok 3 API response: status={response.status}")
                     result = json.loads(data["choices"][0]["message"]["content"])
                     result["category_ids"] = [cat_id] if not is_advanced else result.get("category_ids", [cat_id])
                     logger.info(f"Analysis result: {json.dumps(result, ensure_ascii=False)}")
                     return result
         except Exception as e:
-            logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}, prompt_summary={prompt[:50]}...")
+            logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}")
             if attempt < 2:
                 await asyncio.sleep(min(2 * (2 ** attempt), 10))
                 continue
@@ -182,7 +182,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0),
             "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
-        } for tid, data in thread_data.items()
+        } for tid, data in thread_data.items() if "thread_id" in data
     }
     
     needs_advanced_analysis = False
@@ -260,7 +260,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     for attempt in range(3):
         try:
-            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, attempt={attempt+1}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
+            logger.info(f"Grok 3 API request: url={GROK3_API_URL}, attempt={attempt+1}, prompt_length={len(prompt)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     if response.status == 429:
@@ -286,7 +286,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     logger.info(f"Grok 3 API response: status={response.status}, stream_completed=True")
                     return
         except Exception as e:
-            logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}, prompt_summary={prompt[:50]}...")
+            logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}")
             if attempt < 2:
                 await asyncio.sleep(min(2 * (2 ** attempt), 10))
                 continue
@@ -317,7 +317,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     if is_advanced and previous_thread_ids:
         for thread_id in previous_thread_ids:
             cached_data = previous_thread_data.get(thread_id) if previous_thread_data else None
-            if not cached_data:
+            if not cached_data or "thread_id" not in cached_data:
+                logger.warning(f"Invalid cached data for thread_id={thread_id}: {json.dumps(cached_data, ensure_ascii=False)}")
                 continue
             fetched_pages = cached_data.get("fetched_pages", [])
             existing_replies = cached_data.get("replies", [])
@@ -330,9 +331,12 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if remaining_pages <= 0:
                 logger.info(f"Thread {thread_id} meets 60% page threshold: {len(fetched_pages)}/{target_pages}")
                 thread_data.append({
-                    "thread_id": str(thread_id), "title": cached_data.get("title", "未知標題"),
-                    "no_of_reply": total_replies, "last_reply_time": cached_data.get("last_reply_time", 0),
-                    "replies": existing_replies[:10], "fetched_pages": fetched_pages
+                    "thread_id": str(thread_id), 
+                    "title": cached_data.get("title", "未知標題"),
+                    "no_of_reply": total_replies, 
+                    "last_reply_time": cached_data.get("last_reply_time", 0),
+                    "replies": existing_replies[:10], 
+                    "fetched_pages": fetched_pages
                 })
                 continue
             
@@ -356,16 +360,23 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             all_fetched_pages = sorted(set(fetched_pages + thread_result.get("fetched_pages", [])))
             
             thread_data.append({
-                "thread_id": str(thread_id), "title": thread_result.get("title", cached_data.get("title", "未知標題")),
-                "no_of_reply": thread_result.get("total_replies", total_replies), "last_reply_time": thread_result.get("last_reply_time", cached_data.get("last_reply_time", 0)),
-                "replies": sorted_replies[:10], "fetched_pages": all_fetched_pages
+                "thread_id": str(thread_id), 
+                "title": thread_result.get("title", cached_data.get("title", "未知標題")),
+                "no_of_reply": thread_result.get("total_replies", total_replies), 
+                "last_reply_time": thread_result.get("last_reply_time", cached_data.get("last_reply_time", 0)),
+                "replies": sorted_replies[:10], 
+                "fetched_pages": all_fetched_pages
             })
             logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
             await asyncio.sleep(0.5)
         
         return {
-            "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+            "selected_cat": selected_cat, 
+            "thread_data": thread_data, 
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, 
+            "last_reset": last_reset, 
+            "rate_limit_until": rate_limit_until
         }
     
     initial_threads = []
@@ -377,7 +388,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_until = result.get("rate_limit_until", rate_limit_until)
         rate_limit_info.extend(result.get("rate_limit_info", []))
         items = result.get("items", [])
-        initial_threads.extend(items)
+        initial_threads.extend([item for item in items if "thread_id" in item])
         logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(items)}")
         if not items:
             logger.warning(f"Failed to fetch items for cat_id={cat_id}, page={page}. Stopping fetch.")
@@ -389,19 +400,25 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     filtered_items = [
         item for item in initial_threads
         if item.get("no_of_reply", 0) >= min_replies and
-        (not keywords or any(keyword.lower() in item["title"].lower() for keyword in keywords))
+        (not keywords or any(keyword.lower() in item["title"].lower() for keyword in keywords)) and
+        "thread_id" in item
     ]
-    logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
+    logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}, items={json.dumps(filtered_items, ensure_ascii=False)}")
     
+    # 驗證緩存數據
     for item in initial_threads:
-        thread_id = str(item.get("thread_id", ""))
-        if not thread_id:
+        if "thread_id" not in item:
             logger.warning(f"Missing thread_id in item: {json.dumps(item, ensure_ascii=False)}")
             continue
+        thread_id = str(item["thread_id"])
         st.session_state.thread_cache[thread_id] = {
             "data": {
-                "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
-                "last_reply_time": item.get("last_reply_time", 0), "replies": [], "fetched_pages": []
+                "thread_id": thread_id, 
+                "title": item.get("title", "未知標題"), 
+                "no_of_reply": item.get("no_of_reply", 0),
+                "last_reply_time": item.get("last_reply_time", 0), 
+                "replies": [], 
+                "fetched_pages": []
             },
             "timestamp": time.time()
         }
@@ -409,8 +426,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     if not top_thread_ids and filtered_items:
         logger.info(f"No top_thread_ids, re-analyzing with thread_titles")
         analysis = await analyze_and_screen(
-            user_query=user_question, cat_name=selected_cat, cat_id=cat_id,
-            thread_titles=[{"thread_id": item["thread_id"], "title": item["title"]} for item in filtered_items[:180]]
+            user_query=user_question, 
+            cat_name=selected_cat, 
+            cat_id=cat_id,
+            thread_titles=[{"thread_id": item["thread_id"], "title": item["title"]} for item in filtered_items[:180] if "thread_id" in item]
         )
         strategy = analysis.get("strategy", strategy)
         top_thread_ids = list(set(strategy.get("top_thread_ids", [])))
@@ -423,23 +442,36 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         logger.warning(f"No valid threads found for cat_id={cat_id}. Falling back to direct_answer.")
         direct_answer = ""
         async for content in stream_grok3_response(
-            user_query=user_question, metadata={}, thread_data={}, processing="direct_answer", strategy=strategy
+            user_query=user_question, 
+            metadata={}, 
+            thread_data={}, 
+            processing="direct_answer", 
+            strategy=strategy
         ):
             direct_answer += content
         return {
-            "selected_cat": selected_cat, "thread_data": [], "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until,
+            "selected_cat": selected_cat, 
+            "thread_data": [], 
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, 
+            "last_reset": last_reset, 
+            "rate_limit_until": rate_limit_until,
             "direct_answer": direct_answer
         }
     
     for item in valid_threads[:post_limit]:
-        thread_id = str(item.get("thread_id", ""))
-        if not thread_id:
+        if "thread_id" not in item:
             logger.warning(f"Missing thread_id in valid_thread: {json.dumps(item, ensure_ascii=False)}")
             continue
+        thread_id = str(item["thread_id"])
         thread_result = await get_lihkg_thread_content(
-            thread_id=thread_id, cat_id=cat_id, request_counter=request_counter, last_reset=last_reset,
-            rate_limit_until=rate_limit_until, max_replies=reply_limit, fetch_last_pages=2
+            thread_id=thread_id, 
+            cat_id=cat_id, 
+            request_counter=request_counter, 
+            last_reset=last_reset,
+            rate_limit_until=rate_limit_until, 
+            max_replies=reply_limit, 
+            fetch_last_pages=2
         )
         request_counter = thread_result.get("request_counter", request_counter)
         last_reset = thread_result.get("last_reset", last_reset)
@@ -453,19 +485,26 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         
         sorted_replies = sorted(replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
         thread_data.append({
-            "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
+            "thread_id": thread_id, 
+            "title": item.get("title", "未知標題"), 
+            "no_of_reply": item.get("no_of_reply", 0),
             "last_reply_time": item.get("last_reply_time", 0),
             "replies": [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:10],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
         st.session_state.thread_cache[thread_id]["data"].update({
-            "replies": thread_data[-1]["replies"], "fetched_pages": thread_data[-1]["fetched_pages"]
+            "replies": thread_data[-1]["replies"], 
+            "fetched_pages": thread_data[-1]["fetched_pages"]
         })
         st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
         logger.info(f"Fetched thread {thread_id}: replies={len(replies)}")
         await asyncio.sleep(0.5)
     
     return {
-        "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
-        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+        "selected_cat": selected_cat, 
+        "thread_data": thread_data, 
+        "rate_limit_info": rate_limit_info,
+        "request_counter": request_counter, 
+        "last_reset": last_reset, 
+        "rate_limit_until": rate_limit_until
     }
