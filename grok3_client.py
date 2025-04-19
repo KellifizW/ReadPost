@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import streamlit.logger
 import aiohttp
@@ -413,4 +412,3 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
                 continue
             yield f"錯誤: 連線失敗，請稍後重試或檢查網路"
             return
-```
