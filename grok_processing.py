@@ -40,7 +40,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     max_tokens = 300 if len(user_query) < 50 else 1000
     temperature = 0.5 if "列出" in user_query else 0.9
 
-    # 精簡 thread_data 和 metadata
     slim_thread_data = {
         tid: {
             "thread_id": data["thread_id"],
@@ -174,7 +173,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 精簡 thread_data
+    # 精簡 thread_data 並檢查數據完整性
     filtered_thread_data = {
         tid: {
             "thread_id": data["thread_id"],
@@ -182,8 +181,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0),
             "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
-        } for tid, data in thread_data.items() if "thread_id" in data
+        } for tid, data in thread_data.items() if "thread_id" in data and "title" in data
     }
+    # 過濾 metadata，確保包含 thread_id 和 title
+    filtered_metadata = [
+        {"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0)}
+        for item in metadata if isinstance(item, dict) and "thread_id" in item and "title" in item
+    ]
+    
+    logger.info(f"stream_grok3_response: metadata={json.dumps(filtered_metadata, ensure_ascii=False)}, "
+                f"thread_data={json.dumps(filtered_thread_data, ensure_ascii=False)}")
     
     needs_advanced_analysis = False
     reason = ""
@@ -203,16 +210,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "list": f"""
         列出 LIHKG 帖子。問題：{user_query}
         篩選策略：{json.dumps(strategy, ensure_ascii=False)}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
         步驟：
-        1. 根據篩選策略（如熱門程度、關鍵詞），整理帖子清單，格式為「帖子 ID: {thread_id}\n標題: {title}\n」。
+        1. 根據篩選策略（如熱門程度、關鍵詞），整理帖子清單，格式為：
+           - 帖子 ID: {{item["thread_id"]}}
+           - 標題: {{item["title"]}}
         2. 若無帖子數據，說明「未找到任何帖子」。
+        3. 確保每個帖子數據包含 thread_id 和 title，若缺少則跳過。
         輸出：帖子清單
         """,
         "summarize": f"""
         總結 LIHKG 帖子，300-500字。問題：{user_query}
         篩選策略：{json.dumps(strategy, ensure_ascii=False)}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         步驟：
         1. 根據篩選策略，總結相關帖子內容，引用高關注回覆，適配分類語氣。
@@ -223,7 +233,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "sentiment": f"""
         分析 LIHKG 帖子情緒。問題：{user_query}
         篩選策略：{json.dumps(strategy, ensure_ascii=False)}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         步驟：
         1. 根據篩選策略，判斷情緒分佈（正面、負面、中立），聚焦高關注回覆。
@@ -405,7 +415,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ]
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}, items={json.dumps(filtered_items, ensure_ascii=False)}")
     
-    # 驗證緩存數據
     for item in initial_threads:
         if "thread_id" not in item:
             logger.warning(f"Missing thread_id in item: {json.dumps(item, ensure_ascii=False)}")
