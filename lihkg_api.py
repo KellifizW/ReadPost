@@ -4,7 +4,7 @@ LIHKG API 模組，提供帖子列表和內容抓取功能。
 - get_category_name：獲取分類名稱。
 - get_lihkg_topic_list：抓取帖子列表。
 - get_lihkg_thread_content：抓取帖子內容。
-硬編碼參數（優化建議：移至配置文件或介面）：
+硬編碼參數：
 - BASE_URL
 - HEADERS（部分）
 - count=60
@@ -19,7 +19,7 @@ import asyncio
 import time
 import logging
 import hashlib
-import json  # 添加 json 導入
+import json
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://lihkg.com/api_v2"
@@ -151,15 +151,14 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=1, request_counte
                         logger.info(f"LIHKG API response: cat_id={cat_id}, page={page}, status={response.status}, response={json.dumps(data, ensure_ascii=False)}")
                         if response.status == 200 and data.get("success"):
                             threads = data["response"].get("items", [])
+                            # 過濾僅包含指定 cat_id 的帖子
                             items.extend([
                                 {
                                     "thread_id": thread["thread_id"],
                                     "title": thread["title"],
                                     "no_of_reply": thread.get("total_reply", 0),
-                                    "last_reply_time": thread.get("last_time", 0),
-                                    "like_count": thread.get("like_count", 0),
-                                    "dislike_count": thread.get("dislike_count", 0)
-                                } for thread in threads
+                                    "last_reply_time": thread.get("last_time", 0)
+                                } for thread in threads if str(thread["cat_id"]) == str(cat_id)
                             ])
                             rate_limit_info.append({"cat_id": cat_id, "page": page, "timestamp": time.time(), "status": "success"})
                             request_counter += 1
@@ -213,8 +212,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
             "replies": [],
             "total_replies": 0,
             "last_reply_time": 0,
-            "like_count": 0,
-            "dislike_count": 0,
             "fetched_pages": [],
             "rate_limit_info": [{"thread_id": thread_id, "timestamp": time.time(), "status": "rate_limited"}],
             "request_counter": request_counter,
@@ -242,8 +239,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
     total_replies = 0
     title = None
     last_reply_time = 0
-    like_count = 0
-    dislike_count = 0
     
     for attempt in range(3):
         try:
@@ -257,13 +252,9 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                         title = thread.get("title")
                         total_replies = thread.get("total_reply", 0)
                         last_reply_time = thread.get("last_reply_time", 0)
-                        like_count = thread.get("like_count", 0)
-                        dislike_count = thread.get("dislike_count", 0)
                         replies.extend([
                             {
                                 "msg": reply["msg"],
-                                "like_count": reply.get("like_count", 0),
-                                "dislike_count": reply.get("dislike_count", 0),
                                 "reply_time": reply.get("reply_time", 0)
                             } for reply in thread.get("item_data", [])
                         ])
@@ -279,8 +270,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                             "replies": [],
                             "total_replies": 0,
                             "last_reply_time": 0,
-                            "like_count": 0,
-                            "dislike_count": 0,
                             "fetched_pages": [],
                             "rate_limit_info": rate_limit_info,
                             "request_counter": request_counter,
@@ -301,8 +290,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                 "replies": [],
                 "total_replies": 0,
                 "last_reply_time": 0,
-                "like_count": 0,
-                "dislike_count": 0,
                 "fetched_pages": [],
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
@@ -338,8 +325,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                                 replies.extend([
                                     {
                                         "msg": reply["msg"],
-                                        "like_count": reply.get("like_count", 0),
-                                        "dislike_count": reply.get("dislike_count", 0),
                                         "reply_time": reply.get("reply_time", 0)
                                     } for reply in data["response"].get("item_data", [])
                                 ])
@@ -355,8 +340,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                                     "replies": replies,
                                     "total_replies": total_replies,
                                     "last_reply_time": last_reply_time,
-                                    "like_count": like_count,
-                                    "dislike_count": dislike_count,
                                     "fetched_pages": fetched_pages,
                                     "rate_limit_info": rate_limit_info,
                                     "request_counter": request_counter,
@@ -377,8 +360,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                         "replies": replies,
                         "total_replies": total_replies,
                         "last_reply_time": last_reply_time,
-                        "like_count": like_count,
-                        "dislike_count": dislike_count,
                         "fetched_pages": fetched_pages,
                         "rate_limit_info": rate_limit_info,
                         "request_counter": request_counter,
@@ -392,8 +373,6 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
         "replies": replies[:max_replies],
         "total_replies": total_replies,
         "last_reply_time": last_reply_time,
-        "like_count": like_count,
-        "dislike_count": dislike_count,
         "fetched_pages": fetched_pages,
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
