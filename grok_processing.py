@@ -6,13 +6,12 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - stream_grok3_response：生成流式回應。
 - process_user_question：處理用戶問題，抓取並分析帖子。
 - clean_html：清理 HTML 標籤。
-硬編碼參數（優化建議：移至配置文件或介面）：
+硬編碼參數：
 - post_limit=max=20
 - reply_limit=75/200
-- min_replies=20/50
-- min_likes=10/20
-- max_tokens=600/1000
-- temperature=0.7
+- min_replies=10/20
+- max_tokens=300/1000
+- temperature=0.5/0.9
 - timeout=30
 - retries=3
 - sleep=0.5/1
@@ -20,7 +19,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 
 import aiohttp
 import asyncio
-import json  # 添加 json 導入
+import json
 import re
 import math
 import time
@@ -38,6 +37,10 @@ def clean_html(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False):
+    # 根據問題長度動態設置 max_tokens 和 temperature
+    max_tokens = 300 if len(user_query) < 50 else 1000
+    temperature = 0.5 if "列出" in user_query else 0.9
+
     prompt = f"""
     你是一個智能助手，分析用戶問題並為 LIHKG 論壇數據生成篩選和處理策略。以繁體中文回覆，輸出 JSON。
 
@@ -52,9 +55,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     2. 根據問題語義，生成篩選策略：
        - 若要求列出帖子，指定篩選條件（如所有帖子、熱門帖子、含特定主題的帖子）。
        - 若要求總結或分析，選擇相關帖子並指定處理方式（如摘要、情緒分析）。
+       - 篩選僅基於回覆數（min_replies）和關鍵詞，不考慮點贊數。
     3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多20個），並說明篩選依據。
     4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件，post_limit 不超過 20。
     5. 若問題與分類無關，設置 category_ids 為空，並建議直接回答。
+    6. 根據問題複雜度，動態建議 post_limit（簡單問題 5，複雜問題 20）和 reply_limit（簡單問題 50，複雜問題 200）。
 
     輸出：
     {{
@@ -63,7 +68,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "intent": "描述問題意圖（如 list_threads, summarize, analyze_sentiment）",
         "filters": {{
           "min_replies": 0,
-          "min_likes": 0,
           "keywords": [],
           "sub_theme": ""
         }},
@@ -80,22 +84,22 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
-        logger.error("Grok 3 API key missing")
+        logger.error("Grok 3 API key missing. Falling back to direct answer.")
         return {
             "strategy": {
-                "intent": "summarize",
-                "filters": {"min_replies": 20, "min_likes": 10, "keywords": [], "sub_theme": ""},
+                "intent": "direct_answer",
+                "filters": {"min_replies": 10 if cat_id == 15 else 20, "keywords": [], "sub_theme": ""},
                 "post_limit": 5,
-                "reply_limit": 75,
-                "processing": "summarize",
+                "reply_limit": 50,
+                "processing": "direct_answer",
                 "top_thread_ids": []
             },
             "category_ids": [cat_id],
-            "category_suggestion": "Missing API key"
+            "category_suggestion": "API key missing, using direct answer."
         } if not is_advanced else {
             "needs_advanced_analysis": False,
             "reason": "Missing API key",
-            "strategy": {"intent": "summarize", "filters": {}, "post_limit": 0, "reply_limit": 0, "processing": "", "top_thread_ids": []},
+            "strategy": {"intent": "direct_answer", "filters": {}, "post_limit": 0, "reply_limit": 0, "processing": "direct_answer", "top_thread_ids": []},
             "category_ids": [cat_id],
             "category_suggestion": ""
         }
@@ -104,8 +108,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "system", "content": "以繁體中文回答，僅基於提供數據。"}, {"role": "user", "content": prompt}],
-        "max_tokens": 600,
-        "temperature": 0.7
+        "max_tokens": max_tokens,
+        "temperature": temperature
     }
     
     for attempt in range(3):
@@ -113,6 +117,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             logger.info(f"Grok 3 API request: url={GROK3_API_URL}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
+                    if response.status == 429:
+                        wait_time = int(response.headers.get("Retry-After", 2 * (2 ** attempt)))
+                        wait_time = min(wait_time, 10)  # 最大等待 10 秒
+                        logger.warning(f"Rate limit hit, waiting {wait_time} seconds")
+                        await asyncio.sleep(wait_time)
+                        continue
                     data = await response.json()
                     logger.info(f"Grok 3 API response: status={response.status}, response={json.dumps(data, ensure_ascii=False)}")
                     result = json.loads(data["choices"][0]["message"]["content"])
@@ -122,15 +132,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         except Exception as e:
             logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}, prompt_summary={prompt[:50]}...")
             if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 * (2 ** attempt), 10))
                 continue
             return {
                 "strategy": {
-                    "intent": "summarize",
-                    "filters": {"min_replies": 20, "min_likes": 10, "keywords": [], "sub_theme": ""},
+                    "intent": "direct_answer",
+                    "filters": {"min_replies": 10 if cat_id == 15 else 20, "keywords": [], "sub_theme": ""},
                     "post_limit": 5,
-                    "reply_limit": 75,
-                    "processing": "summarize",
+                    "reply_limit": 50,
+                    "processing": "direct_answer",
                     "top_thread_ids": []
                 },
                 "category_ids": [cat_id],
@@ -138,7 +148,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             } if not is_advanced else {
                 "needs_advanced_analysis": False,
                 "reason": f"Analysis failed: {str(e)}",
-                "strategy": {"intent": "summarize", "filters": {}, "post_limit": 0, "reply_limit": 0, "processing": "", "top_thread_ids": []},
+                "strategy": {"intent": "direct_answer", "filters": {}, "post_limit": 0, "reply_limit": 0, "processing": "direct_answer", "top_thread_ids": []},
                 "category_ids": [cat_id],
                 "category_suggestion": ""
             }
@@ -170,7 +180,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             needs_advanced_analysis = True
             reason += f"帖子 {data['thread_id']} 僅抓取 {len(data['fetched_pages'])}/{total_pages} 頁，未達60%。"
     
-    strategy = strategy or {"intent": "summarize", "filters": {}, "processing": "summarize"}
+    strategy = strategy or {"intent": "direct_answer", "filters": {}, "processing": "direct_answer"}
+    max_tokens = 300 if len(user_query) < 50 else 1000
+    temperature = 0.5 if strategy.get("intent") == "list_threads" else 0.9
+    
     prompt_templates = {
         "list": f"""
         列出 LIHKG 帖子。問題：{user_query}
@@ -224,8 +237,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "system", "content": "以繁體中文回答，僅基於提供數據。"}, {"role": "user", "content": prompt}],
-        "max_tokens": 1000,
-        "temperature": 0.7,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
         "stream": True
     }
     
@@ -234,6 +247,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             logger.info(f"Grok 3 API request: url={GROK3_API_URL}, attempt={attempt+1}, prompt_length={len(prompt)}, payload={json.dumps(payload, ensure_ascii=False)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
+                    if response.status == 429:
+                        wait_time = int(response.headers.get("Retry-After", 2 * (2 ** attempt)))
+                        wait_time = min(wait_time, 10)
+                        logger.warning(f"Rate limit hit, waiting {wait_time} seconds")
+                        await asyncio.sleep(wait_time)
+                        continue
                     async for line in response.content:
                         if line and not line.isspace():
                             line_str = line.decode('utf-8').strip()
@@ -253,26 +272,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         except Exception as e:
             logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}, prompt_summary={prompt[:50]}...")
             if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 * (2 ** attempt), 10))
                 continue
             yield f"錯誤: 連線失敗，請稍後重試"
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
     strategy = analysis.get("strategy", {
-        "intent": "summarize",
-        "filters": {"min_replies": 20, "min_likes": 10, "keywords": [], "sub_theme": ""},
+        "intent": "direct_answer",
+        "filters": {"min_replies": 10 if cat_id == 15 else 20, "keywords": [], "sub_theme": ""},
         "post_limit": 5,
-        "reply_limit": 75,
-        "processing": "summarize",
+        "reply_limit": 50,
+        "processing": "direct_answer",
         "top_thread_ids": []
     })
     
     post_limit = min(strategy.get("post_limit", 5), 20)
-    reply_limit = 200 if is_advanced else min(strategy.get("reply_limit", 75), 75)
+    reply_limit = 200 if is_advanced else min(strategy.get("reply_limit", 50), 50)
     filters = strategy.get("filters", {})
-    min_replies = filters.get("min_replies", 20)
-    min_likes = filters.get("min_likes", 10)
+    min_replies = filters.get("min_replies", 10 if cat_id == 15 else 20)
     keywords = filters.get("keywords", [])
     sub_theme = filters.get("sub_theme", "")
     top_thread_ids = list(set(strategy.get("top_thread_ids", [])))
@@ -320,7 +338,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 continue
             
             all_replies = existing_replies + [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in replies]
-            sorted_replies = sorted(all_replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
+            sorted_replies = sorted(all_replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
             all_fetched_pages = sorted(set(fetched_pages + thread_result.get("fetched_pages", [])))
             
             thread_data.append({
@@ -347,16 +365,21 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         last_reset = result.get("last_reset", last_reset)
         rate_limit_until = result.get("rate_limit_until", rate_limit_until)
         rate_limit_info.extend(result.get("rate_limit_info", []))
-        initial_threads.extend(result.get("items", []))
-        logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(result.get('items', []))}")
+        items = result.get("items", [])
+        initial_threads.extend(items)
+        logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(items)}")
+        if not items:  # 若抓取失敗或無數據，中止
+            logger.warning(f"Failed to fetch items for cat_id={cat_id}, page={page}. Stopping fetch.")
+            break
         if len(initial_threads) >= 180:
             initial_threads = initial_threads[:180]
             break
     
-    # 篩選帖子
+    # 篩選帖子（移除 min_likes 限制）
     filtered_items = [
         item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
+        if item.get("no_of_reply", 0) >= min_replies and
+        (not keywords or any(keyword.lower() in item["title"].lower() for keyword in keywords))
     ]
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
     
@@ -373,7 +396,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         }
     
     # 若無 top_thread_ids，重新分析
-    if not top_thread_ids:
+    if not top_thread_ids and filtered_items:
         logger.info(f"No top_thread_ids, re-analyzing with thread_titles")
         analysis = await analyze_and_screen(
             user_query=user_question, cat_name=selected_cat, cat_id=cat_id,
@@ -416,7 +439,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             logger.warning(f"Invalid thread: {thread_id}")
             continue
         
-        sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
+        sorted_replies = sorted(replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
         thread_data.append({
             "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
             "last_reply_time": item.get("last_reply_time", 0), "like_count": item.get("like_count", 0),
