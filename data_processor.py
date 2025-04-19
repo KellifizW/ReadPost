@@ -18,11 +18,10 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
     
-    # 針對創意台放寬篩選條件
-    min_replies = filters.get("min_replies", 10)
-    min_likes = 5 if cat_id_map[selected_cat] == 31 else filters.get("min_likes", 20)
-    dislike_count_max = 20 if cat_id_map[selected_cat] == 31 else filters.get("dislike_count_max", 5)
-    recent_only = False if cat_id_map[selected_cat] == 31 else filters.get("recent_only", False)
+    # 針對搞笑主題放寬篩選條件
+    min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)
+    min_likes = 10 if analysis.get("theme") == "搞笑" else filters.get("min_likes", 20)
+    recent_only = filters.get("recent_only", False)
     exclude_thread_ids = filters.get("exclude_thread_ids", [])
     
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
@@ -144,17 +143,16 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             initial_threads = initial_threads[:90]
             break
     
-    initial_threads = [item for item in initial_threads if item.get("cat_id") == cat_id]
-    logger.info(f"初始抓取: cat_id={cat_id}, 總抓取數={total_fetched}, 合併後帖子數={len(initial_threads)}")
+    # 移除合併邏輯，保留所有帖子
+    logger.info(f"初始抓取: cat_id={cat_id}, 總抓取數={total_fetched}, 帖子數={len(initial_threads)}")
     
     # 階段 2：篩選候選帖子
     filtered_items = []
-    filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "dislike_count_failed": 0, "recent_only_failed": 0, "excluded_failed": 0}
+    filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "recent_only_failed": 0, "excluded_failed": 0}
     for item in initial_threads:
         thread_id = str(item["thread_id"])
         no_of_reply = item.get("no_of_reply", 0)
         like_count = int(item.get("like_count", 0))
-        dislike_count = int(item.get("dislike_count", 0))
         last_reply_time = int(item.get("last_reply_time", 0))
         
         if no_of_reply < min_replies:
@@ -162,9 +160,6 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             continue
         if like_count < min_likes:
             filter_debug["min_likes_failed"] += 1
-            continue
-        if dislike_count > dislike_count_max:
-            filter_debug["dislike_count_failed"] += 1
             continue
         if recent_only and last_reply_time < today_timestamp:
             filter_debug["recent_only_failed"] += 1
@@ -177,9 +172,25 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     logger.info(f"本地篩選候選帖子: 總數={len(initial_threads)}, 符合條件={len(filtered_items)}, "
                 f"篩選失敗詳情: 回覆數不足={filter_debug['min_replies_failed']}, "
                 f"點讚數不足={filter_debug['min_likes_failed']}, "
-                f"負評過多={filter_debug['dislike_count_failed']}, "
                 f"非近期帖子={filter_debug['recent_only_failed']}, "
                 f"被排除={filter_debug['excluded_failed']}")
+    
+    # 更新緩存
+    for item in initial_threads:
+        thread_id = str(item["thread_id"])
+        st.session_state.thread_content_cache[thread_id] = {
+            "data": {
+                "thread_id": thread_id,
+                "title": item["title"],
+                "no_of_reply": item.get("no_of_reply", 0),
+                "last_reply_time": item.get("last_reply_time", 0),
+                "like_count": item.get("like_count", 0),
+                "dislike_count": item.get("dislike_count", 0),
+                "replies": [],
+                "fetched_pages": []
+            },
+            "timestamp": time.time()
+        }
     
     # 階段 2.5：Grok 3 標題篩選
     title_screening = await screen_thread_titles(
@@ -275,6 +286,13 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
                 "fetched_pages": thread_result.get("fetched_pages", [1])
             }
             logger.info(f"抓取候選回覆: thread_id={thread_id}, 回覆數={len(replies)}")
+            
+            # 更新緩存
+            st.session_state.thread_content_cache[thread_id]["data"].update({
+                "replies": candidate_data[thread_id]["replies"],
+                "fetched_pages": candidate_data[thread_id]["fetched_pages"]
+            })
+            st.session_state.thread_content_cache[thread_id]["timestamp"] = time.time()
     
     # 階段 4：選取最終帖子並抓取首 1 頁和末 2 頁回覆
     final_threads = [
@@ -333,6 +351,13 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             ],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
+        
+        # 更新緩存
+        st.session_state.thread_content_cache[thread_id]["data"].update({
+            "replies": thread_data[-1]["replies"],
+            "fetched_pages": thread_data[-1]["fetched_pages"]
+        })
+        st.session_state.thread_content_cache[thread_id]["timestamp"] = time.time()
         
         logger.info(f"最終帖子數據: thread_id={thread_id}, 回覆數={len(replies)}")
         await asyncio.sleep(5)
