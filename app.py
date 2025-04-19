@@ -3,7 +3,7 @@ Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
 負責用戶交互、聊天記錄管理和速率限制狀態顯示。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
-硬編碼參數（優化建議：移至配置文件或介面）：
+硬編碼參數：
 - cat_id_map
 """
 
@@ -136,8 +136,7 @@ async def main():
                     metadata = [
                         {
                             "thread_id": item["thread_id"], "title": item["title"],
-                            "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"),
-                            "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)
+                            "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0")
                         } for item in thread_data
                     ]
                     for meta in metadata:
@@ -187,8 +186,7 @@ async def main():
                         metadata_advanced = [
                             {
                                 "thread_id": item["thread_id"], "title": item["title"],
-                                "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"),
-                                "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)
+                                "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0")
                             } for item in thread_data_advanced
                         ]
                         response += f"\n\n進階分析結果（{len(thread_data_advanced)}個帖子）：\n\n"
