@@ -20,10 +20,11 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     candidate_thread_ids = analysis.get("candidate_thread_ids", [])
     top_thread_ids = analysis.get("top_thread_ids", [])
     
-    min_replies = filters.get("min_replies", 50)
-    min_likes = filters.get("min_likes", 10)
-    dislike_count_max = filters.get("dislike_count_max", 20)
-    recent_only = filters.get("recent_only", True)
+    # 放寬過濾條件
+    min_replies = filters.get("min_replies", 10)  # 降低到10
+    min_likes = filters.get("min_likes", 5)  # 降低到5
+    dislike_count_max = filters.get("dislike_count_max", 50)  # 放寬到50
+    recent_only = filters.get("recent_only", False)  # 關閉僅限近期
     exclude_thread_ids = filters.get("exclude_thread_ids", [])
     
     # 預設分類
@@ -50,7 +51,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             cat_id=cat_id,
             sub_cat_id=0,
             start_page=1,
-            max_pages=3,  # 2-3 頁，約 30-90 個標題
+            max_pages=3,
             request_counter=request_counter,
             last_reset=last_reset,
             rate_limit_until=rate_limit_until
@@ -74,11 +75,17 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
            (not recent_only or int(item.get("last_reply_time", 0)) >= today_timestamp) and
            str(item["thread_id"]) not in exclude_thread_ids
     ]
-    candidate_threads = [
+    # 若無candidate_thread_ids，選擇最多10個帖子
+    candidate_threads = filtered_items[:10] if not candidate_thread_ids else [
         item for item in filtered_items
-        if str(item["thread_id"]) in candidate_thread_ids or not candidate_thread_ids
+        if str(item["thread_id"]) in candidate_thread_ids
     ][:10]
     logger.info(f"篩選候選帖子: 總數={len(initial_threads)}, 符合條件={len(filtered_items)}, 候選數={len(candidate_threads)}")
+    
+    # 若無候選帖子，隨機選擇最多2個帖子作為備用
+    if not candidate_threads and filtered_items:
+        candidate_threads = random.sample(filtered_items, min(2, len(filtered_items)))
+        logger.info(f"無候選帖子，隨機選擇備用: 數量={len(candidate_threads)}")
     
     # 階段 3：抓取候選帖子的首頁回覆（25 條）
     candidate_data = {}
@@ -91,7 +98,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             request_counter=request_counter,
             last_reset=last_reset,
             rate_limit_until=rate_limit_until,
-            max_replies=25,  # 首頁回覆
+            max_replies=25,
             fetch_last_pages=0
         )
         
@@ -136,6 +143,11 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         if str(item["thread_id"]) in top_thread_ids or not top_thread_ids
     ][:post_limit]
     
+    # 若無最終帖子，選擇候選帖子
+    if not final_threads and candidate_threads:
+        final_threads = candidate_threads[:post_limit]
+        logger.info(f"無最終帖子，使用候選帖子: 數量={len(final_threads)}")
+    
     for item in final_threads:
         thread_id = str(item["thread_id"])
         logger.info(f"開始抓取最終帖子回覆: thread_id={thread_id}")
@@ -145,8 +157,8 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             request_counter=request_counter,
             last_reset=last_reset,
             rate_limit_until=rate_limit_until,
-            max_replies=reply_limit,  # 最多 150 條
-            fetch_last_pages=3  # 末 3 頁
+            max_replies=reply_limit,
+            fetch_last_pages=3
         )
         
         request_counter = thread_result.get("request_counter", request_counter)
