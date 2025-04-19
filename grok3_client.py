@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List  # 新增：導入 List
 
 logger = logging.getLogger(__name__)
 
