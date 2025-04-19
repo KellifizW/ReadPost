@@ -12,6 +12,7 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 
 async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=False, metadata=None, thread_data=None, initial_response=None):
+    """分析問題性質，決定抓取和處理策略"""
     post_limit = 2
     match = re.search(r'(\d+)個', user_query)
     if match:
@@ -30,22 +31,22 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
     執行以下步驟：
     1. 識別問題主題（例如，感動、搞笑、財經、時事），並明確標記為 theme。
     2. 判斷意圖（例如，總結、情緒分析、主題聚焦總結）。
-    3. {'若為進階分析，評估初始數據是否涵蓋大部分回覆頁數（80% 或更多），建議後續策略。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
+    3. {'若為進階分析，評估初始數據和回應是否充分，建議後續策略。' if is_advanced else '根據主題、意圖和分類，執行以下篩選流程：'}
        - 初始抓取：瀏覽 30-90 個帖子標題，根據分類活躍度調整（例如，吹水台 90 個，創意台 30 個）。
        - 候選名單：從 30-90 個標題中，根據主題的語義相關性，選出 10 個候選帖子，優先包含與主題相關的關鍵詞（例如，感動：溫馨、感人、互助；搞笑：幽默、搞亂、on9；財經：股票、投資、經濟）。
        - 關聯性分析：抓取 10 個候選帖子的首頁回覆（每帖 25 條），分析與問題主題的語義相關性，排序並選出關聯性最高的 N 個帖子（N 由 post_limit 指定）。
        - 最終抓取：對於選定的 N 個帖子，抓取首 1 頁（每頁 25 條）和末 2 頁回覆，總計最多 75 條回覆。
-    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。設置 needs_advanced_analysis=False 若所有帖子已抓取 80% 或更多回覆頁數（replies_fetched / total_replies >= 0.8），或感動內容充分（每篇帖子有至少 10 條具情感共鳴的回覆，like_count >= 5）。' if is_advanced else '決定以下參數：'}
+    4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。設置 needs_advanced_analysis=False 若已提供至少 3 個帖子且感動內容充分（每篇帖子有至少 10 條具情感共鳴的回覆，like_count ≥ 5）。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
        - category_ids：僅包含 cat_id={cat_id}，不得包含其他分類。
        - data_type："title"、"replies"、"both"。
        - post_limit：從問題中提取（如「3個」→ 3），默認 2，最大 10。
        - reply_limit：0-75，初始分析 25 條，最終分析 75 條。
        - filters：根據主題動態設置：
-         - 感動：高 like_count（>= 5），低 dislike_count（< 20），優先溫馨、感人、互助內容。
-         - 搞笑：高 like_count（>= 20），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
-         - 財經：高 like_count（>= 10），低 dislike_count（< 5），優先專業、數據驅動內容。
-         - 其他主題：根據語義相關性，設置高互動性（min_replies >= 50，min_likes >= 10）。
+         - 感動：高 like_count（≥ 5），低 dislike_count（< 20），近期帖子，優先溫馨、感人、互助內容。
+         - 搞笑：高 like_count（≥ 20），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
+         - 財經：高 like_count（≥ 10），低 dislike_count（< 5），優先專業、數據驅動內容。
+         - 其他主題：根據語義相關性，設置高互動性（min_replies ≥ 50，min_likes ≥ 10）。
        - processing：根據主題選擇：
          - 感動：emotion_focused_summary。
          - 搞笑：humor_focused_summary。
@@ -136,6 +137,7 @@ async def screen_thread_titles(
     thread_titles: List[Dict[str, Any]],
     post_limit: int
 ) -> Dict[str, Any]:
+    """篩選 LIHKG 帖子標題，選出與用戶問題最相關的帖子"""
     # 驗證 thread_titles 數據結構
     valid_titles = [
         item for item in thread_titles
@@ -165,28 +167,28 @@ async def screen_thread_titles(
     執行以下步驟：
     1. 分析用戶問題，確定主題（例如，搞笑、感動、財經）。
     2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
-       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（>= 20）。
-       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（>= 5）。
-       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（>= 10）。
-       - 其他主題：根據語義相關性和高互動性（no_of_reply >= 10，like_count >= 10）。
+       - 搞笑主題：優先幽默、誇張、諷刺關鍵詞（例如，on9、搞亂、爆笑），高 like_count（≥ 20），允許 dislike_count（< 20）。
+       - 感動主題：優先溫馨、感人、互助關鍵詞，高 like_count（≥ 5），低 dislike_count（< 20）。
+       - 財經主題：優先股票、投資、經濟關鍵詞，高 like_count（≥ 10），低 dislike_count（< 5）。
+       - 其他主題：根據語義相關性和高互動性（no_of_reply ≥ 50，like_count ≥ 10）。
     3. 判斷是否需要抓取回覆（need_replies）：
        - 若標題足以回答問題（例如，標題明確且互動性低），設置 need_replies=False。
        - 若需要回覆來驗證內容（例如，標題含關鍵詞但語義模糊），設置 need_replies=True。
     4. 提供篩選理由（reason），說明為何選擇這些帖子。
 
     輸出格式：
-    {
+    {{
         "top_thread_ids": [],
         "need_replies": true,
         "reason": ""
-    }
+    }}
 
     示例：
-    {
+    {{
         "top_thread_ids": [12345, 67890],
         "need_replies": true,
-        "reason": "選擇了包含熱門關鍵詞且高互動的帖子"
-    }
+        "reason": "選擇了包含搞笑關鍵詞且高互動的帖子"
+    }}
     """
 
     try:
@@ -275,6 +277,7 @@ async def screen_thread_titles(
         }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing) -> AsyncGenerator[str, None]:
+    """以流式方式生成 Grok 3 回應"""
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -314,8 +317,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         2. 綜合每篇帖子的回覆，總結內容，突出感動情緒，優先引用具關注度的回覆（like_count 或 dislike_count 不為 0），確保內容溫馨或感人。
         3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
         4. 判斷數據是否足夠：
-           - 若所有帖子已抓取 80% 或更多回覆頁數（replies_fetched / total_replies >= 0.8），或每篇帖子有至少 10 條具情感共鳴的回覆（like_count >= 5），說明數據已足夠，無需進階分析。
-           - 若回覆頁數覆蓋率低於 80% 或感動內容不足，說明原因並建議一次進階分析，抓取更多創意台（cat_id=31）帖子。
+           - 若已提供至少 3 個帖子且每篇帖子有至少 10 條具情感共鳴的回覆（like_count ≥ 5），說明數據已足夠，無需進階分析。
+           - 若帖子數少於 3 或感動內容不足，說明原因並建議一次進階分析，抓取更多創意台（cat_id=31）帖子。
         5. 若為進階分析，明確標記「已完成進階分析」，避免進一步分析。
 
         輸出格式：
