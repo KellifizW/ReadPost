@@ -63,7 +63,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     6. 若無與關鍵詞或子主題相關的帖子，返回空 category_ids，並設置 category_suggestion 為「無相關帖子，建議直接回答問題」。
 
     輸出：
-    {
+    {{
       {'"needs_advanced_analysis": false, "suggestions": {' if is_advanced else '"theme": "",'}
       "keywords": [],
       "sub_theme": "",
@@ -73,12 +73,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
       "data_type": "",
       "post_limit": 0,
       "reply_limit": 0,
-      "filters": {},
+      "filters": {{}},
       "processing": "",
       "candidate_thread_ids": [],
       "top_thread_ids": [],
       {'"reason": ""' if is_advanced else '"category_suggestion": ""'}
-    }
+    }}
     """
     
     try:
@@ -274,7 +274,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     keywords = [word for word in user_question.split() if len(word) > 1 and word not in ["怎看", "大家", "最近", "的"]]
     logger.info(f"Extracted keywords: {keywords}")
 
-    post_limit = min(analysis.get("post_limit", 5), 20)  # 修改：移除默認值2，Grok3完全動態選擇
+    post_limit = min(analysis.get("post_limit", 5), 20)
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
     min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)
