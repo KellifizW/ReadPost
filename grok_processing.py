@@ -1,3 +1,4 @@
+```python
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 包含數據處理邏輯（進階分析、緩存管理）和輔助函數。
@@ -65,11 +66,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     任務：
     1. 理解用戶問題的意圖（例如列出熱門帖子、總結討論、表達個人偏好等）。
     2. 根據問題語義，生成篩選策略：
-       - 若要求「熱門帖子」，選擇回覆數高（min_replies=20）或近期活躍的帖子，無需嚴格關鍵詞。
+       - 若要求「熱門帖子」，選擇回覆數高（min_replies=20）或近期活躍的帖子，關鍵詞為可選（若無明確關鍵詞，僅基於回覆數和活躍度）。
        - 若要求表達偏好（如「你最中意」），選擇回覆數高且內容有趣的帖子，並在 processing 中說明。
        - 若要求總結或分析，選擇相關帖子並指定處理方式（如摘要、情緒分析）。
-       - 篩選僅基於回覆數（min_replies）和寬鬆關鍵詞（如問題中的「熱門」），不考慮點贊數。
-    3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多10個），並說明篩選依據。
+       - 篩選優先基於回覆數（min_replies）和活躍度（last_reply_time），關鍵詞為輔助條件。
+    3. 若有帖子標題數據，選擇與問題最相關的帖子 ID（最多10個），按回覆數降序排序，並說明篩選依據。
     4. 若無帖子標題數據，建議初始抓取（30-180個帖子）並設置寬鬆篩選條件，post_limit 不超過 10。
     5. 若問題與分類無關，設置 category_ids 為空，並建議直接回答。
     6. 根據問題複雜度，動態建議 post_limit（簡單問題 5，複雜問題 10）和 reply_limit（簡單問題 50，複雜問題 200）。
@@ -249,9 +250,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "direct_answer": f"""
         直接回答用戶問題，50-200字。問題：{user_query}
         篩選策略：{json.dumps(strategy, ensure_ascii=False)}
+        帖子元數據：{json.dumps(filtered_metadata, ensure_ascii=False)}
+        帖子回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         步驟：
-        1. 基於問題和篩選策略，提供簡潔、專業的回答。
-        2. 若需要外部數據，說明「當前數據不足，建議查閱最新資訊」。
+        1. 基於問題和篩選策略，提供簡潔、專業的回答，優先使用提供的帖子元數據和回覆數據。
+        2. 若無有效數據，說明「當前數據不足，建議查閱最新資訊」，並避免生成捏造數據。
         輸出：回應
         """
     }
@@ -414,9 +417,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     filtered_items = [
         item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and
-        (not keywords or any(keyword.lower() in item["title"].lower() for keyword in keywords)) and
-        "thread_id" in item
+        if item.get("no_of_reply", 0) >= min_replies
+        and (not keywords or any(keyword.lower() in item["title"].lower() for keyword in keywords))
+        and "thread_id" in item
     ]
     filtered_items.sort(key=lambda x: (x.get("no_of_reply", 0), x.get("last_reply_time", 0)), reverse=True)
     logger.info(f"Filtered threads: cat_id={cat_id}, initial_count={len(initial_threads)}, filtered_count={len(filtered_items)}")
@@ -438,6 +441,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "timestamp": time.time()
         }
     
+    if not filtered_items:
+        logger.warning(f"No threads passed initial filter for cat_id={cat_id}. Falling back to top reply count threads.")
+        filtered_items = sorted(
+            [item for item in initial_threads if item.get("no_of_reply", 0) >= min_replies and "thread_id" in item],
+            key=lambda x: (x.get("no_of_reply", 0), x.get("last_reply_time", 0)),
+            reverse=True
+        )[:post_limit]
+        logger.info(f"Fallback filtered threads: cat_id={cat_id}, fallback_count={len(filtered_items)}")
+    
     if not top_thread_ids and filtered_items:
         logger.info(f"Re-analyzing with thread titles: cat_id={cat_id}, thread_count={len(filtered_items)}")
         analysis = await analyze_and_screen(
@@ -454,11 +466,20 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ] if top_thread_ids else filtered_items[:post_limit]
     
     if not valid_threads:
-        logger.warning(f"No valid threads found: cat_id={cat_id}, post_limit={post_limit}")
+        logger.warning(f"No valid threads after re-analysis for cat_id={cat_id}. Using top reply count threads.")
+        valid_threads = filtered_items[:post_limit]
+    
+    if not valid_threads:
+        logger.warning(f"No threads available for cat_id={cat_id}. Returning direct answer with metadata.")
+        metadata = [
+            {"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0)}
+            for item in sorted(initial_threads, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:5]
+            if "thread_id" in item
+        ]
         direct_answer = ""
         async for content in stream_grok3_response(
             user_query=user_question, 
-            metadata={}, 
+            metadata=metadata, 
             thread_data={}, 
             processing="direct_answer", 
             strategy=strategy
@@ -523,3 +544,4 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         "last_reset": last_reset, 
         "rate_limit_until": rate_limit_until
     }
+```
