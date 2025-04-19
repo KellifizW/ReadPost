@@ -36,13 +36,13 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
        - 初始抓取：瀏覽 30-90 個帖子標題，根據分類活躍度調整（例如，吹水台 90 個，財經台 30 個）。
        - 候選名單：從 30-90 個標題中，根據主題的語義相關性，選出 10 個候選帖子，優先包含與主題相關的關鍵詞（例如，感動：溫馨、感人、互助；搞笑：幽默、搞亂、on9；財經：股票、投資、經濟）。
        - 關聯性分析：抓取 10 個候選帖子的首頁回覆（每帖 25 條），分析與問題主題的語義相關性，排序並選出關聯性最高的 N 個帖子（N 由 post_limit 指定）。
-       - 最終抓取：對於選定的 N 個帖子，抓取首 3 頁（每頁 25 條）和末 3 頁回覆，總計最多 150 條回覆。
+       - 最終抓取：對於選定的 N 個帖子，抓取首 1 頁（每頁 25 條）和末 2 頁回覆，總計最多 75 條回覆。
     4. {'若為進階分析，設置 needs_advanced_analysis 和 suggestions。' if is_advanced else '決定以下參數：'}
        - theme：問題主題（如「感動」、「搞笑」、「財經」）。
        - category_ids：僅包含 cat_id={cat_id}，避免添加其他分類。
        - data_type："title"、"replies"、"both"。
        - post_limit：從問題中提取（如「3個」→ 3），默認 2，最大 10。
-       - reply_limit：0-150，初始分析 25 條，最終分析 150 條。
+       - reply_limit：0-75，初始分析 25 條，最終分析 75 條。
        - filters：根據主題動態設置：
          - 感動：高 like_count（≥ 20），低 dislike_count（< 5），近期帖子，優先溫馨、感人、互助內容。
          - 搞笑：高 like_count（≥ 20），允許高 dislike_count（< 20），優先幽默、誇張、諷刺內容。
@@ -107,7 +107,9 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
                 status_code = response.status
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"Grok 3 API 回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}...")
+                # 完整記錄 reason 字段
+                reason = result.get("reason", "無原因提供")
+                logger.info(f"Grok 3 API 回應: 狀態碼={status_code}, 回應摘要={str(result)[:50]}..., reason={reason}")
                 return result
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         logger.error(f"問題分析失敗: 錯誤={str(e)}, 提示詞摘要={prompt[:200]}...")
@@ -125,7 +127,7 @@ async def analyze_question_nature(user_query, cat_name, cat_id, is_advanced=Fals
         } if not is_advanced else {
             "needs_advanced_analysis": False,
             "suggestions": {},
-            "reason": "分析失敗，無需進階分析。"
+            "reason": f"分析失敗，錯誤：{str(e)}"
         }
 
 async def screen_thread_titles(
@@ -240,6 +242,24 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         yield "錯誤: 缺少 API 密鑰"
         return
     
+    # 限制每篇帖子的回覆數量（最多 10 條高正評回覆）
+    filtered_thread_data = {}
+    for thread_id, data in thread_data.items():
+        replies = sorted(
+            data.get("replies", []),
+            key=lambda x: x.get("like_count", 0),
+            reverse=True
+        )[:10]  # 取前 10 條高正評回覆
+        filtered_thread_data[thread_id] = {
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),
+            "last_reply_time": data.get("last_reply_time", 0),
+            "like_count": data.get("like_count", 0),
+            "dislike_count": data.get("dislike_count", 0),
+            "replies": replies
+        }
+    
     # 修改回應字數為 300-500 字
     if processing == "emotion_focused_summary":
         prompt = f"""
@@ -250,11 +270,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         帖子數據：
         {json.dumps(metadata, ensure_ascii=False)}
         回覆數據：
-        {json.dumps(thread_data, ensure_ascii=False)}
+        {json.dumps(filtered_thread_data, ensure_ascii=False)}
 
         執行以下步驟：
         1. 解析問題意圖，聚焦感動或溫馨主題。
-        2. 綜合首 3 頁和末 3 頁回覆，總結帖子內容，突出感動情緒，優先引用高正評（like_count ≥ 10 且 dislike_count < 5）的回覆，確保內容溫馨或感人。
+        2. 綜合每篇帖子的回覆，總結內容，突出感動情緒，優先引用高正評（like_count ≥ 10 且 dislike_count < 5）的回覆，確保內容溫馨或感人。
         3. 適配分類語氣（吹水台輕鬆，創意台溫馨）。
         4. 若數據不足或帖子與感動無關，說明原因並建議進階分析。
 
@@ -271,11 +291,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         帖子數據：
         {json.dumps(metadata, ensure_ascii=False)}
         回覆數據：
-        {json.dumps(thread_data, ensure_ascii=False)}
+        {json.dumps(filtered_thread_data, ensure_ascii=False)}
 
         執行以下步驟：
         1. 解析問題意圖，聚焦幽默或搞笑主題。
-        2. 綜合首 3 頁和末 3 頁回覆，總結帖子內容，突出幽默或誇張情緒，優先引用高正評（like_count ≥ 10，允許 dislike_count < 20）的回覆，確保內容搞笑或諷刺。
+        2. 綜合每篇帖子的回覆，總結內容，突出幽默或誇張情緒，優先引用高正評（like_count ≥ 10，允許 dislike_count < 20）的回覆，確保內容搞笑或諷刺。
         3. 適配分類語氣（吹水台輕鬆，成人台大膽）。
         4. 若數據不足或帖子與搞笑無關，說明原因並建議進階分析。
 
@@ -285,18 +305,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         """
     elif processing == "professional_summary":
         prompt = f"""
-        你是一個智能助手，任務是基於 LIHKG 數據總結與財經、時事等專業主題相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅 estavam提供數據。
+        你是一個智能助手，任務是基於 LIHKG 數據總結與財經、時事等專業主題相關的帖子內容，回答用戶問題。以繁體中文回覆，300-500 字，僅用提供數據。
 
         使用者問題：{user_query}
         分類：{', '.join([f'{m["thread_id"]} ({m["title"]})' for m in metadata])}
         帖子數據：
         {json.dumps(metadata, ensure_ascii=False)}
         回覆數據：
-        {json.dumps(thread_data, ensure_ascii=False)}
+        {json.dumps(filtered_thread_data, ensure_ascii=False)}
 
         執行以下步驟：
         1. 解析問題意圖，聚焦財經、時事等專業主題。
-        2. 綜合首 3 頁和末 3 頁回覆，總結帖子內容，突出專業觀點或數據驅動討論，優先引用高正評（like_count ≥ 10 且 dislike_count < 5）的回覆，確保內容客觀或權威。
+        2. 綜合每篇帖子的回覆，總結內容，突出專業觀點或數據驅動討論，優先引用高正評（like_count ≥ 10 且 dislike_count < 5）的回覆，確保內容客觀或權威。
         3. 適配分類語氣（財經台專業，時事台嚴肅）。
         4. 若數據不足或帖子與專業主題無關，說明原因並建議進階分析。
 
@@ -313,11 +333,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         帖子數據：
         {json.dumps(metadata, ensure_ascii=False)}
         回覆數據：
-        {json.dumps(thread_data, ensure_ascii=False)}
+        {json.dumps(filtered_thread_data, ensure_ascii=False)}
 
         執行以下步驟：
         1. 解析問題意圖，識別主題（若無明確主題，視為通用）。
-        2. 綜合首 3 頁和末 3 頁回覆，總結帖子內容，優先引用高正評（like_count ≥ 10）的回覆，確保內容與問題主題相關。
+        2. 綜合每篇帖子的回覆，總結內容，優先引用高正評（like_count ≥ 10）的回覆，確保內容與問題主題相關。
         3. 適配分類語氣（吹水台輕鬆，財經台專業）。
         4. 若數據不足或帖子與問題無關，說明原因並建議進階分析。
 
@@ -334,7 +354,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
         帖子數據：
         {json.dumps(metadata, ensure_ascii=False)}
         回覆數據：
-        {json.dumps(thread_data, ensure_ascii=False)}
+        {json.dumps(filtered_thread_data, ensure_ascii=False)}
 
         執行以下步驟：
         1. 解析問題意圖。
@@ -367,7 +387,21 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
     char_count = len(prompt)
     if char_count > GROK3_TOKEN_LIMIT:
         logger.warning(f"輸入超限: 字元數={char_count}")
-        prompt = prompt[:1000] + "\n[部分上下文已截斷]\n" + prompt[-GROK3_TOKEN_LIMIT+1000:]
+        # 改進截斷邏輯，保留每篇帖子的標題和部分回覆
+        truncated_thread_data = {}
+        for thread_id, data in filtered_thread_data.items():
+            replies = data.get("replies", [])[:5]  # 每篇帖子保留 5 條回覆
+            truncated_thread_data[thread_id] = {
+                "thread_id": data["thread_id"],
+                "title": data["title"],
+                "replies": replies
+            }
+        prompt = prompt.replace(
+            json.dumps(filtered_thread_data, ensure_ascii=False),
+            json.dumps(truncated_thread_data, ensure_ascii=False)
+        )
+        char_count = len(prompt)
+        logger.info(f"截斷後字元數: {char_count}")
     
     headers = {
         "Content-Type": "application/json",
@@ -379,7 +413,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing) -
             {"role": "system", "content": "你是 Grok 3，以繁體中文回答，確保回覆清晰、簡潔，僅基於提供數據。"},
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 600,
+        "max_tokens": 1000,  # 增加到 1000 以確保完整總結
         "temperature": 0.7,
         "stream": True
     }
