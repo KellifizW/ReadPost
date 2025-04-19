@@ -21,10 +21,10 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     top_thread_ids = analysis.get("top_thread_ids", [])
     
     # 放寬過濾條件
-    min_replies = filters.get("min_replies", 10)  # 降低到10
-    min_likes = filters.get("min_likes", 5)  # 降低到5
-    dislike_count_max = filters.get("dislike_count_max", 50)  # 放寬到50
-    recent_only = filters.get("recent_only", False)  # 關閉僅限近期
+    min_replies = filters.get("min_replies", 10)
+    min_likes = filters.get("min_likes", 5)
+    dislike_count_max = filters.get("dislike_count_max", 50)
+    recent_only = filters.get("recent_only", False)
     exclude_thread_ids = filters.get("exclude_thread_ids", [])
     
     # 預設分類
@@ -46,7 +46,7 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     
     # 階段 1：抓取 30-90 個標題
     initial_threads = []
-    for cat_id in category_ids[:2]:  # 限制最多 2 個分類
+    for cat_id in category_ids[:2]:
         result = await get_lihkg_topic_list(
             cat_id=cat_id,
             sub_cat_id=0,
@@ -174,13 +174,13 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
     # 階段 4：選取最終帖子並抓取首 3 頁和末 3 頁回覆
     final_threads = [
         item for item in filtered_items
-        if str(item["thread_id"]) in top_thread_ids or not top_thread_ids
+        if str(item["thread_id"]) in top_thread_ids
     ][:post_limit]
     
-    # 若無最終帖子，選擇候選帖子
-    if not final_threads and candidate_threads:
+    # 若無匹配top_thread_ids，選擇候選帖子
+    if not final_threads:
         final_threads = candidate_threads[:post_limit]
-        logger.info(f"無最終帖子，使用候選帖子: 數量={len(final_threads)}")
+        logger.info(f"無匹配top_thread_ids，使用候選帖子: 數量={len(final_threads)}")
     
     for item in final_threads:
         thread_id = str(item["thread_id"])
@@ -229,11 +229,12 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
             ]
         })
         
+        logger.info(f"最終帖子數據: thread_id={thread_id}, 回覆數={len(replies)}")
         await asyncio.sleep(5)
     
     if not thread_data:
         logger.warning(f"最終無有效帖子: 問題={user_question}, 分類={selected_cat}, "
-                      f"篩選條件={filters}, candidate_thread_ids={candidate_thread_ids}")
+                      f"篩選條件={filters}, candidate_thread_ids={candidate_thread_ids}, top_thread_ids={top_thread_ids}")
     
     return {
         "selected_cat": selected_cat,
