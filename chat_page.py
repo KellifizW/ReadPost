@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import asyncio
 import time
@@ -165,7 +166,7 @@ async def chat_page():
                 
                 # 檢查數據
                 if not thread_data:
-                    answer = f"在 {question_cat} 中未找到符合條件的帖子。"
+                    answer = f"在 {question_cat} 中未找到符合條件的帖子，請嘗試其他分類或問題。"
                     logger.warning(f"無有效帖子: 問題={user_question}, 分類={question_cat}, 速率限制={rate_limit_info}")
                     with st.chat_message("assistant"):
                         st.markdown(answer)
@@ -316,7 +317,7 @@ async def chat_page():
                 st.session_state.awaiting_response = False
                 
             except Exception as e:
-                error_message = f"處理失敗，原因：{str(e)}"
+                error_message = f"處理失敗，原因：{str(e)}。請嘗試重新輸入或更改分類。"
                 logger.error(f"處理錯誤: 問題={user_question}, 錯誤={str(e)}, 速率限制={result.get('rate_limit_info', []) if 'result' in locals() else []}")
                 with st.chat_message("assistant"):
                     st.markdown(error_message)
@@ -373,3 +374,4 @@ async def chat_page():
 
 if __name__ == "__main__":
     asyncio.run(chat_page())
+```
