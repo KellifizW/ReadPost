@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Dict, Any, List  # 新增：導入 List
+from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,48 @@ async def analyze_question_nature(
             else:
                 logger.error(f"Grok 3 API 錯誤: 狀態碼={response.status}")
                 return {}
+
+async def screen_thread_titles(
+    user_query: str,
+    thread_titles: List[Dict[str, Any]],
+    post_limit: int
+) -> Dict[str, Any]:
+    prompt = f"""
+    你是一個智能助手，任務是從 LIHKG 討論區的帖子標題中篩選與用戶問題最相關的帖子。
+    以繁體中文回覆，輸出結構化 JSON。
+
+    輸入問題：{user_query}
+    帖子標題數據：{thread_titles}
+    所需帖子數量：{post_limit}
+
+    執行以下步驟：
+    1. 分析用戶問題，確定主題（例如，搞笑、時事）。
+    2. 根據標題內容和元數據（thread_id, title, no_of_reply, like_count, dislike_count），篩選與問題主題最相關的 {post_limit} 個帖子。
+    3. 判斷是否需要抓取這些帖子的回覆內容（need_replies），若標題足以回答問題，設置 need_replies=False。
+    4. 提供篩選理由（reason），說明為何選擇這些帖子。
+
+    輸出格式：
+    ```json
+    {
+        "top_thread_ids": [int],
+        "need_replies": bool,
+        "reason": "string"
+    }
+    ```
+    """
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.x.ai/v1/chat/completions",
+            json={"prompt": prompt, "max_tokens": 500}
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                logger.info(f"Grok 3 API 標題篩選回應: 狀態碼={response.status}, 回應摘要={result}")
+                return result.get("choices", [{}])[0].get("message", {})
+            else:
+                logger.error(f"Grok 3 API 標題篩選錯誤: 狀態碼={response.status}")
+                return {"top_thread_ids": [], "need_replies": False, "reason": "API 錯誤"}
 
 async def stream_grok3_response(
     user_query: str,
