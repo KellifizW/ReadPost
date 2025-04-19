@@ -1,4 +1,3 @@
-```python
 import aiohttp
 import random
 import asyncio
@@ -252,4 +251,3 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         "last_reset": last_reset,
         "rate_limit_until": rate_limit_until
     }
-```
