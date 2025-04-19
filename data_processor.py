@@ -67,25 +67,59 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         logger.info(f"初始抓取: cat_id={cat_id}, 帖子數={len(items)}")
     
     # 階段 2：篩選候選帖子（10 個）
-    filtered_items = [
-        item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and
-           int(item.get("like_count", 0)) >= min_likes and
-           int(item.get("dislike_count", 0)) <= dislike_count_max and
-           (not recent_only or int(item.get("last_reply_time", 0)) >= today_timestamp) and
-           str(item["thread_id"]) not in exclude_thread_ids
-    ]
-    # 若無candidate_thread_ids，選擇最多10個帖子
-    candidate_threads = filtered_items[:10] if not candidate_thread_ids else [
+    filtered_items = []
+    filter_debug = {"min_replies_failed": 0, "min_likes_failed": 0, "dislike_count_failed": 0, "recent_only_failed": 0, "excluded_failed": 0}
+    for item in initial_threads:
+        thread_id = str(item["thread_id"])
+        no_of_reply = item.get("no_of_reply", 0)
+        like_count = int(item.get("like_count", 0))
+        dislike_count = int(item.get("dislike_count", 0))
+        last_reply_time = int(item.get("last_reply_time", 0))
+        
+        if no_of_reply < min_replies:
+            filter_debug["min_replies_failed"] += 1
+            continue
+        if like_count < min_likes:
+            filter_debug["min_likes_failed"] += 1
+            continue
+        if dislike_count > dislike_count_max:
+            filter_debug["dislike_count_failed"] += 1
+            continue
+        if recent_only and last_reply_time < today_timestamp:
+            filter_debug["recent_only_failed"] += 1
+            continue
+        if thread_id in exclude_thread_ids:
+            filter_debug["excluded_failed"] += 1
+            continue
+        filtered_items.append(item)
+    
+    logger.info(f"篩選候選帖子: 總數={len(initial_threads)}, 符合條件={len(filtered_items)}, "
+                f"篩選失敗詳情: 回覆數不足={filter_debug['min_replies_failed']}, "
+                f"點讚數不足={filter_debug['min_likes_failed']}, "
+                f"負評過多={filter_debug['dislike_count_failed']}, "
+                f"非近期帖子={filter_debug['recent_only_failed']}, "
+                f"被排除={filter_debug['excluded_failed']}")
+    
+    # 若有candidate_thread_ids，優先選擇匹配的帖子
+    candidate_threads = [
         item for item in filtered_items
         if str(item["thread_id"]) in candidate_thread_ids
     ][:10]
-    logger.info(f"篩選候選帖子: 總數={len(initial_threads)}, 符合條件={len(filtered_items)}, 候選數={len(candidate_threads)}")
+    if not candidate_threads and candidate_thread_ids:
+        logger.warning(f"無帖子匹配candidate_thread_ids: {candidate_thread_ids}")
     
-    # 若無候選帖子，隨機選擇最多2個帖子作為備用
+    # 若無匹配或無candidate_thread_ids，選擇最多10個符合條件的帖子
+    if not candidate_threads:
+        candidate_threads = filtered_items[:10]
+        logger.info(f"無匹配candidate_thread_ids，使用符合條件的帖子: 數量={len(candidate_threads)}")
+    
+    # 若仍無候選帖子，隨機選擇最多2個作為備用
     if not candidate_threads and filtered_items:
         candidate_threads = random.sample(filtered_items, min(2, len(filtered_items)))
         logger.info(f"無候選帖子，隨機選擇備用: 數量={len(candidate_threads)}")
+    
+    logger.info(f"最終候選帖子: 數量={len(candidate_threads)}, "
+                f"thread_ids={[str(item['thread_id']) for item in candidate_threads]}")
     
     # 階段 3：抓取候選帖子的首頁回覆（25 條）
     candidate_data = {}
@@ -196,6 +230,10 @@ async def process_user_question(user_question, cat_id_map, selected_cat, analysi
         })
         
         await asyncio.sleep(5)
+    
+    if not thread_data:
+        logger.warning(f"最終無有效帖子: 問題={user_question}, 分類={selected_cat}, "
+                      f"篩選條件={filters}, candidate_thread_ids={candidate_thread_ids}")
     
     return {
         "selected_cat": selected_cat,
