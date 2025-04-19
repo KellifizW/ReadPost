@@ -200,8 +200,8 @@ async def get_lihkg_topic_list(cat_id, sub_cat_id, start_page=1, max_pages=3, re
         "rate_limit_until": rate_limit_until
     }
 
-async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=150, fetch_last_pages=0):
-    """抓取帖子回覆，支持首 3 頁和末 3 頁"""
+async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=150, fetch_last_pages=0, specific_pages=None):
+    """抓取帖子回覆，支持首頁、末頁或指定頁面"""
     timestamp = int(time.time())
     url_template = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{{page}}?order=reply_time"
     
@@ -221,6 +221,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     }
     
     replies = []
+    fetched_pages = []  # 新增：記錄抓取的頁數
     page = 1
     thread_title = None
     total_replies = None
@@ -241,6 +242,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             "title": thread_title,
             "total_replies": total_replies,
             "total_pages": total_pages,
+            "fetched_pages": fetched_pages,  # 新增
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": last_reset,
@@ -284,6 +286,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         "title": None,
                         "total_replies": 0,
                         "total_pages": 0,
+                        "fetched_pages": fetched_pages,  # 新增
                         "rate_limit_info": rate_limit_info,
                         "request_counter": request_counter,
                         "last_reset": last_reset,
@@ -300,6 +303,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         "title": None,
                         "total_replies": 0,
                         "total_pages": 0,
+                        "fetched_pages": fetched_pages,  # 新增
                         "rate_limit_info": rate_limit_info,
                         "request_counter": request_counter,
                         "last_reset": last_reset,
@@ -318,6 +322,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                         "title": None,
                         "total_replies": 0,
                         "total_pages": 0,
+                        "fetched_pages": fetched_pages,  # 新增
                         "rate_limit_info": rate_limit_info,
                         "request_counter": request_counter,
                         "last_reset": last_reset,
@@ -334,7 +339,8 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                     reply["like_count"] = int(reply.get("like_count", "0")) if reply.get("like_count") else 0
                     reply["dislike_count"] = int(reply.get("dislike_count", "0")) if reply.get("dislike_count") else 0
                     reply["reply_time"] = reply.get("reply_time", "0")
-                replies.extend(page_replies)
+                replies.extend(page_replies[:max_replies - len(replies)])  # 限制回覆數
+                fetched_pages.append(1)  # 記錄抓取頁數
                 logger.info(f"成功抓取帖子回覆: thread_id={thread_id}, page=1, 回覆數={len(page_replies)}")
         
         except Exception as e:
@@ -345,22 +351,33 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                 "title": None,
                 "total_replies": 0,
                 "total_pages": 0,
+                "fetched_pages": fetched_pages,  # 新增
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": last_reset,
                 "rate_limit_until": rate_limit_until
             }
         
-        # 確定抓取頁數（首 3 頁 + 末 3 頁）
-        pages_to_fetch = list(range(1, min(4, total_pages + 1)))  # 首 3 頁
-        if fetch_last_pages > 0 and total_pages > 3:
-            last_pages = list(range(max(total_pages - fetch_last_pages + 1, 4), total_pages + 1))
-            pages_to_fetch.extend(last_pages)
+        # 確定抓取頁數
+        pages_to_fetch = []
+        if specific_pages:
+            # 優先使用 specific_pages（例如，頁 4-8）
+            pages_to_fetch = [p for p in specific_pages if 1 <= p <= total_pages and p not in fetched_pages]
+        elif fetch_last_pages > 0:
+            # 抓取首頁和末頁
+            pages_to_fetch = [1] + list(range(max(total_pages - fetch_last_pages + 1, 2), total_pages + 1))
             pages_to_fetch = sorted(set(pages_to_fetch))  # 去重並排序
+        else:
+            # 僅抓取首頁（默認行為）
+            pages_to_fetch = [1]
+        
+        # 移除已抓取的第一頁
+        pages_to_fetch = [p for p in pages_to_fetch if p not in fetched_pages]
         
         # 抓取剩餘頁數
-        for page in pages_to_fetch[1:]:  # 跳過第一頁
+        for page in pages_to_fetch:
             if len(replies) >= max_replies:
+                logger.info(f"終止抓取: thread_id={thread_id}, 回覆數={len(replies)} 已達最大值 {max_replies}")
                 break
             
             url = url_template.format(page=page)
@@ -431,11 +448,15 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
                             reply["dislike_count"] = int(reply.get("dislike_count", "0")) if reply.get("dislike_count") else 0
                             reply["reply_time"] = reply.get("reply_time", "0")
                         
+                        # 限制回覆數
+                        remaining_slots = max_replies - len(replies)
+                        page_replies = page_replies[:remaining_slots]
+                        replies.extend(page_replies)
+                        fetched_pages.append(page)  # 記錄抓取頁數
+                        
                         logger.info(
                             f"成功抓取帖子回覆: thread_id={thread_id}, page={page}, 回覆數={len(page_replies)}"
                         )
-                        
-                        replies.extend(page_replies)
                         
                         if len(page_replies) < per_page:
                             logger.info(
@@ -461,10 +482,11 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             current_time = time.time()
     
     return {
-        "replies": replies[:max_replies],
+        "replies": replies,
         "title": thread_title,
         "total_replies": total_replies,
         "total_pages": total_pages,
+        "fetched_pages": fetched_pages,  # 新增
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
