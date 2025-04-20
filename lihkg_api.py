@@ -58,7 +58,7 @@ async def get_category_name(cat_id, request_counter=0, last_reset=0, rate_limit_
     
     for attempt in range(3):
         try:
-            logger.info(f"LIHKG API request: cat_id={cat_id}, url={url}")
+            logger.info(f"Fetching category name: cat_id={cat_id}, attempt={attempt+1}")
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, timeout=10) as response:
                     data = await response.json()
@@ -144,12 +144,11 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=1, request_counte
         
         for attempt in range(3):
             try:
-                logger.info(f"LIHKG API request: cat_id={cat_id}, page={page}, attempt={attempt+1}, url={url}")
+                logger.info(f"Fetching threads: cat_id={cat_id}, page={page}, attempt={attempt+1}")
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, headers=headers, timeout=10) as response:
                         data = await response.json()
                         if response.status == 200 and data.get("success"):
-                            # 驗證 response.category.cat_id
                             response_cat_id = data["response"].get("category", {}).get("cat_id")
                             if str(response_cat_id) != str(cat_id):
                                 logger.error(f"Category mismatch: requested cat_id={cat_id}, received cat_id={response_cat_id}")
@@ -164,8 +163,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=1, request_counte
                                     "last_reset": last_reset,
                                     "rate_limit_until": rate_limit_until
                                 }
-                            threads = data["response"].get("items", [])
-                            # 過濾帖子並記錄過濾後數據
+                            threads = data["response"].get("items", []) or []
                             filtered_threads = [
                                 {
                                     "thread_id": thread["thread_id"],
@@ -175,9 +173,8 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=1, request_counte
                                     "last_reply_time": thread.get("last_time", thread.get("last_reply_time", 0))
                                 } for thread in threads if str(thread.get("cat_id")) == str(cat_id) and "thread_id" in thread
                             ]
-                            logger.info(f"Filtered threads for cat_id={cat_id}, page={page}: "
-                                       f"before={len(threads)}, after={len(filtered_threads)}, "
-                                       f"threads={json.dumps(filtered_threads, ensure_ascii=False)}")
+                            logger.info(f"Threads fetched: cat_id={cat_id}, page={page}, before={len(threads)}, after={len(filtered_threads)}")
+                            logger.debug(f"Filtered threads: {json.dumps(filtered_threads, ensure_ascii=False)}")
                             items.extend(filtered_threads)
                             rate_limit_info.append({"cat_id": cat_id, "page": page, "timestamp": time.time(), "status": "success"})
                             request_counter += 1
@@ -264,7 +261,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
     
     for attempt in range(3):
         try:
-            logger.info(f"LIHKG API request: thread_id={thread_id}, page=1, attempt={attempt+1}, url={url}")
+            logger.info(f"Fetching thread: thread_id={thread_id}, page=1, attempt={attempt+1}")
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, timeout=10) as response:
                     data = await response.json()
@@ -281,7 +278,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                         ])
                         fetched_pages.append(1)
                         request_counter += 1
-                        logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(replies)}")
+                        logger.info(f"Fetched thread: thread_id={thread_id}, page=1, replies={len(replies)}")
                         break
                     elif response.status == 429:
                         rate_limit_until = time.time() + int(response.headers.get("X-RateLimit-Reset", 60))
@@ -338,7 +335,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
             
             for attempt in range(3):
                 try:
-                    logger.info(f"LIHKG API request: thread_id={thread_id}, page={page}, attempt={attempt+1}, url={url}")
+                    logger.info(f"Fetching thread: thread_id={thread_id}, page={page}, attempt={attempt+1}")
                     async with aiohttp.ClientSession() as session:
                         async with session.get(url, headers=headers, timeout=10) as response:
                             data = await response.json()
@@ -351,7 +348,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                                 ])
                                 fetched_pages.append(page)
                                 request_counter += 1
-                                logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(replies)}")
+                                logger.info(f"Fetched thread: thread_id={thread_id}, page={page}, replies={len(replies)}")
                                 break
                             elif response.status == 429:
                                 rate_limit_until = time.time() + int(response.headers.get("X-RateLimit-Reset", 60))
