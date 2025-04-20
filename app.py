@@ -67,12 +67,6 @@ async def main():
     st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
     st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
 
-    # 日誌顯示選項
-    show_logs = st.checkbox("顯示即時日誌")
-    if show_logs:
-        with open("app.log", "r") as log_file:
-            st.text_area("日誌", log_file.read(), height=200)
-
     # 顯示聊天記錄
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
