@@ -18,9 +18,7 @@ from lihkg_api import get_category_name
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(level
-
-name)s - %(message)s")
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
 # 檔案處理器：寫入 app.log
 file_handler = logging.FileHandler("app.log")
