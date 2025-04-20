@@ -44,7 +44,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     1. 識別主題 (感動, 搞笑, 財經等), 標記為 theme.
     2. 判斷意圖 (總結, 情緒分析, 幽默總結).
     3. 篩選帖子:
-       - 若無標題, 設置初始抓取 (30-90個標題).
+       - 若無標題, 設置初始抓取 (30-150個標題).
        - 從標題選10個候選 (candidate_thread_ids), 再選 top_thread_ids.
     4. 設置參數:
        - theme: 問題主題.
@@ -52,7 +52,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - data_type: "both".
        - post_limit: 從問題提取 (默認2, 最大10).
        - reply_limit: 75.
-       - filters: 根據主題 (感動: like_count>=5; 搞笑: like_count>=5; 財經: like_count>=5; 其他: min_replies>=10, min_likes>=5).
+       - filters: 根據主題 (感動: like_count>=2; 搞笑: like_count>=2; 財經: like_count>=2; 其他: min_replies>=5, min_likes>=2).
        - processing: emotion_focused_summary, humor_focused_summary, professional_summary, summarize, sentiment.
        - candidate_thread_ids: 10個候選ID.
        - top_thread_ids: 最終選定ID.
@@ -68,7 +68,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error("Grok 3 API key missing")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 10, "min_likes": 5},
+            "reply_limit": 75, "filters": {"min_replies": 5, "min_likes": 2},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": "Missing API key"
         }
@@ -93,7 +93,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error(f"Analysis failed: {str(e)}")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 10, "min_likes": 5},
+            "reply_limit": 75, "filters": {"min_replies": 5, "min_likes": 2},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": f"Analysis failed: {str(e)}"
         }
@@ -208,8 +208,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     post_limit = min(analysis.get("post_limit", 2), 10)
     reply_limit = min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
-    min_replies = filters.get("min_replies", 10)
-    min_likes = filters.get("min_likes", 5)
+    min_replies = filters.get("min_replies", 5)
+    min_likes = filters.get("min_likes", 2)
     top_thread_ids = analysis.get("top_thread_ids", [])
 
     logger.info(f"Filtering threads with min_replies={min_replies}, min_likes={min_likes}")
@@ -219,7 +219,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
 
     # 抓取帖子列表
     initial_threads = []
-    for page in range(1, 4):
+    for page in range(1, 6):
         result = await get_lihkg_topic_list(
             cat_id=cat_id, start_page=page, max_pages=1,
             request_counter=rate_limit_info["counter"], last_reset=rate_limit_info["last_reset"], rate_limit_until=rate_limit_info["until"]
@@ -227,17 +227,35 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info["counter"] = result.get("request_counter", rate_limit_info["counter"])
         rate_limit_info["last_reset"] = result.get("last_reset", rate_limit_info["last_reset"])
         rate_limit_info["until"] = result.get("rate_limit_until", rate_limit_info["until"])
-        initial_threads.extend(result.get("items", []))
-        logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(result.get('items', []))}")
-        if len(initial_threads) >= 90:
-            initial_threads = initial_threads[:90]
+        items = result.get("items", [])
+        initial_threads.extend(items)
+        logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(items)}")
+        if len(initial_threads) >= 150:
+            initial_threads = initial_threads[:150]
             break
 
-    filtered_items = [
-        item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
-    ]
+    # 調試帖子數據
+    if initial_threads:
+        logger.debug(f"Sample thread data: {[{'thread_id': t['thread_id'], 'no_of_reply': t.get('no_of_reply', 0), 'like_count': t.get('like_count', 0)} for t in initial_threads[:5]]}")
+    else:
+        logger.warning("No threads fetched from API")
+
+    filtered_items = []
+    for item in initial_threads:
+        try:
+            no_of_reply = int(item.get("no_of_reply", 0))
+            like_count = int(item.get("like_count", 0))
+            if no_of_reply >= min_replies and like_count >= min_likes:
+                filtered_items.append(item)
+            else:
+                logger.debug(f"Thread {item['thread_id']} filtered out: no_of_reply={no_of_reply}, like_count={like_count}")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid data for thread {item.get('thread_id', 'unknown')}: {str(e)}")
+            continue
+
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
+    if not filtered_items:
+        logger.warning(f"No threads meet criteria: min_replies={min_replies}, min_likes={min_likes}")
 
     # 更新緩存
     for item in initial_threads:
