@@ -2,7 +2,7 @@
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 包含數據處理邏輯（進階分析、緩存管理）和輔助函數。
 主要函數：
-- analyze_and_screen：分析問題並篩選帖子。
+- analyze_and_screen：分析問題，識別意圖，判定進階分析需求。
 - stream_grok3_response：生成流式回應。
 - process_user_question：處理用戶問題，抓取並分析帖子。
 - clean_html：清理 HTML 標籤。
@@ -59,7 +59,7 @@ def clean_html(text):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題並篩選 LIHKG 帖子。
+    分析用戶問題，識別意圖，篩選 LIHKG 帖子，判定是否需要進階分析。
     Args:
         user_query (str): 用戶問題。
         cat_name (str): 分類名稱。
@@ -70,7 +70,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         is_advanced (bool): 是否進行進階分析。
         conversation_context (list): 對話歷史。
     Returns:
-        dict: 分析結果，包含主題、篩選參數等。
+        dict: 分析結果，包含意圖、主題、篩選參數、進階分析需求等。
     """
     conversation_context = conversation_context or []
     prompt = f"""
@@ -84,20 +84,36 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 判斷問題意圖並分類：
-       - 若問題為自我介紹（如「你是誰？」「介紹你自己」），設置 direct_response=True，category_ids=[]，intent="self_introduction"，並跳過後續步驟。
-       - 若問題查詢數據類型（如「抓取什麼數據」「提供什麼資料」），設置 direct_response=True，category_ids=[]，intent="data_query"，並跳過後續步驟。
-       - 若問題無關 LIHKG 帖子（如「今天天氣如何？」），設置 direct_response=True，category_ids=[]，intent="general_query"。
-       - 若問題涉及 LIHKG 帖子（包含「帖子」「討論」「LIHKG」「吹水台」等關鍵詞，或要求分析帖子內容），設置 direct_response=False，intent="post_analysis"，繼續分析。
+    1. 判斷問題意圖並分類，根據語義和上下文：
+       - self_introduction：自我介紹（如「你是誰？」「介紹你自己」）。
+         - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，並跳過後續步驟。
+         - 示例：「你是誰？」「介紹一下 Grok」
+       - data_query：查詢數據類型（如「抓取什麼數據」「提供什麼資料」「能獲取哪些論壇信息」）。
+         - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，並跳過後續步驟。
+         - 示例：「你可以抓取到討論區的什麼數據？」「LIHKG 有什麼資料？」
+       - general_query：無關 LIHKG 帖子（如「今天天氣如何？」「1+1 等於多少？」）。
+         - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無關LIHKG問題"，並跳過後續步驟。
+         - 示例：「香港天氣如何？」「明天會下雨嗎？」
+       - post_analysis：涉及 LIHKG 帖子分析（包含「帖子」「討論」「LIHKG」「吹水台」等關鍵詞，或要求分析帖子內容）。
+         - 設置 direct_response=False，繼續分析。
+         - 示例：「分析吹水台搞笑帖子」「LIHKG 有什麼熱門討論？」
     2. 若 direct_response=False，識別主題（感動、搞笑、財經等），標記為 theme，根據問題和分類推斷。
-    3. 判斷意圖（總結、情緒分析、幽默總結、深入討論）。
+    3. 判斷具體意圖（總結、情緒分析、幽默總結、深入討論）。
     4. 確定帖子數量（post_limit，1-10）：
        - 廣泛問題（例如「有哪些搞笑話題」）需要更多帖子（5-10）。
        - 具體問題（例如「某事件討論」）需要較少帖子（1-3）。
        - 參考對話歷史調整數量。
-    5. {'檢查帖子是否達動態閾值（根據帖子熱度調整：like_count≥500或no_of_reply≥500，閾值60%；100≤like_count<500或100≤no_of_reply<500，閾值40%；其他，閾值20%），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
-       {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。'}
-    6. 設置參數：
+    5. 若 intent="post_analysis" 且提供 thread_data，檢查帖子是否達動態閾值：
+       - 熱度標準：
+         - 高熱度（like_count≥500 或 no_of_reply≥500）：閾值60%。
+         - 中熱度（100≤like_count<500 或 100≤no_of_reply<500）：閾值40%。
+         - 低熱度（其他）：閾值20%。
+       - 對每篇帖子，計算總頁數（total_pages = ceil(no_of_reply/25)），檢查 fetched_pages 是否達 target_pages（ceil(total_pages * 閾值））。
+       - 若任一帖子未達標，設置 needs_advanced_analysis=True，reason 記錄未達標帖子（如「帖子 X 僅抓取 Y/Z 頁，未達W%」）。
+    6. 篩選帖子：
+       - 若無標題，設置初始抓取（30-90個標題）。
+       - 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。
+    7. 設置參數：
        - direct_response：是否直接回應。
        - intent：問題意圖（self_introduction、data_query、general_query、post_analysis）。
        - theme：問題主題。
@@ -109,9 +125,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - processing：emotion_focused_summary、humor_focused_summary、professional_summary、summarize、sentiment。
        - candidate_thread_ids：10個候選ID。
        - top_thread_ids：最終選定ID（不多於 post_limit）。
+       - needs_advanced_analysis：是否需要進階分析。
+       - reason：進階分析的原因。
 
     輸出：
-    {"{ \"needs_advanced_analysis\": false, \"suggestions\": { \"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [] }, \"reason\": \"\" }" if is_advanced else "{ \"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"category_suggestion\": \"\" }"}
+    {{\"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"needs_advanced_analysis\": false, \"reason\": \"\"}}
     """
     
     try:
@@ -130,22 +148,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "processing": "summarize",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
-            "category_suggestion": "Missing API key"
-        } if not is_advanced else {
             "needs_advanced_analysis": False,
-            "suggestions": {
-                "direct_response": False,
-                "intent": "unknown",
-                "theme": "未知",
-                "category_ids": [cat_id],
-                "data_type": "both",
-                "post_limit": 3,
-                "reply_limit": 200,
-                "filters": {"min_replies": 20, "min_likes": 10},
-                "processing": "summarize",
-                "candidate_thread_ids": [],
-                "top_thread_ids": []
-            },
             "reason": "Missing API key"
         }
     
@@ -158,7 +161,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     payload = {
         "model": "grok-3-beta",
         "messages": messages,
-        "max_tokens": 600,
+        "max_tokens": 200,  # 降低 max_tokens，加快意圖識別
         "temperature": 0.7
     }
     
@@ -168,12 +171,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                if is_advanced:
-                    result["suggestions"]["category_ids"] = [cat_id] if not result["suggestions"].get("direct_response", False) else []
-                    result["suggestions"]["intent"] = result["suggestions"].get("intent", "unknown")
-                else:
-                    result["category_ids"] = [cat_id] if not result.get("direct_response", False) else []
-                    result["intent"] = result.get("intent", "unknown")
+                result["category_ids"] = [cat_id] if not result.get("direct_response", False) else []
+                result["intent"] = result.get("intent", "unknown")
+                result["needs_advanced_analysis"] = result.get("needs_advanced_analysis", False)
+                result["reason"] = result.get("reason", "")
                 response_length = len(data["choices"][0]["message"]["content"])
                 duration = time.time() - start_time
                 logger.info(
@@ -184,11 +185,13 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "payload": payload,
                         "status": "success",
                         "response_length": response_length,
-                        "duration_seconds": duration
+                        "duration_seconds": duration,
+                        "intent": result["intent"],
+                        "needs_advanced_analysis": result["needs_advanced_analysis"]
                     }, ensure_ascii=False)
                 )
                 return result
-    except Exception as e:
+    except aiohttp.ClientError as e:
         response_length = 0
         duration = time.time() - start_time
         logger.error(
@@ -215,26 +218,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "processing": "summarize",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
-            "category_suggestion": f"Analysis failed: {str(e)}"
-        } if not is_advanced else {
             "needs_advanced_analysis": False,
-            "suggestions": {
-                "direct_response": True,
-                "intent": "general_query",
-                "theme": "未知",
-                "category_ids": [],
-                "data_type": "both",
-                "post_limit": 3,
-                "reply_limit": 200,
-                "filters": {"min_replies": 20, "min_likes": 10},
-                "processing": "summarize",
-                "candidate_thread_ids": [],
-                "top_thread_ids": []
-            },
             "reason": f"Analysis failed: {str(e)}"
         }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, conversation_context=None):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, conversation_context=None, needs_advanced_analysis=False, reason=""):
     """
     使用 Grok 3 API 生成流式回應。
     Args:
@@ -243,6 +231,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         thread_data (dict): 帖子回覆數據。
         processing (str): 處理類型（總結、情緒分析等）。
         conversation_context (list): 對話歷史。
+        needs_advanced_analysis (bool): 是否需要進階分析（從 analyze_and_screen 傳遞）。
+        reason (str): 進階分析原因（從 analyze_and_screen 傳遞）。
     Yields:
         str: 回應片段。
     """
@@ -267,23 +257,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         } for tid, data in thread_data.items()
     }
     
-    needs_advanced_analysis = False
-    reason = ""
-    for data in filtered_thread_data.values():
-        total_pages = (data["no_of_reply"] + 24) // 25
-        like_count = data.get("like_count", 0)
-        no_of_reply = data.get("no_of_reply", 0)
-        if like_count >= 500 or no_of_reply >= 500:
-            threshold = 0.6
-        elif like_count >= 100 or no_of_reply >= 100:
-            threshold = 0.4
-        else:
-            threshold = 0.2
-        target_pages = math.ceil(total_pages * threshold)
-        if len(data["fetched_pages"]) < target_pages:
-            needs_advanced_analysis = True
-            reason += f"帖子 {data['thread_id']} 僅抓取 {len(data['fetched_pages'])}/{total_pages} 頁，未達{int(threshold*100)}%。"
-    
     prompt_templates = {
         "emotion_focused_summary": f"""
         你是 LIHKG 論壇的集體意見代表，總結感動或溫馨帖子，300-500字。問題：{user_query}
@@ -291,7 +264,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         聚焦感動情緒，引用高關注回覆（like_count≥5），語氣適配分類（吹水台輕鬆，創意台溫馨）。
-        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：總結
         """,
         "humor_focused_summary": f"""
         你是 LIHKG 論壇的集體意見代表，總結幽默或搞笑帖子，300-500字。問題：{user_query}
@@ -299,7 +272,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         聚焦幽默情緒，引用高關注回覆（like_count≥5），語氣適配分類（吹水台輕鬆，成人台大膽）。
-        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：總結
         """,
         "professional_summary": f"""
         你是 LIHKG 論壇的集體意見代表，總結財經或時事帖子，300-500字。問題：{user_query}
@@ -307,7 +280,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         聚焦專業觀點，引用高關注回覆（like_count≥5），語氣適配分類（財經台專業，時事台嚴肅）。
-        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：總結
         """,
         "summarize": f"""
         你是 LIHKG 論壇的集體意見代表，總結帖子，300-500字。問題：{user_query}
@@ -315,7 +288,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         引用高關注回覆（like_count≥5），語氣適配分類。
-        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：總結
         """,
         "sentiment": f"""
         你是 LIHKG 論壇的集體意見代表，分析帖子情緒。問題：{user_query}
@@ -323,7 +296,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         判斷情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
-        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...
         """
     }
     
@@ -344,7 +317,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         引用高關注回覆（like_count≥5），語氣適配分類。
-        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        輸出：總結
         """)
     
     if len(prompt) > GROK3_TOKEN_LIMIT:
@@ -382,7 +355,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
                                 try:
                                     chunk = json.loads(line_str[6:])
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content and "進階分析建議：" not in content:
+                                    if content:
                                         if "###" in content:
                                             logger.warning(f"Detected ### in response, retrying with simplified prompt")
                                             raise ValueError("Content moderation detected")
@@ -391,6 +364,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
                                 except json.JSONDecodeError:
                                     logger.warning("JSON decode error in stream chunk")
                                     continue
+                    # 在回應末尾附加進階分析建議（若需要）
+                    if needs_advanced_analysis and metadata and filtered_thread_data:
+                        yield f"\n建議：為確保分析全面，建議抓取更多帖子頁數。{reason}\n"
                     duration = time.time() - start_time
                     logger.info(
                         json.dumps({
@@ -447,6 +423,30 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     Returns:
         dict: 處理結果，包含帖子數據、速率限制信息等。
     """
+    # 進行問題分析與意圖識別
+    analysis = await analyze_and_screen(
+        user_query=user_question,
+        cat_name=selected_cat,
+        cat_id=cat_id,
+        thread_titles=None,
+        metadata=None,
+        thread_data=previous_thread_data,
+        is_advanced=is_advanced,
+        conversation_context=conversation_context
+    )
+    
+    # 若 direct_response=True，跳過數據抓取
+    if analysis.get("direct_response", True):
+        return {
+            "selected_cat": selected_cat,
+            "thread_data": [],
+            "rate_limit_info": [],
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
+        }
+    
     post_limit = min(analysis.get("post_limit", 3), 10)
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
@@ -540,7 +540,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": last_reset,
-            "rate_limit_until": rate_limit_until
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
         }
     
     initial_threads = []
@@ -697,5 +698,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
-        "rate_limit_until": rate_limit_until
+        "rate_limit_until": rate_limit_until,
+        "analysis": analysis
     }
