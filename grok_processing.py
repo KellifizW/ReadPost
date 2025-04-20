@@ -119,7 +119,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
 
     prompt_templates = {
         "emotion_focused_summary": f"""
-        總結 LIHKG 感動或溫馨帖子，300-500字。問題：{user_query}
+        總結 LIHKG 感動或溫馨帖子, 300-500字。問題：{user_query}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         聚焦感動情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，創意台溫馨）。
