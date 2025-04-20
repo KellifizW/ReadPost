@@ -15,6 +15,7 @@ import pytz
 import nest_asyncio
 import logging
 import json
+import traceback
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 from lihkg_api import get_category_name
 
@@ -22,6 +23,7 @@ nest_asyncio.apply()
 logger = logging.getLogger(__name__)
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
+# 配置日誌
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -30,6 +32,7 @@ logging.basicConfig(
 async def main():
     st.title("LIHKG 聊天介面")
 
+    # 初始化 session_state
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "thread_cache" not in st.session_state:
@@ -52,11 +55,13 @@ async def main():
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
     cat_id = cat_id_map[selected_cat]
     
+    # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
     st.markdown(f"- 請求計數: {st.session_state.request_counter}")
     st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
     st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
     
+    # 顯示聊天記錄
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
             st.markdown(chat["question"])
@@ -65,7 +70,7 @@ async def main():
     
     user_question = st.chat_input("請輸入 LIHKG 話題（例如：有哪些搞笑話題？）")
     if user_question and not st.session_state.awaiting_response:
-        logger.info(f"User query: user_question='{user_question}', category='{selected_cat}', cat_id={cat_id}")
+        logger.info(f"User query: question='{user_question}', category='{selected_cat}', cat_id={cat_id}")
         with st.chat_message("user"):
             st.markdown(user_question)
         st.session_state.awaiting_response = True
@@ -86,13 +91,12 @@ async def main():
                     st.session_state.thread_cache = {}
                     st.session_state.last_user_query = user_question
                 
-                logger.info(f"Calling analyze_and_screen: user_query='{user_question}', cat_name='{selected_cat}', cat_id={cat_id}")
+                logger.info(f"Analyzing query: question='{user_question}', category='{selected_cat}', cat_id={cat_id}")
                 analysis = await analyze_and_screen(user_query=user_question, cat_name=selected_cat, cat_id=cat_id)
-                logger.info(f"analyze_and_screen result: {json.dumps(analysis, ensure_ascii=False)}")
                 
                 if not analysis.get("category_ids"):
                     response = ""
-                    logger.info(f"No LIHKG category_ids, falling back to stream_grok3_response: processing='direct_answer'")
+                    logger.info(f"No LIHKG category_ids, generating direct answer")
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(user_query=user_question, metadata=[], thread_data={}, processing="direct_answer", strategy=analysis.get("strategy", {})):
@@ -100,10 +104,10 @@ async def main():
                             grok_container.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
                     st.session_state.awaiting_response = False
-                    logger.info(f"Response generated: response_length={len(response)}")
+                    logger.info(f"Direct answer generated: response_length={len(response)}")
                     return
                 
-                logger.info(f"Calling process_user_question: user_question='{user_question}', selected_cat='{selected_cat}', cat_id={cat_id}")
+                logger.info(f"Processing query: question='{user_question}', category='{selected_cat}', cat_id={cat_id}")
                 result = await process_user_question(
                     user_question=user_question, selected_cat=selected_cat, cat_id=cat_id, analysis=analysis,
                     request_counter=st.session_state.request_counter, last_reset=st.session_state.last_reset,
@@ -114,7 +118,7 @@ async def main():
                 st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
                 st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
                 
-                thread_data = result.get("thread_data", [])
+                thread_data = result.get("thread_data", []) or []
                 rate_limit_info = result.get("rate_limit_info", [])
                 question_cat = result.get("selected_cat", selected_cat)
                 
@@ -124,7 +128,7 @@ async def main():
                         st.markdown(answer)
                     st.session_state.chat_history[-1]["answer"] = answer
                     st.session_state.awaiting_response = False
-                    logger.warning(f"No threads found: answer='{answer}'")
+                    logger.info(f"No threads found, direct answer: answer_length={len(answer)}")
                     return
                 
                 response = ""
@@ -137,15 +141,16 @@ async def main():
                         {
                             "thread_id": item["thread_id"], "title": item["title"],
                             "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0")
-                        } for item in thread_data
+                        } for item in thread_data if isinstance(item, dict) and "thread_id" in item
                     ]
                     for meta in metadata:
                         response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                     response += "\n"
+                    logger.info(f"Threads processed: category={question_cat}, thread_count={len(thread_data)}, request_count={len(rate_limit_info)}")
                 
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
-                    logger.info(f"Calling stream_grok3_response: processing='{strategy.get('processing', 'summarize')}', thread_count={len(thread_data)}")
+                    logger.info(f"Generating response: processing='{strategy.get('processing', 'summarize')}', thread_count={len(thread_data)}")
                     async for chunk in stream_grok3_response(
                         user_query=user_question, metadata=metadata, thread_data={item["thread_id"]: item for item in thread_data},
                         processing=strategy.get("processing", "summarize"), strategy=strategy
@@ -153,14 +158,12 @@ async def main():
                         response += chunk
                         grok_container.markdown(response)
                 
-                logger.info(f"Processed: category={question_cat}, threads={len(thread_data)}, rate_limit_info={rate_limit_info}")
-                
-                logger.info(f"Calling analyze_and_screen for advanced analysis: is_advanced=True")
+                logger.info(f"Advanced analysis: question='{user_question}', category='{question_cat}', thread_count={len(thread_data)}")
                 analysis_advanced = await analyze_and_screen(
                     user_query=user_question, cat_name=question_cat, cat_id=cat_id, thread_titles=None,
                     metadata=metadata, thread_data={item["thread_id"]: item for item in thread_data}, is_advanced=True
                 )
-                logger.info(f"Advanced analysis result: {json.dumps(analysis_advanced, ensure_ascii=False)}")
+                
                 if analysis_advanced.get("needs_advanced_analysis"):
                     logger.info(f"Advanced analysis triggered: reason={analysis_advanced.get('reason', 'Unknown')}")
                     result = await process_user_question(
@@ -174,9 +177,9 @@ async def main():
                     st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
                     st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
                     
-                    thread_data_advanced = result.get("thread_data", [])
+                    thread_data_advanced = result.get("thread_data", []) or []
                     rate_limit_info.extend(result.get("rate_limit_info", []))
-                    logger.info(f"Advanced analysis completed: threads={len(thread_data_advanced)}")
+                    logger.info(f"Advanced analysis completed: thread_count={len(thread_data_advanced)}")
                     
                     if thread_data_advanced:
                         for item in thread_data_advanced:
@@ -187,13 +190,13 @@ async def main():
                             {
                                 "thread_id": item["thread_id"], "title": item["title"],
                                 "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0")
-                            } for item in thread_data_advanced
+                            } for item in thread_data_advanced if isinstance(item, dict) and "thread_id" in item
                         ]
                         response += f"\n\n進階分析結果（{len(thread_data_advanced)}個帖子）：\n\n"
                         for meta in metadata_advanced:
                             response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                         response += "\n"
-                        logger.info(f"Calling stream_grok3_response for advanced analysis: thread_count={len(thread_data_advanced)}")
+                        logger.info(f"Generating advanced response: thread_count={len(thread_data_advanced)}")
                         async for chunk in stream_grok3_response(
                             user_query=user_question, metadata=metadata_advanced, thread_data={item["thread_id"]: item for item in thread_data_advanced},
                             processing=strategy.get("processing", "summarize"), strategy=strategy
@@ -208,14 +211,14 @@ async def main():
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.last_user_query = user_question
                 st.session_state.awaiting_response = False
-                logger.info(f"Query completed: response_length={len(response)}")
+                logger.info(f"Query completed: response_length={len(response)}, thread_count={len(thread_data)}")
             
             except Exception as e:
-                error_message = f"處理失敗：{str(e)}"
-                logger.error(f"Processing error: user_question='{user_question}', error={str(e)}")
+                error_message = f"處理失敗：{str(e)}\n堆棧追蹤：\n{traceback.format_exc()}"
+                logger.error(f"Processing error: question='{user_question}', error={error_message}")
                 with st.chat_message("assistant"):
-                    st.markdown(error_message)
-                st.session_state.chat_history[-1]["answer"] = error_message
+                    st.markdown(f"處理失敗：{str(e)}")
+                st.session_state.chat_history[-1]["answer"] = f"處理失敗：{str(e)}"
                 st.session_state.awaiting_response = False
     
     if st.session_state.awaiting_response and st.session_state.chat_history[-1]["answer"]:
@@ -237,12 +240,12 @@ async def main():
                 st.session_state.awaiting_response = False
             elif response_input.isdigit():
                 thread_id = response_input
-                thread_data = st.session_state.chat_history[-1].get("thread_data", [])
+                thread_data = st.session_state.chat_history[-1].get("thread_data", []) or []
                 if thread_id in [str(item["thread_id"]) for item in thread_data]:
                     response = f"帖子 ID: {thread_id}\n\n"
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
-                        logger.info(f"Calling stream_grok3_response for thread_id={thread_id}: processing='summarize'")
+                        logger.info(f"Generating response for thread_id={thread_id}")
                         async for chunk in stream_grok3_response(
                             user_query=st.session_state.last_user_query,
                             metadata=[item for item in thread_data if str(item["thread_id"]) == thread_id],
