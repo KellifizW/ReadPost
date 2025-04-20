@@ -99,7 +99,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing):
     """
-    使用 Grok 3 API 生成流式回應。
+    使用 Grok 3 API 生成流式回應.
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
