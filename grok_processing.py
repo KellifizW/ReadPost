@@ -413,15 +413,22 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     filtered_items = [
         item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and (
-            not keywords or
-            any(keyword.lower() in item["title"].lower() for keyword in keywords) or
-            any(re.search(r'\(\d+\)|搞笑|哈哈|笑死|好笑|迷因', item["title"], re.IGNORECASE))
-        ) and "thread_id" in item
+        if item.get("no_of_reply", 0) >= min_replies and
+           item.get("title") is not None and isinstance(item.get("title"), str) and
+           (
+               not keywords or
+               any(keyword.lower() in item["title"].lower() for keyword in keywords) or
+               re.search(r'\(\d+\)|搞笑|哈哈|笑死|好笑|迷因', item["title"], re.IGNORECASE)
+           ) and "thread_id" in item
     ] if initial_threads else []
     filtered_items.sort(key=lambda x: (x.get("no_of_reply", 0), x.get("last_reply_time", 0)), reverse=True)
     logger.info(f"Filtered threads: cat_id={cat_id}, initial_count={len(initial_threads)}, filtered_count={len(filtered_items)}")
     logger.debug(f"Filtered thread IDs: {[item['thread_id'] for item in filtered_items]}")
+    
+    # 記錄無效的 item
+    for item in initial_threads:
+        if item.get("title") is None or not isinstance(item.get("title"), str):
+            logger.warning(f"Invalid thread title: thread_id={item.get('thread_id', 'unknown')}, title={item.get('title')}")
     
     for item in initial_threads:
         if "thread_id" not in item:
@@ -445,7 +452,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     if not filtered_items:
         logger.warning(f"No threads passed initial filter for cat_id={cat_id}. Falling back to top reply count threads.")
         filtered_items = sorted(
-            [item for item in initial_threads if item.get("no_of_reply", 0) >= min_replies and "thread_id" in item],
+            [item for item in initial_threads if item.get("no_of_reply", 0) >= min_replies and "thread_id" in item and item.get("title") is not None and isinstance(item.get("title"), str)],
             key=lambda x: (x.get("no_of_reply", 0), x.get("last_reply_time", 0)),
             reverse=True
         )[:post_limit] if initial_threads else []
@@ -475,7 +482,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         metadata = [
             {"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0)}
             for item in sorted(initial_threads, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:5]
-            if "thread_id" in item
+            if "thread_id" in item and item.get("title") is not None and isinstance(item.get("title"), str)
         ] if initial_threads else []
         direct_answer = ""
         async for content in stream_grok3_response(
