@@ -2,7 +2,7 @@
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 包含數據處理邏輯（進階分析、緩存管理）和輔助函數。
 主要函數：
-- analyze_and_screen：分析問題，識別細粒度意圖，判定進階分析需求。
+- analyze_and_screen：分析問題，識別細粒度意圖，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，根據意圖動態選擇模板。
 - process_user_question：處理用戶問題，抓取並分析帖子。
 - clean_html：清理 HTML 標籤。
@@ -61,7 +61,7 @@ def clean_html(text):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，識別細粒度意圖，篩選 LIHKG 帖子，判定是否需要進階分析。
+    分析用戶問題，識別細粒度意圖，動態設置篩選條件。
     Args:
         user_query (str): 用戶問題。
         cat_name (str): 分類名稱。
@@ -89,15 +89,20 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     1. 判斷問題意圖並分類，根據語義和上下文，選擇以下之一：
        - list_titles：列出帖子標題。
          - 設置 direct_response=True，category_ids=[cat_id]，needs_advanced_analysis=False，reason="僅需標題列表"，data_type="title"，processing="list"。
-         - 示例：「列出帖文標題」「有哪些帖子？」「可以看到什麼標題？」
+         - 默認 filters：min_replies=0，min_likes=0。
+         - 若問題包含「熱門」「高人氣」，設置 filters：min_replies=20，min_likes=10。
+         - 若問題包含「搞笑」「感動」「財經」，設置 theme 並調整 filters（搞笑：min_likes=10；感動：min_likes=5；財經：min_likes=10）。
+         - 示例：「列出帖文標題」「有哪些帖子？」「列出熱門標題」「列出搞笑帖子標題」
        - list_data：查詢可抓取數據類型。
          - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，data_type="none"，processing="list"。
          - 示例：「抓取什麼數據？」「提供什麼資料？」「能獲取哪些論壇信息？」
        - summarize_posts：總結帖子內容。
          - 設置 direct_response=False，category_ids=[cat_id]，繼續分析，processing="summarize"。
+         - 設置 filters：min_replies=20，min_likes=10。
          - 示例：「分析吹水台搞笑帖子」「總結 LIHKG 熱門討論」
        - analyze_sentiment：分析帖子情緒。
          - 設置 direct_response=False，category_ids=[cat_id]，繼續分析，processing="sentiment"。
+         - 設置 filters：min_replies=20，min_likes=10。
          - 示例：「吹水台帖子情緒如何？」「討論區的情緒分佈？」
        - self_introduction：自我介紹。
          - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，data_type="none"，processing="introduce"。
@@ -123,12 +128,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     6. 設置參數：
        - direct_response：是否直接回應。
        - intent：問題意圖。
-       - theme：問題主題。
+       - theme：問題主題（默認為空）。
        - category_ids：分類ID列表。
        - data_type："title"、"replies"、"both" 或 "none"。
-       - post_limit：建議的帖子數量。
+       - post_limit：建議的帖子數量（默認5）。
        - reply_limit：{200 if is_advanced else 75}。
-       - filters：根據主題（感動：like_count≥5；搞笑：like_count≥10；財經：like_count≥10；其他：min_replies≥20，min_likes≥10）。
+       - filters：根據意圖和主題設置。
        - processing：list、summarize、sentiment、introduce、general。
        - candidate_thread_ids：10個候選ID。
        - top_thread_ids：最終選定ID（不多於 post_limit）。
@@ -136,7 +141,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - reason：進階分析的原因。
 
     輸出：
-    {{\"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"needs_advanced_analysis\": false, \"reason\": \"\"}}
+    {{\"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 5, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"needs_advanced_analysis\": false, \"reason\": \"\"}}
     """
     
     try:
@@ -146,11 +151,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         return {
             "direct_response": False,
             "intent": "unknown",
-            "theme": "未知",
+            "theme": "",
             "category_ids": [cat_id],
             "data_type": "both",
-            "post_limit": 3,
-            "reply_limit": 200 if is_advanced else 75,
+            "post_limit": 5,
+            "reply_limit": 75,
             "filters": {"min_replies": 20, "min_likes": 10},
             "processing": "summarize",
             "candidate_thread_ids": [],
@@ -178,10 +183,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                result["category_ids"] = [cat_id] if not result.get("direct_response", False) and result.get("intent") != "list_titles" else [cat_id] if result.get("intent") == "list_titles" else []
+                result["category_ids"] = [cat_id] if result.get("intent") == "list_titles" or not result.get("direct_response", False) else []
                 result["intent"] = result.get("intent", "unknown")
                 result["needs_advanced_analysis"] = result.get("needs_advanced_analysis", False)
                 result["reason"] = result.get("reason", "")
+                result["post_limit"] = result.get("post_limit", 5)
+                result["filters"] = result.get("filters", {"min_replies": 0, "min_likes": 0})
                 response_length = len(data["choices"][0]["message"]["content"])
                 duration = time.time() - start_time
                 logger.info(
@@ -194,7 +201,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "response_length": response_length,
                         "duration_seconds": duration,
                         "intent": result["intent"],
-                        "needs_advanced_analysis": result["needs_advanced_analysis"]
+                        "needs_advanced_analysis": result["needs_advanced_analysis"],
+                        "filters": result["filters"]
                     }, ensure_ascii=False),
                     extra={"function": "analyze_and_screen"}
                 )
@@ -220,12 +228,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         return {
             "direct_response": True,
             "intent": "general_query",
-            "theme": "未知",
+            "theme": "",
             "category_ids": [],
-            "data_type": "both",
-            "post_limit": 3,
-            "reply_limit": 200 if is_advanced else 75,
-            "filters": {"min_replies": 20, "min_likes": 10},
+            "data_type": "none",
+            "post_limit": 5,
+            "reply_limit": 75,
+            "filters": {"min_replies": 0, "min_likes": 0},
             "processing": "general",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
@@ -233,7 +241,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "reason": f"Analysis failed: {str(e)}"
         }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, conversation_context=None, needs_advanced_analysis=False, reason=""):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖動態選擇模板。
     Args:
@@ -244,10 +252,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         conversation_context (list): 對話歷史。
         needs_advanced_analysis (bool): 是否需要進階分析。
         reason (str): 進階分析原因。
+        filters (dict): 篩選條件。
     Yields:
         str: 回應片段。
     """
     conversation_context = conversation_context or []
+    filters = filters or {"min_replies": 0, "min_likes": 0}
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -273,9 +283,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         你是 LIHKG 論壇的數據助手，以繁體中文回答，語氣簡潔清晰。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子元數據：{json.dumps(metadata, ensure_ascii=False)}
+        篩選條件：{json.dumps(filters, ensure_ascii=False)}
         僅列出帖子標題，格式為：
         - 帖子 ID: [thread_id] 標題: [title]
-        若無帖子，回答：「目前無可用帖子標題。」
+        若無符合條件的帖子，回答：「無符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」並列出最多5個最新帖子標題（無篩選）。
+        若無任何帖子，回答：「目前無可用帖子標題。」
         輸出：標題列表
         """,
         "summarize": f"""
@@ -484,11 +496,29 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                         initial_threads = initial_threads[:90]
                         break
                 
+                filters = analysis.get("filters", {"min_replies": 0, "min_likes": 0})
+                min_replies = filters.get("min_replies", 0)
+                min_likes = filters.get("min_likes", 0)
+                previous_thread_ids = previous_thread_ids or []
+                
                 filtered_items = [
                     item for item in initial_threads
-                    if str(item["thread_id"]) not in (previous_thread_ids or [])
+                    if item.get("no_of_reply", 0) >= min_replies
+                    and int(item.get("like_count", 0)) >= min_likes
+                    and str(item["thread_id"]) not in previous_thread_ids
                 ]
+                
                 post_limit = min(analysis.get("post_limit", 5), 10)
+                if not filtered_items:
+                    logger.warning(
+                        f"No threads meet filters: min_replies={min_replies}, min_likes={min_likes}, trying without filters",
+                        extra={"function": "process_user_question"}
+                    )
+                    filtered_items = [
+                        item for item in initial_threads
+                        if str(item["thread_id"]) not in previous_thread_ids
+                    ]
+                
                 thread_data = [
                     {
                         "thread_id": str(item["thread_id"]),
@@ -508,7 +538,18 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                             "data": item,
                             "timestamp": time.time()
                         }
-                logger.info(f"Prepared {len(thread_data)} threads for list_titles", extra={"function": "process_user_question"})
+                logger.info(
+                    json.dumps({
+                        "event": "thread_preparation",
+                        "function": "process_user_question",
+                        "query": user_question,
+                        "initial_threads": len(initial_threads),
+                        "filtered_items": len(filtered_items),
+                        "thread_data": len(thread_data),
+                        "filters": filters
+                    }, ensure_ascii=False),
+                    extra={"function": "process_user_question"}
+                )
             
             return {
                 "selected_cat": selected_cat,
@@ -522,9 +563,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         
         post_limit = min(analysis.get("post_limit", 3), 10)
         reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
-        filters = analysis.get("filters", {})
-        min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)
-        min_likes = 10 if analysis.get("theme") == "搞笑" else filters.get("min_likes", 20)
+        filters = analysis.get("filters", {"min_replies": 20, "min_likes": 10})
+        min_replies = filters.get("min_replies", 20)
+        min_likes = filters.get("min_likes", 10)
         candidate_thread_ids = analysis.get("candidate_thread_ids", [])
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         
@@ -637,12 +678,25 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 initial_threads = initial_threads[:90]
                 break
         
+        filters = analysis.get("filters", {"min_replies": 20, "min_likes": 10})
+        min_replies = filters.get("min_replies", 20)
+        min_likes = filters.get("min_likes", 10)
         filtered_items = [
             item for item in initial_threads
             if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
             and str(item["thread_id"]) not in previous_thread_ids
         ]
-        logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}, excluded: {previous_thread_ids}", extra={"function": "process_user_question"})
+        logger.info(
+            json.dumps({
+                "event": "thread_filtering",
+                "function": "process_user_question",
+                "initial_threads": len(initial_threads),
+                "filtered_items": len(filtered_items),
+                "filters": filters,
+                "excluded_thread_ids": previous_thread_ids
+            }, ensure_ascii=False),
+            extra={"function": "process_user_question"}
+        )
         
         for item in initial_threads:
             thread_id = str(item["thread_id"])
