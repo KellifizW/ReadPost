@@ -43,10 +43,6 @@ API_TIMEOUT = 30  # 秒
 def clean_html(text):
     """
     清理 HTML 標籤，規範化文本。
-    Args:
-        text (str): 包含 HTML 的文本。
-    Returns:
-        str: 清理後的純文本。
     """
     if not isinstance(text, str):
         text = str(text)
@@ -62,21 +58,10 @@ def clean_html(text):
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件。
-    Args:
-        user_query (str): 用戶問題。
-        cat_name (str): 分類名稱。
-        cat_id (str): 分類 ID。
-        thread_titles (list): 帖子標題列表。
-        metadata (list): 帖子元數據。
-        thread_data (dict): 帖子回覆數據。
-        is_advanced (bool): 是否進行進階分析。
-        conversation_context (list): 對話歷史。
-    Returns:
-        dict: 分析結果，包含意圖、主題、篩選參數、進階分析需求等。
     """
     conversation_context = conversation_context or []
     prompt = f"""
-    你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣（例如吹水台輕鬆幽默，財經台專業嚴謹）。輸出 JSON。
+    你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣。輸出 JSON。
 
     問題：{user_query}
     分類：{cat_name}（cat_id={cat_id})
@@ -86,59 +71,20 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 判斷問題意圖並分類，根據語義和上下文，選擇以下之一：
+    1. 判斷問題意圖並分類，選擇以下之一：
        - list_titles：列出帖子標題。
-         - 設置 direct_response=True，category_ids=[cat_id]，needs_advanced_analysis=False，reason="僅需標題列表"，data_type="title"，processing="list"。
-         - 默認 filters：min_replies=0，min_likes=0。
-         - 若問題包含「熱門」「高人氣」，設置 filters：min_replies=20，min_likes=10。
-         - 若問題包含「搞笑」「感動」「財經」，設置 theme 並調整 filters（搞笑：min_likes=10；感動：min_likes=5；財經：min_likes=10）。
-         - 示例：「列出帖文標題」「有哪些帖子？」「列出熱門標題」「列出搞笑帖子標題」
        - list_data：查詢可抓取數據類型。
-         - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，data_type="none"，processing="list"。
-         - 示例：「抓取什麼數據？」「提供什麼資料？」「能獲取哪些論壇信息？」
        - summarize_posts：總結帖子內容。
-         - 設置 direct_response=False，category_ids=[cat_id]，繼續分析，processing="summarize"。
-         - 設置 filters：min_replies=20，min_likes=10。
-         - 示例：「分析吹水台搞笑帖子」「總結 LIHKG 熱門討論」
        - analyze_sentiment：分析帖子情緒。
-         - 設置 direct_response=False，category_ids=[cat_id]，繼續分析，processing="sentiment"。
-         - 設置 filters：min_replies=20，min_likes=10。
-         - 示例：「吹水台帖子情緒如何？」「討論區的情緒分佈？」
-       - general_query：一般問題（包括自我介紹或無關 LIHKG 問題）。
-         - 設置 direct_response=True，category_ids=[]，needs_advanced_analysis=False，reason="無需帖子分析"，data_type="none"，processing="general"。
-         - 示例：「你是誰？」「香港天氣如何？」「1+1 等於多少？」
-    2. 若 direct_response=False，識別主題（感動、搞笑、財經等），標記為 theme，根據問題和分類推斷。
-    3. 確定帖子數量（post_limit，1-10）：
-       - 廣泛問題（例如「有哪些搞笑話題」）需要更多帖子（5-10）。
-       - 具體問題（例如「某事件討論」）需要較少帖子（1-3）。
-       - 參考對話歷史調整數量。
-    4. 若 intent in ["summarize_posts", "analyze_sentiment"] 且提供 thread_data，檢查帖子是否達動態閾值：
-       - 熱度標準：
-         - 高熱度（like_count≥500 或 no_of_reply≥500）：閾值60%。
-         - 中熱度（100≤like_count<500 或 100≤no_of_reply<500）：閾值40%。
-         - 低熱度（其他）：閾值20%。
-       - 對每篇帖子，計算總頁數（total_pages = ceil(no_of_reply/25)），檢查 fetched_pages 是否達 target_pages（ceil(total_pages * 閾值））。
-       - 若任一帖子未達標，設置 needs_advanced_analysis=True，reason 記錄未達標帖子（如「帖子 X 僅抓取 Y/Z 頁，未達W%」）。
-    5. 篩選帖子：
-       - 若 intent="list_titles" 或 direct_response=False，設置初始抓取（30-90個標題）。
-       - 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。
-    6. 設置參數：
-       - direct_response：是否直接回應。
-       - intent：問題意圖。
-       - theme：問題主題（默認為空）。
-       - category_ids：分類ID列表。
-       - data_type："title"、"replies"、"both" 或 "none"。
-       - post_limit：建議的帖子數量（默認5）。
-       - reply_limit：{200 if is_advanced else 75}。
-       - filters：根據意圖和主題設置。
-       - processing：list、summarize、sentiment、general。
-       - candidate_thread_ids：10個候選ID。
-       - top_thread_ids：最終選定ID（不多於 post_limit）。
-       - needs_advanced_analysis：是否需要進階分析。
-       - reason：進階分析的原因。
+       - general_query：一般問題。
+    2. 若 direct_response=False，識別主題（感動、搞笑、財經等），標記為 theme。
+    3. 確定帖子數量（post_limit，1-10）。
+    4. 若 intent in ["summarize_posts", "analyze_sentiment"] 且提供 thread_data，檢查帖子是否達動態閾值。
+    5. 篩選帖子，設置初始抓取（30-90個標題）。
+    6. 設置參數：direct_response, intent, theme, category_ids, data_type, post_limit, reply_limit, filters, processing, candidate_thread_ids, top_thread_ids, needs_advanced_analysis, reason。
 
     輸出：
-    {{\"direct_response\": false, \"intent\": \"\", \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 5, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"needs_advanced_analysis\": false, \"reason\": \"\"}}
+    {{"direct_response": false, "intent": "", "theme": "", "category_ids": [], "data_type": "", "post_limit": 5, "reply_limit": 0, "filters": {{}}, "processing": "", "candidate_thread_ids": [], "top_thread_ids": [], "needs_advanced_analysis": false, "reason": ""}}
     """
     
     try:
@@ -163,7 +109,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。無論問題類型，始終以 LIHKG 集體意見代表身份為基礎思考，語氣適配所選分類（例如吹水台輕鬆幽默，財經台專業嚴謹）。若問題無關 LIHKG，簡短提及身份後提供直接回應。若涉及 LIHKG 數據，僅基於提供數據回答。"},
+        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。"},
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
@@ -193,7 +139,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "event": "grok3_api_call",
                         "function": "analyze_and_screen",
                         "query": user_query,
-                        "payload": payload,
                         "status": "success",
                         "response_length": response_length,
                         "duration_seconds": duration,
@@ -212,11 +157,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "event": "grok3_api_call",
                 "function": "analyze_and_screen",
                 "query": user_query,
-                "payload": payload,
                 "status": "failed",
                 "error_type": type(e).__name__,
                 "error": str(e),
-                "stack_trace": traceback.format_exc(),
                 "response_length": response_length,
                 "duration_seconds": duration
             }, ensure_ascii=False),
@@ -241,22 +184,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
-    Args:
-        user_query (str): 用戶問題。
-        metadata (list): 帖子元數據。
-        thread_data (dict): 帖子回覆數據。
-        processing (str): 處理類型（list、summarize、sentiment 等）。
-        selected_cat (str): 所選分類。
-        conversation_context (list): 對話歷史。
-        needs_advanced_analysis (bool): 是否需要進階分析。
-        reason (str): 進階分析原因。
-        filters (dict): 篩選條件。
-    Yields:
-        str: 回應片段。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 0, "min_likes": 0}
-    tone = "輕鬆幽默" if selected_cat == "吹水台" else "專業嚴謹" if selected_cat == "財經台" else "客觀中立"
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -279,7 +209,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     prompt_templates = {
         "list": f"""
-        你是 LIHKG 論壇的數據助手，代表 LIHKG 集體意見，以繁體中文回答，語氣{tone}（分類：{selected_cat}）。問題：{user_query}
+        你是 LIHKG 論壇的數據助手，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子元數據：{json.dumps(metadata, ensure_ascii=False)}
         篩選條件：{json.dumps(filters, ensure_ascii=False)}
@@ -290,7 +220,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         輸出：標題列表
         """,
         "summarize": f"""
-        你是 LIHKG 論壇的集體意見代表，以繁體中文回答，語氣{tone}（分類：{selected_cat}）。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
@@ -298,7 +228,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         輸出：總結
         """,
         "sentiment": f"""
-        你是 LIHKG 論壇的集體意見代表，以繁體中文回答，語氣{tone}（分類：{selected_cat}）。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
@@ -306,22 +236,20 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...
         """,
         "general": f"""
-        你是 Grok 3，由 xAI 創建，代表 LIHKG 論壇的集體意見，以繁體中文回答，語氣{tone}（分類：{selected_cat}）。問題：{user_query}
+        你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-        簡短提及 LIHKG 身份，然後根據問題語義提供自然回應，聚焦問題核心。
-        示例：「我係 Grok 3，代表 LIHKG 集體意見！關於『1+1 等於多少』，答案係 2！」（50-100 字）
+        根據問題語義提供直接回應，聚焦問題核心（50-100 字）。
         輸出：直接回應
         """
     }
     
-    # 非 LIHKG 問題或無帖子數據的提示
     if not metadata and not filtered_thread_data:
         prompt = f"""
-        你是 Grok 3，由 xAI 創建，代表 LIHKG 論壇的集體意見，以繁體中文回答，語氣{tone}（分類：{selected_cat}）。問題：{user_query}
+        你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-        若問題要求列出數據類型（如「抓取什麼數據」「提供什麼資料」），回答：「我可以抓取 LIHKG 討論區的以下數據：帖子標題（title）、帖子 ID（thread_id）、回覆數量（no_of_reply）、最後回覆時間（last_reply_time）、點贊數（like_count）、踩數（dislike_count），以及部分回覆的內容（msg）、回覆的點贊與踩數、回覆時間（reply_time）。此外，還包括抓取頁數（fetched_pages）資訊，以評估數據完整性。若需具體帖子分析，請提供更多細節！」（100-150字）。
-        若問題為一般問題（如「你是誰？」「香港天氣如何？」），簡短提及 LIHKG 身份後提供自然回應。
-        若無帖子數據且問題要求帖子（如「列出標題」），回答：「目前無可用帖子標題。」
+        若問題要求列出數據類型，回答：「我可以抓取 LIHKG 討論區的帖子標題、帖子 ID、回覆數量、最後回覆時間、點贊數、踩數，及部分回覆內容、回覆點贊與踩數、回覆時間。若需具體帖子分析，請提供更多細節！」（100-150字）。
+        若問題為一般問題，直接回應。
+        若無帖子數據且問題要求帖子，回答：「目前無可用帖子標題。」
         輸出：直接回應
         """
     else:
@@ -335,7 +263,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。無論問題類型，始終以 LIHKG 集體意見代表身份為基礎思考，語氣適配所選分類（例如吹水台輕鬆幽默，財經台專業嚴謹）。若問題無關 LIHKG，簡短提及身份後提供直接回應。若涉及 LIHKG 數據，僅基於提供數據回答。"},
+        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。"},
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
@@ -349,7 +277,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     start_time = time.time()
     response_content = ""
-    lihkg_identity_included = "LIHKG 集體意見" in prompt
     async with aiohttp.ClientSession() as session:
         try:
             for attempt in range(3):
@@ -366,14 +293,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                         if content:
                                             if "###" in content:
-                                                logger.warning(f"Detected ### in response, retrying with simplified prompt", extra={"function": "stream_grok3_response"})
+                                                logger.warning(f"Detected ### in response, retrying", extra={"function": "stream_grok3_response"})
                                                 raise ValueError("Content moderation detected")
                                             response_content += content
                                             yield content
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"JSON decode error in stream chunk: {str(e)}", extra={"function": "stream_grok3_response"})
                                         continue
-                        # 附加進階分析建議
                         if needs_advanced_analysis and metadata and filtered_thread_data:
                             yield f"\n建議：為確保分析全面，建議抓取更多帖子頁數。{reason}\n"
                         duration = time.time() - start_time
@@ -382,11 +308,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "event": "grok3_api_call",
                                 "function": "stream_grok3_response",
                                 "query": user_query,
-                                "payload": payload,
                                 "status": "success",
                                 "response_length": len(response_content),
-                                "duration_seconds": duration,
-                                "lihkg_identity_included": lihkg_identity_included
+                                "duration_seconds": duration
                             }, ensure_ascii=False),
                             extra={"function": "stream_grok3_response"}
                         )
@@ -408,14 +332,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "event": "grok3_api_call",
                     "function": "stream_grok3_response",
                     "query": user_query,
-                    "payload": payload,
                     "status": "failed",
                     "error_type": type(e).__name__,
                     "error": str(e),
-                    "stack_trace": traceback.format_exc(),
                     "response_length": len(response_content),
-                    "duration_seconds": duration,
-                    "lihkg_identity_included": lihkg_identity_included
+                    "duration_seconds": duration
                 }, ensure_ascii=False),
                 extra={"function": "stream_grok3_response"}
             )
@@ -426,38 +347,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
-    Args:
-        user_question (str): 用戶問題。
-        selected_cat (str): 分類名稱。
-        cat_id (str): 分類 ID。
-        analysis (dict): 問題分析結果。
-        request_counter (int): 請求計數。
-        last_reset (float): 最後重置時間。
-        rate_limit_until (float): 速率限制解除時間。
-        is_advanced (bool): 是否進階分析。
-        previous_thread_ids (list): 前次帖子 ID。
-        previous_thread_data (dict): 前次帖子數據。
-        conversation_context (list): 對話歷史。
-    Returns:
-        dict: 處理結果，包含帖子數據、速率限制信息等。
     """
     try:
-        # 記錄分類選擇
         logger.info(f"Processing query: {user_question}, category: {selected_cat}, cat_id: {cat_id}", extra={"function": "process_user_question"})
         
-        # 進行問題分析與意圖識別
-        analysis = await analyze_and_screen(
-            user_query=user_question,
-            cat_name=selected_cat,
-            cat_id=cat_id,
-            thread_titles=None,
-            metadata=None,
-            thread_data=previous_thread_data,
-            is_advanced=is_advanced,
-            conversation_context=conversation_context
-        )
-        
-        # 檢查速率限制
         if rate_limit_until > time.time():
             logger.warning(f"Rate limit active until {rate_limit_until}", extra={"function": "process_user_question"})
             return {
@@ -470,7 +363,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "analysis": analysis
             }
         
-        # 若 direct_response=True 或僅需標題，限制抓取
         if analysis.get("direct_response", True) or analysis.get("intent") == "list_titles":
             thread_data = []
             rate_limit_info = []
@@ -860,8 +752,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "query": user_question,
                 "status": "failed",
                 "error_type": type(e).__name__,
-                "error": str(e),
-                "stack_trace": traceback.format_exc()
+                "error": str(e)
             }, ensure_ascii=False),
             extra={"function": "process_user_question"}
         )
