@@ -57,8 +57,7 @@ def clean_html(text):
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件。
-    改進提示詞，確保生成 top_thread_ids，並動態調整篩選條件。
-    記錄 API 調用的動作和輸入字元數。
+    記錄 API 調用的動作、輸入字元數和狀態碼。
     """
     conversation_context = conversation_context or []
     prompt = f"""
@@ -176,7 +175,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "temperature": 0.7
     }
     
-    # 記錄 API 調用資訊
+    # 記錄 API 調用開始
     logger.info(
         json.dumps({
             "event": "grok3_api_call",
@@ -193,6 +192,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    status_code = response.status  # 獲取 HTTP 狀態碼
                     data = await response.json()
                     result = json.loads(data["choices"][0]["message"]["content"])
                     # 確保必要字段存在
@@ -216,6 +216,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             "action": "完成問題意圖分析",
                             "query": user_query,
                             "status": "success",
+                            "status_code": status_code,
                             "intent": result["intent"],
                             "needs_advanced_analysis": result["needs_advanced_analysis"],
                             "filters": result["filters"],
@@ -225,6 +226,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     )
                     return result
         except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+            status_code = getattr(e, 'status', None) or "unknown"  # 獲取錯誤狀態碼
             logger.warning(
                 json.dumps({
                     "event": "grok3_api_call",
@@ -232,6 +234,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     "action": "問題意圖分析失敗",
                     "query": user_query,
                     "status": "failed",
+                    "status_code": status_code,
                     "error_type": type(e).__name__,
                     "error": str(e),
                     "attempt": attempt + 1
@@ -285,8 +288,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
-    改進 ### 錯誤處理，記錄問題片段並繼續處理。
-    記錄 API 調用的動作和輸入字元數。
+    記錄 API 調用的動作、輸入字元數和狀態碼。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 50, "min_likes": 20}
@@ -388,7 +390,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "stream": True
     }
     
-    # 記錄 API 調用資訊
+    # 記錄 API 調用開始
     logger.info(
         json.dumps({
             "event": "grok3_api_call",
@@ -406,6 +408,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             for attempt in range(3):
                 try:
                     async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                        status_code = response.status  # 獲取 HTTP 狀態碼
                         async for line in response.content:
                             if line and not line.isspace():
                                 line_str = line.decode('utf-8').strip()
@@ -436,12 +439,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "function": "stream_grok3_response",
                                 "action": "完成回應生成",
                                 "query": user_query,
-                                "status": "success"
+                                "status": "success",
+                                "status_code": status_code
                             }, ensure_ascii=False),
                             extra={"function": "stream_grok3_response"}
                         )
                         return
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+                    status_code = getattr(e, 'status', None) or "unknown"  # 獲取錯誤狀態碼
                     logger.warning(
                         json.dumps({
                             "event": "grok3_api_call",
@@ -449,6 +454,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "action": "回應生成失敗",
                             "query": user_query,
                             "status": "failed",
+                            "status_code": status_code,
                             "error_type": type(e).__name__,
                             "error": str(e),
                             "attempt": attempt + 1
@@ -477,6 +483,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         yield f"- 帖子 ID: {tid} 標題: {data['title']}\n"
                     return
         except Exception as e:
+            status_code = "unknown"
             logger.error(
                 json.dumps({
                     "event": "grok3_api_call",
@@ -484,6 +491,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "action": "回應生成異常",
                     "query": user_query,
                     "status": "failed",
+                    "status_code": status_code,
                     "error_type": type(e).__name__,
                     "error": str(e)
                 }, ensure_ascii=False),
