@@ -21,13 +21,11 @@ nest_asyncio.apply()
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 日誌過濾器：過濾 in-event 日誌
+# 日誌過濾器：完全過濾 in-event 日誌
 class InEventFilter(logging.Filter):
     def filter(self, record):
+        # 完全過濾掉所有 in-event 日誌
         if "in-event" in record.msg.lower():
-            # 僅記錄非 .git 相關的 in-event
-            if ".git" not in record.msg:
-                return True
             return False
         return True
 
@@ -43,6 +41,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.addFilter(InEventFilter())
+
+# 確保全局日誌級別為 INFO
+logging.getLogger().setLevel(logging.INFO)
 
 # 設置日誌時間為香港時區
 logging.Formatter.converter = lambda *args: datetime.now(HONG_KONG_TZ).timetuple()
