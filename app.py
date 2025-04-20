@@ -115,17 +115,18 @@ async def main():
                     cat_id=cat_id,
                     conversation_context=st.session_state.conversation_context
                 )
+                logger.info(f"Analysis completed: intent={analysis.get('intent')}, category_ids={analysis.get('category_ids')}")
 
-                # 若問題無關 LIHKG，直接生成回應
-                if analysis.get("direct_response", False) or not analysis.get("category_ids"):
+                # 若問題無關 LIHKG（category_ids 為空），直接生成回應
+                if not analysis.get("category_ids"):
                     response = ""
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(
-                            user_query=user_question,  # 修正：從 user_question 改為 user_query
+                            user_query=user_question,
                             metadata=[],
                             thread_data={},
-                            processing="summarize",
+                            processing=analysis.get("processing", "general"),
                             conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
@@ -136,7 +137,7 @@ async def main():
                     st.session_state.awaiting_response = False
                     return
 
-                # 處理 LIHKG 相關問題
+                # 處理 LIHKG 相關問題（包括 list_titles 意圖）
                 result = await process_user_question(
                     user_question=user_question,
                     selected_cat=selected_cat,
