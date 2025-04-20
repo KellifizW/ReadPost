@@ -270,11 +270,16 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                         title = thread.get("title")
                         total_replies = thread.get("total_reply", 0)
                         last_reply_time = thread.get("last_reply_time", 0)
+                        item_data = thread.get("item_data", [])
+                        if not item_data:
+                            logger.warning(f"No item_data for thread_id={thread_id}, page=1")
                         replies.extend([
                             {
                                 "msg": reply["msg"],
-                                "reply_time": reply.get("reply_time", 0)
-                            } for reply in thread.get("item_data", []) if "msg" in reply
+                                "reply_time": reply.get("reply_time", 0),
+                                "like_count": reply.get("like_count", 0),
+                                "dislike_count": reply.get("dislike_count", 0)
+                            } for reply in item_data if "msg" in reply
                         ])
                         fetched_pages.append(1)
                         request_counter += 1
@@ -316,11 +321,12 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                 "rate_limit_until": rate_limit_until
             }
     
-    total_pages = (total_replies + 24) // 25
+    total_pages = max(1, (total_replies + 24) // 25)
     if fetch_last_pages > 0 and total_pages > 1:
         start_page = max(2, total_pages - fetch_last_pages + 1)
         for page in range(start_page, total_pages + 1):
             if len(replies) >= max_replies:
+                logger.info(f"Max replies reached: thread_id={thread_id}, replies={len(replies)}")
                 break
             if time.time() < rate_limit_until:
                 logger.warning(f"Rate limit active until {rate_limit_until} for thread_id={thread_id}, page={page}")
@@ -340,15 +346,22 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                         async with session.get(url, headers=headers, timeout=10) as response:
                             data = await response.json()
                             if response.status == 200 and data.get("success"):
-                                replies.extend([
+                                item_data = data["response"].get("item_data", [])
+                                if not item_data:
+                                    logger.warning(f"No item_data for thread_id={thread_id}, page={page}")
+                                    break
+                                new_replies = [
                                     {
                                         "msg": reply["msg"],
-                                        "reply_time": reply.get("reply_time", 0)
-                                    } for reply in data["response"].get("item_data", []) if "msg" in reply
-                                ])
+                                        "reply_time": reply.get("reply_time", 0),
+                                        "like_count": reply.get("like_count", 0),
+                                        "dislike_count": reply.get("dislike_count", 0)
+                                    } for reply in item_data if "msg" in reply
+                                ]
+                                replies.extend(new_replies)
                                 fetched_pages.append(page)
                                 request_counter += 1
-                                logger.info(f"Fetched thread: thread_id={thread_id}, page={page}, replies={len(replies)}")
+                                logger.info(f"Fetched thread: thread_id={thread_id}, page={page}, new_replies={len(new_replies)}, total_replies={len(replies)}")
                                 break
                             elif response.status == 429:
                                 rate_limit_until = time.time() + int(response.headers.get("X-RateLimit-Reset", 60))
@@ -368,31 +381,26 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                             else:
                                 logger.error(f"Fetch error: thread_id={thread_id}, page={page}, status={response.status}")
                                 rate_limit_info.append({"thread_id": thread_id, "page": page, "timestamp": time.time(), "status": "error", "error": f"Status {response.status}"})
+                                break
                 except Exception as e:
                     logger.error(f"Fetch error: thread_id={thread_id}, page={page}, attempt={attempt+1}, error={str(e)}")
                     rate_limit_info.append({"thread_id": thread_id, "page": page, "timestamp": time.time(), "status": "error", "error": str(e)})
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)
                         continue
-                    return {
-                        "title": title,
-                        "replies": replies,
-                        "total_replies": total_replies,
-                        "last_reply_time": last_reply_time,
-                        "fetched_pages": fetched_pages,
-                        "rate_limit_info": rate_limit_info,
-                        "request_counter": request_counter,
-                        "last_reset": last_reset,
-                        "rate_limit_until": rate_limit_until
-                    }
+                    logger.warning(f"Max retries reached for thread_id={thread_id}, page={page}")
+                    break
             await asyncio.sleep(1)
+    
+    if not replies:
+        logger.warning(f"No replies fetched for thread_id={thread_id}")
     
     return {
         "title": title,
         "replies": replies[:max_replies],
         "total_replies": total_replies,
         "last_reply_time": last_reply_time,
-        "fetched_pages": fetched_pages,
+        "fetched_pages": sorted(list(set(fetched_pages))),
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
