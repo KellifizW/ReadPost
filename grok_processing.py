@@ -85,13 +85,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 
     步驟：
     1. 判斷問題是否與 LIHKG 論壇相關：
-       - 若無關（例如“你是誰？”、“今天天氣如何？”），設置 direct_response=True，category_ids=[]。
-       - 若相關（包含“帖子”、“討論”、“LIHKG”、“吹水台”等關鍵詞，或上下文涉及論壇），設置 direct_response=False，繼續分析。
+       - 若問題為「你是誰？」或類似自我介紹問題（例如「介紹一下你自己」），設置 direct_response=True，category_ids=[]，並跳過後續步驟。
+       - 若問題無關 LIHKG（例如「今天天氣如何？」），設置 direct_response=True，category_ids=[]。
+       - 若問題涉及 LIHKG（包含「帖子」、「討論」、「LIHKG」、「吹水台」等關鍵詞，或上下文提及論壇），設置 direct_response=False，繼續分析。
     2. 若 direct_response=False，識別主題（感動、搞笑、財經等），標記為 theme，根據問題和分類推斷。
     3. 判斷意圖（總結、情緒分析、幽默總結、深入討論）。
     4. 確定帖子數量（post_limit，1-10）：
-       - 廣泛問題（例如“有哪些搞笑話題”）需要更多帖子（5-10）。
-       - 具體問題（例如“某事件討論”）需要較少帖子（1-3）。
+       - 廣泛問題（例如「有哪些搞笑話題」）需要更多帖子（5-10）。
+       - 具體問題（例如「某事件討論」）需要較少帖子（1-3）。
        - 參考對話歷史調整數量。
     5. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
        {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。'}
@@ -197,9 +198,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             }, ensure_ascii=False)
         )
         return {
-            "direct_response": False,
+            "direct_response": True,  # 默認非 LIHKG 問題，避免無限循環
             "theme": "未知",
-            "category_ids": [cat_id],
+            "category_ids": [],
             "data_type": "both",
             "post_limit": 3,
             "reply_limit": 200 if is_advanced else 75,
@@ -211,9 +212,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         } if not is_advanced else {
             "needs_advanced_analysis": False,
             "suggestions": {
-                "direct_response": False,
+                "direct_response": True,
                 "theme": "未知",
-                "category_ids": [cat_id],
+                "category_ids": [],
                 "data_type": "both",
                 "post_limit": 3,
                 "reply_limit": 200,
@@ -310,11 +311,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
         """
     }
     
-    prompt = prompt_templates.get(processing, f"""
-    你是 Grok 3，由 xAI 創建，以繁體中文回答，語氣自然親切。問題：{user_query}
-    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    輸出：直接回應，50-100字
-    """)
+    # 非 LIHKG 問題的提示，特別處理「你是誰？」
+    if not metadata and not filtered_thread_data:
+        prompt = f"""
+        你是 Grok 3，由 xAI 創建，以繁體中文回答，語氣自然親切。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+        若問題為「你是誰？」或類似自我介紹問題，回答：「我是 Grok 3，由 xAI 創建，專為解答您的問題而生！有什麼可以幫您？」（50-100字）。
+        其他非 LIHKG 問題，提供簡潔直接的回應。
+        輸出：直接回應
+        """
+    else:
+        prompt = prompt_templates.get(processing, f"""
+        你是 LIHKG 論壇的集體意見代表，總結帖子，300-500字。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
+        引用高關注回覆（like_count≥5），語氣適配分類。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        """)
+    
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
@@ -395,7 +410,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, c
                     "duration_seconds": duration
                 }, ensure_ascii=False)
             )
-            yield f"錯誤: 連線失敗，請稍後重試"
+            yield f"錯誤: 連線失敗（{str(e)}），請稍後重試"
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
