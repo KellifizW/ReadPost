@@ -57,7 +57,7 @@ def clean_html(text):
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件。
-    增強提示詞，確保「分析」查詢觸發內容或情緒分析。
+    改進提示詞，確保生成 top_thread_ids，並動態調整篩選條件。
     """
     conversation_context = conversation_context or []
     prompt = f"""
@@ -66,9 +66,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     問題：{user_query}
     分類：{cat_name}（cat_id={cat_id})
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    {'帖子標題：' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else ''}
-    {'元數據：' + json.dumps(metadata, ensure_ascii=False) if metadata else ''}
-    {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
+    {'帖子標題：' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else '無標題數據'}
+    {'元數據：' + json.dumps(metadata, ensure_ascii=False) if metadata else '無元數據'}
+    {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else '無回覆數據'}
 
     步驟：
     1. 分析問題意圖，動態分類：
@@ -81,14 +81,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     2. 若問題包含「分析」，優先選擇 summarize_posts 或 analyze_sentiment，根據上下文確定：
        - 若要求內容總結，選 summarize_posts。
        - 若要求觀點或情緒，選 analyze_sentiment。
-    3. 若問題涉及「熱門」，根據回覆數、點讚數排序，選最多10個帖子ID（top_thread_ids），並設置嚴格篩選條件（例如 min_replies≥100, min_likes≥50）。
+    3. 若問題涉及「熱門」，必須從帖子標題或元數據中選最多10個帖子ID（top_thread_ids）：
+       - 排序標準：回覆數(no_of_reply)*0.6 + 點讚數(like_count)*0.4。
+       - 若無輸入數據，設置合理篩選條件並建議抓取帖子。
     4. 動態確定：
-       - post_limit（1-20）：根據問題複雜度，例如「分析」可能需要更多帖子。
-       - reply_limit（0-500）：若需分析內容或情緒，設置足夠的回覆數。
-       - filters：根據問題語義設置（例如 min_replies, min_likes, time_range）。
+       - post_limit（1-20）：根據問題複雜度。
+       - reply_limit（0-500）：若需分析內容或情緒，設置足夠回覆數。
+       - filters：根據討論區特性設置（例如 min_replies=50-200, min_likes=20-100）。
     5. 若為進階分析（is_advanced=True），檢查數據是否足夠，設置 needs_advanced_analysis。
     6. 提供候選帖子ID（candidate_thread_ids）和處理方式（processing，例如 summarize, sentiment）。
-    7. 若無法確定參數，提供原因（reason）。
+    7. 若無法生成 top_thread_ids，提供原因（reason）。
 
     輸出格式：
     {{
@@ -118,9 +120,25 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "filters": {{"min_replies": 100, "min_likes": 50}},
         "processing": "summarize",
         "candidate_thread_ids": [],
-        "top_thread_ids": [],
+        "top_thread_ids": ["3915677", "3910235"],
         "needs_advanced_analysis": false,
         "reason": ""
+    }}
+    若無數據，設置合理參數並說明：
+    {{
+        "direct_response": false,
+        "intent": "summarize_posts",
+        "theme": "熱門",
+        "category_ids": ["{cat_id}"],
+        "data_type": "both",
+        "post_limit": 10,
+        "reply_limit": 200,
+        "filters": {{"min_replies": 50, "min_likes": 20}},
+        "processing": "summarize",
+        "candidate_thread_ids": [],
+        "top_thread_ids": [],
+        "needs_advanced_analysis": true,
+        "reason": "無帖子數據，建議抓取更多帖子"
     }}
     """
     
@@ -186,7 +204,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             "status": "success",
                             "intent": result["intent"],
                             "needs_advanced_analysis": result["needs_advanced_analysis"],
-                            "filters": result["filters"]
+                            "filters": result["filters"],
+                            "top_thread_ids": result["top_thread_ids"]
                         }, ensure_ascii=False),
                         extra={"function": "analyze_and_screen"}
                     )
@@ -212,7 +231,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 1. 判斷意圖（例如：列出帖子、總結、情緒分析、一般問題）。
                 2. 若問題包含「分析」，優先選擇總結（summarize_posts）或情緒分析（analyze_sentiment）。
                 3. 設置帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
-                4. 設置篩選條件（filters，例如 min_replies, min_likes）。
+                4. 設置篩選條件（filters，例如 min_replies=50-200, min_likes=20-100）。
+                5. 若有帖子標題，選最多10個帖子ID（top_thread_ids），按回覆數*0.6+點讚數*0.4排序。
                 輸出：
                 {{"direct_response": boolean, "intent": string, "theme": string, "category_ids": array, "data_type": string, "post_limit": integer, "reply_limit": integer, "filters": object, "processing": string, "candidate_thread_ids": array, "top_thread_ids": array, "needs_advanced_analysis": boolean, "reason": string}}
                 """
@@ -239,7 +259,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
-    改進模板，確保分析查詢引用回覆並提供具體洞察。
+    改進 ### 錯誤處理，記錄問題片段並繼續處理。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 50, "min_likes": 20}
@@ -258,7 +278,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:50],  # 增加回覆數
+            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:50],
             "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items()
     }
@@ -358,8 +378,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                         if content:
                                             if "###" in content:
-                                                logger.warning(f"Detected ### in response, retrying", extra={"function": "stream_grok3_response"})
-                                                raise ValueError("Content moderation detected")
+                                                logger.warning(
+                                                    f"Detected ### in response chunk: {content}",
+                                                    extra={"function": "stream_grok3_response"}
+                                                )
+                                                # 僅在明確為審核標記時重試
+                                                if "Content Moderation" in content or "Blocked" in content:
+                                                    raise ValueError("Content moderation detected")
+                                                # 否則繼續處理
                                             response_content += content
                                             yield content
                                     except json.JSONDecodeError as e:
@@ -377,8 +403,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             extra={"function": "stream_grok3_response"}
                         )
                         return
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}", extra={"function": "stream_grok3_response"})
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+                    logger.warning(
+                        json.dumps({
+                            "event": "grok3_api_call",
+                            "function": "stream_grok3_response",
+                            "query": user_query,
+                            "status": "failed",
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                            "attempt": attempt + 1
+                        }, ensure_ascii=False),
+                        extra={"function": "stream_grok3_response"}
+                    )
                     if attempt < 2:
                         for tid in filtered_thread_data:
                             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:5]
@@ -386,7 +423,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         payload["messages"][-1]["content"] = prompt
                         await asyncio.sleep(2 + attempt * 2)
                         continue
-                    raise
+                    # 備用回應
+                    yield f"錯誤：生成回應失敗（{str(e)}）。以下為可用帖子：\n"
+                    for tid, data in filtered_thread_data.items():
+                        yield f"- 帖子 ID: {tid} 標題: {data['title']}\n"
+                    return
         except Exception as e:
             logger.error(
                 json.dumps({
@@ -399,14 +440,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 }, ensure_ascii=False),
                 extra={"function": "stream_grok3_response"}
             )
-            yield f"錯誤：生成回應失敗（{str(e)}），請稍後重試"
+            yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
-    若 top_thread_ids 為空，觸發第二次分析。
+    增強第二次分析邏輯，確保 top_thread_ids 生成。
     """
     try:
         logger.info(f"Processing query: {user_question}, category: {selected_cat}, cat_id: {cat_id}", extra={"function": "process_user_question"})
@@ -686,14 +727,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
-        # 若 top_thread_ids 為空，觸發第二次分析
+        # 若 top_thread_ids 為空，傳入 initial_threads 重新分析
         if not top_thread_ids and filtered_items:
-            logger.info(f"No top_thread_ids, triggering re-analysis", extra={"function": "process_user_question"})
+            logger.info(f"No top_thread_ids, triggering re-analysis with {len(filtered_items)} threads", extra={"function": "process_user_question"})
             analysis = await analyze_and_screen(
                 user_query=user_question,
                 cat_name=selected_cat,
                 cat_id=cat_id,
-                thread_titles=[item["title"] for item in filtered_items[:90]],
+                thread_titles=[{"thread_id": str(item["thread_id"]), "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "like_count": item.get("like_count", 0)} for item in filtered_items[:90]],
                 metadata=None,
                 thread_data=None,
                 conversation_context=conversation_context
@@ -704,8 +745,18 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             filters = analysis.get("filters", {})
             min_replies = filters.get("min_replies", 0)
             min_likes = filters.get("min_likes", 0)
+            logger.info(
+                json.dumps({
+                    "event": "re_analysis",
+                    "function": "process_user_question",
+                    "query": user_question,
+                    "top_thread_ids": top_thread_ids,
+                    "filters": filters
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
         
-        # 後備邏輯：若仍無 top_thread_ids，按熱門程度排序
+        # 後備邏輯：僅在再分析失敗後使用
         if not top_thread_ids and filtered_items:
             sorted_items = sorted(
                 filtered_items,
