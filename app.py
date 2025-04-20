@@ -122,7 +122,7 @@ async def main():
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(
-                            user_question=user_question,
+                            user_query=user_question,  # 修正：從 user_question 改為 user_query
                             metadata=[],
                             thread_data={},
                             processing="summarize",
@@ -191,7 +191,7 @@ async def main():
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     async for chunk in stream_grok3_response(
-                        user_question=user_question,
+                        user_query=user_question,
                         metadata=metadata,
                         thread_data={item["thread_id"]: item for item in thread_data},
                         processing=analysis["processing"],
@@ -256,7 +256,7 @@ async def main():
                             response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                         response += "\n"
                         async for chunk in stream_grok3_response(
-                            user_question=user_question,
+                            user_query=user_question,
                             metadata=metadata_advanced,
                             thread_data={item["thread_id"]: item for item in thread_data_advanced},
                             processing=analysis["processing"],
@@ -310,7 +310,7 @@ async def main():
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(
-                            user_question=st.session_state.last_user_query,
+                            user_query=st.session_state.last_user_query,
                             metadata=[item for item in thread_data if str(item["thread_id"]) == thread_id],
                             thread_data={thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
                             processing="summarize",
