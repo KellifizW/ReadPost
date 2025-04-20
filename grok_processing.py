@@ -52,7 +52,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - data_type: "both".
        - post_limit: 從問題提取 (默認2, 最大10).
        - reply_limit: 75.
-       - filters: 根據主題 (感動: like_count>=5; 搞笑: like_count>=10; 財經: like_count>=10; 其他: min_replies>=20, min_likes>=10).
+       - filters: 根據主題 (感動: like_count>=5; 搞笑: like_count>=5; 財經: like_count>=5; 其他: min_replies>=10, min_likes>=5).
        - processing: emotion_focused_summary, humor_focused_summary, professional_summary, summarize, sentiment.
        - candidate_thread_ids: 10個候選ID.
        - top_thread_ids: 最終選定ID.
@@ -68,7 +68,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error("Grok 3 API key missing")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 20, "min_likes": 10},
+            "reply_limit": 75, "filters": {"min_replies": 10, "min_likes": 5},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": "Missing API key"
         }
@@ -93,7 +93,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error(f"Analysis failed: {str(e)}")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 20, "min_likes": 10},
+            "reply_limit": 75, "filters": {"min_replies": 10, "min_likes": 5},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": f"Analysis failed: {str(e)}"
         }
@@ -208,9 +208,11 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     post_limit = min(analysis.get("post_limit", 2), 10)
     reply_limit = min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
-    min_replies = filters.get("min_replies", 20)
-    min_likes = filters.get("min_likes", 10)
+    min_replies = filters.get("min_replies", 10)
+    min_likes = filters.get("min_likes", 5)
     top_thread_ids = analysis.get("top_thread_ids", [])
+
+    logger.info(f"Filtering threads with min_replies={min_replies}, min_likes={min_likes}")
 
     thread_data = []
     rate_limit_info = rate_limit_info.copy()
@@ -270,9 +272,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             request_counter=rate_limit_info["counter"], last_reset=rate_limit_info["last_reset"], rate_limit_until=rate_limit_info["until"],
             max_replies=reply_limit, fetch_last_pages=2
         )
-        rate_limit_info["counter"] = result.get("request_counter", rate_limit_info["counter"])
-        rate_limit_info["last_reset"] = result.get("last_reset", rate_limit_info["last_reset"])
-        rate_limit_info["until"] = result.get("rate_limit_until", rate_limit_info["until"])
+        rate_limit_info["counter"] = thread_result.get("request_counter", rate_limit_info["counter"])
+        rate_limit_info["last_reset"] = thread_result.get("last_reset", rate_limit_info["last_reset"])
+        rate_limit_info["until"] = thread_result.get("rate_limit_until", rate_limit_info["until"])
 
         replies = thread_result.get("replies", [])
         if not replies and thread_result.get("total_replies", 0) >= min_replies:
