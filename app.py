@@ -67,7 +67,7 @@ async def main():
         "財經台": 15, "成人台": 29, "創意台": 31
     }
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
-    cat_id = str(cat_id_map[selected_cat])  # 確保 cat_id 為字符串
+    cat_id = str(cat_id_map[selected_cat])
     st.write(f"當前討論區：{selected_cat}")
 
     # 記錄選單選擇
@@ -144,7 +144,7 @@ async def main():
                     st.session_state.awaiting_response = False
                     return
 
-                # 處理 LIHKG 相關問題（包括 list_titles 意圖）
+                # 處理 LIHKG 相關問題
                 result = await process_user_question(
                     user_question=user_question,
                     selected_cat=selected_cat,
@@ -178,7 +178,7 @@ async def main():
                     return
 
                 # 準備回應
-                post_limit = analysis.get("post_limit", 3)  # Default to 3 if not specified
+                post_limit = analysis.get("post_limit", 3)
                 thread_data = thread_data[:post_limit]
                 theme = analysis.get("theme", "相關")
                 response = f"以下是從 {question_cat} 收集的{theme}帖子：\n\n"
@@ -221,7 +221,7 @@ async def main():
                     }, ensure_ascii=False)
                 )
 
-                # 進階分析（避免重複帖子）
+                # 進階分析
                 processed_thread_ids = [str(item["thread_id"]) for item in thread_data]
                 logger.info(f"Starting advanced analysis, excluding thread_ids: {processed_thread_ids}")
                 analysis_advanced = await analyze_and_screen(
@@ -288,75 +288,15 @@ async def main():
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.conversation_context.append({"role": "user", "content": user_question})
                 st.session_state.conversation_context.append({"role": "assistant", "content": response})
-                st.session_state.last_user_query = user_question
-                st.session_state.awaiting_response = False
 
             except Exception as e:
                 error_message = f"處理失敗：{str(e)}"
-                logger.error(f"Processing error: {str(e)}")
+                logger.error(f"Error processing query: {user_question}, error: {str(e)}")
                 with st.chat_message("assistant"):
                     st.markdown(error_message)
-                st.session_state.chat_history[-1]["answer"] = error_message
-                st.session_state.conversation_context.append({"role": "user", "content": user_question})
-                st.session_state.conversation_context.append({"role": "assistant", "content": error_message})
+                st.session_state.chat_history.append({"question": user_question, "answer": error_message})
+            finally:
                 st.session_state.awaiting_response = False
-
-    # 處理後續指令
-    if st.session_state.awaiting_response and st.session_state.chat_history[-1]["answer"]:
-        response_input = st.chat_input("輸入指令（修改分類、ID 數字、結束）：")
-        if response_input:
-            response_input = response_input.strip().lower()
-            if response_input == "結束":
-                final_answer = "分析結束，感謝使用！"
-                logger.info("Conversation ended by user")
-                with st.chat_message("assistant"):
-                    st.markdown(final_answer)
-                st.session_state.chat_history.append({"question": "結束", "answer": final_answer})
-                st.session_state.conversation_context.append({"role": "assistant", "content": final_answer})
-                st.session_state.awaiting_response = False
-            elif response_input == "修改分類":
-                final_answer = "請選擇新分類並輸入問題。"
-                logger.info("User requested category change")
-                with st.chat_message("assistant"):
-                    st.markdown(final_answer)
-                st.session_state.chat_history.append({"question": "修改分類", "answer": final_answer})
-                st.session_state.conversation_context.append({"role": "assistant", "content": final_answer})
-                st.session_state.awaiting_response = False
-            elif response_input.isdigit():
-                thread_id = response_input
-                thread_data = st.session_state.chat_history[-1].get("thread_data", [])
-                if thread_id in [str(item["thread_id"]) for item in thread_data]:
-                    response = f"帖子 ID: {thread_id}\n\n"
-                    logger.info(f"User requested thread ID: {thread_id}")
-                    with st.chat_message("assistant"):
-                        grok_container = st.empty()
-                        async for chunk in stream_grok3_response(
-                            user_query=st.session_state.last_user_query,
-                            metadata=[item for item in thread_data if str(item["thread_id"]) == thread_id],
-                            thread_data={thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
-                            processing="summarize",
-                            selected_cat=selected_cat,
-                            conversation_context=st.session_state.conversation_context
-                        ):
-                            response += chunk
-                            grok_container.markdown(response)
-                    st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": response})
-                    st.session_state.conversation_context.append({"role": "assistant", "content": response})
-                else:
-                    final_answer = f"無效帖子 ID {thread_id}。"
-                    logger.warning(f"Invalid thread ID requested: {thread_id}")
-                    with st.chat_message("assistant"):
-                        st.markdown(final_answer)
-                    st.session_state.chat_history.append({"question": f"ID {thread_id}", "answer": final_answer})
-                    st.session_state.conversation_context.append({"role": "assistant", "content": final_answer})
-                st.session_state.awaiting_response = False
-            else:
-                final_answer = "請輸入有效指令：修改分類、ID 數字、結束"
-                logger.warning(f"Invalid command: {response_input}")
-                with st.chat_message("assistant"):
-                    st.markdown(final_answer)
-                st.session_state.chat_history.append({"question": response_input, "answer": final_answer})
-                st.session_state.conversation_context.append({"role": "assistant", "content": final_answer})
 
 if __name__ == "__main__":
     asyncio.run(main())
