@@ -57,7 +57,7 @@ def clean_html(text):
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件。
-    依賴 Grok 3 進行意圖分類和參數設置，減少硬編碼。
+    增強提示詞，確保「分析」查詢觸發內容或情緒分析。
     """
     conversation_context = conversation_context or []
     prompt = f"""
@@ -71,14 +71,24 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 分析問題意圖，動態分類（例如：列出帖子、總結內容、分析情緒、一般問題，或其他自定義意圖）。
-    2. 若問題不需抓取帖子（例如一般問題），設置 direct_response=True，category_ids=[]。
-    3. 若問題涉及「熱門」，根據回覆數、點讚數等標準，選最多10個帖子ID（top_thread_ids）。
-    4. 動態確定帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
-    5. 設置篩選條件（filters，例如 min_replies, min_likes），根據問題語義動態調整。
-    6. 若為進階分析（is_advanced=True），檢查是否需要更多帖子或回覆，設置 needs_advanced_analysis。
-    7. 提供候選帖子ID（candidate_thread_ids）和處理方式（processing，例如 list, summarize, sentiment）。
-    8. 若無法確定參數，提供原因（reason）。
+    1. 分析問題意圖，動態分類：
+       - list_titles：僅列出帖子標題。
+       - summarize_posts：總結帖子內容，引用高關注回覆。
+       - analyze_sentiment：分析帖子情緒（正面、負面、中立）。
+       - compare_categories：比較多個討論區的話題或趨勢。
+       - general_query：一般問題，無需帖子數據。
+       - 其他自定義意圖（例如趨勢分析、主題提取）。
+    2. 若問題包含「分析」，優先選擇 summarize_posts 或 analyze_sentiment，根據上下文確定：
+       - 若要求內容總結，選 summarize_posts。
+       - 若要求觀點或情緒，選 analyze_sentiment。
+    3. 若問題涉及「熱門」，根據回覆數、點讚數排序，選最多10個帖子ID（top_thread_ids），並設置嚴格篩選條件（例如 min_replies≥100, min_likes≥50）。
+    4. 動態確定：
+       - post_limit（1-20）：根據問題複雜度，例如「分析」可能需要更多帖子。
+       - reply_limit（0-500）：若需分析內容或情緒，設置足夠的回覆數。
+       - filters：根據問題語義設置（例如 min_replies, min_likes, time_range）。
+    5. 若為進階分析（is_advanced=True），檢查數據是否足夠，設置 needs_advanced_analysis。
+    6. 提供候選帖子ID（candidate_thread_ids）和處理方式（processing，例如 summarize, sentiment）。
+    7. 若無法確定參數，提供原因（reason）。
 
     輸出格式：
     {{
@@ -103,9 +113,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "theme": "熱門",
         "category_ids": ["{cat_id}"],
         "data_type": "both",
-        "post_limit": 5,
-        "reply_limit": 100,
-        "filters": {{"min_replies": 50, "min_likes": 20}},
+        "post_limit": 10,
+        "reply_limit": 200,
+        "filters": {{"min_replies": 100, "min_likes": 50}},
         "processing": "summarize",
         "candidate_thread_ids": [],
         "top_thread_ids": [],
@@ -143,7 +153,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     payload = {
         "model": "grok-3-beta",
         "messages": messages,
-        "max_tokens": 300,  # 增加 token 以支持更詳細的分析
+        "max_tokens": 300,
         "temperature": 0.7
     }
     
@@ -154,7 +164,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     data = await response.json()
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    # 確保必要字段存在，設置合理默認值
+                    # 確保必要字段存在
                     result.setdefault("direct_response", False)
                     result.setdefault("intent", "general_query")
                     result.setdefault("theme", "")
@@ -194,15 +204,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 extra={"function": "analyze_and_screen"}
             )
             if attempt < max_retries - 1:
-                # 使用備用提示詞，簡化要求
                 simplified_prompt = f"""
                 你是 LIHKG 論壇助手，分析用戶問題，輸出 JSON。
                 問題：{user_query}
                 分類：{cat_name}（cat_id={cat_id})
                 步驟：
                 1. 判斷意圖（例如：列出帖子、總結、情緒分析、一般問題）。
-                2. 設置帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
-                3. 設置篩選條件（filters，例如 min_replies, min_likes）。
+                2. 若問題包含「分析」，優先選擇總結（summarize_posts）或情緒分析（analyze_sentiment）。
+                3. 設置帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
+                4. 設置篩選條件（filters，例如 min_replies, min_likes）。
                 輸出：
                 {{"direct_response": boolean, "intent": string, "theme": string, "category_ids": array, "data_type": string, "post_limit": integer, "reply_limit": integer, "filters": object, "processing": string, "candidate_thread_ids": array, "top_thread_ids": array, "needs_advanced_analysis": boolean, "reason": string}}
                 """
@@ -229,6 +239,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
+    改進模板，確保分析查詢引用回覆並提供具體洞察。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 50, "min_likes": 20}
@@ -247,7 +258,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:25],
+            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:50],  # 增加回覆數
             "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items()
     }
@@ -269,16 +280,26 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        引用高關注回覆（like_count≥5），總結帖子內容，300-500字。
-        輸出：總結
+        任務：
+        1. 分析每個帖子的主題和核心觀點，引用高關注回覆（like_count≥5）。
+        2. 總結熱門話題的趨勢，例如社會議題、娛樂八卦或時事。
+        3. 提取用戶關注點和討論熱度原因。
+        4. 字數：400-600字。
+        若數據不足，說明原因並建議抓取更多回覆。
+        輸出：詳細總結
         """,
         "sentiment": f"""
         你是 LIHKG 論壇的集體意見代表，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        判斷情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
-        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...
+        任務：
+        1. 分析每個帖子的情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
+        2. 量化情緒比例（例如 正面40%，負面30%，中立30%）。
+        3. 說明情緒背後的原因，例如爭議性話題或流行文化影響。
+        4. 字數：300-500字。
+        若數據不足，說明原因並建議抓取更多回覆。
+        輸出：情緒分析
         """,
         "general": f"""
         你是 Grok 3，以繁體中文回答。問題：{user_query}
@@ -385,6 +406,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
+    若 top_thread_ids 為空，觸發第二次分析。
     """
     try:
         logger.info(f"Processing query: {user_question}, category: {selected_cat}, cat_id: {cat_id}", extra={"function": "process_user_question"})
@@ -503,7 +525,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }
         
         post_limit = min(analysis.get("post_limit", 5), 20)
-        reply_limit = analysis.get("reply_limit", 100)  # 完全依賴 analyze_and_screen
+        reply_limit = analysis.get("reply_limit", 100)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 0)
         min_likes = filters.get("min_likes", 0)
@@ -664,8 +686,27 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
+        # 若 top_thread_ids 為空，觸發第二次分析
         if not top_thread_ids and filtered_items:
-            # 備用邏輯：若 Grok 3 未提供 top_thread_ids，按熱門程度排序
+            logger.info(f"No top_thread_ids, triggering re-analysis", extra={"function": "process_user_question"})
+            analysis = await analyze_and_screen(
+                user_query=user_question,
+                cat_name=selected_cat,
+                cat_id=cat_id,
+                thread_titles=[item["title"] for item in filtered_items[:90]],
+                metadata=None,
+                thread_data=None,
+                conversation_context=conversation_context
+            )
+            top_thread_ids = analysis.get("top_thread_ids", [])
+            post_limit = min(analysis.get("post_limit", 5), 20)
+            reply_limit = analysis.get("reply_limit", 100)
+            filters = analysis.get("filters", {})
+            min_replies = filters.get("min_replies", 0)
+            min_likes = filters.get("min_likes", 0)
+        
+        # 後備邏輯：若仍無 top_thread_ids，按熱門程度排序
+        if not top_thread_ids and filtered_items:
             sorted_items = sorted(
                 filtered_items,
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
