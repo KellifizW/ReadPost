@@ -80,6 +80,7 @@ async def main():
                         st.markdown(error_message)
                     st.session_state.chat_history[-1]["answer"] = error_message
                     st.session_state.awaiting_response = False
+                    logger.info(f"Program response: {error_message}")
                     logger.warning(f"Rate limit triggered: {error_message}")
                     return
 
@@ -102,7 +103,7 @@ async def main():
                             grok_container.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
                     st.session_state.awaiting_response = False
-                    logger.info(f"Direct response generated: {response[:100]}...")
+                    logger.info(f"Program response: {response[:100]}...")
                     return
 
                 # 處理用戶問題
@@ -123,6 +124,7 @@ async def main():
                         st.markdown(answer)
                     st.session_state.chat_history[-1]["answer"] = answer
                     st.session_state.awaiting_response = False
+                    logger.info(f"Program response: {answer}")
                     logger.warning(f"No threads found for category {question_cat}")
                     return
 
@@ -149,7 +151,8 @@ async def main():
                         response += chunk
                         grok_container.markdown(response)
 
-                logger.info(f"Response generated: category={question_cat}, threads={len(thread_data)}, response={response[:100]}...")
+                logger.info(f"Program response: {response[:100]}...")
+                logger.info(f"Response generated: category={question_cat}, threads={len(thread_data)}")
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.last_user_query = user_question
                 st.session_state.awaiting_response = False
@@ -161,6 +164,7 @@ async def main():
                     st.markdown(error_message)
                 st.session_state.chat_history[-1]["answer"] = error_message
                 st.session_state.awaiting_response = False
+                logger.info(f"Program response: {error_message}")
 
 if __name__ == "__main__":
     asyncio.run(main())
