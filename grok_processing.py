@@ -37,7 +37,7 @@ logger.addHandler(stream_handler)
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 60  # 秒（放寬至 60 秒）
+API_TIMEOUT = 60  # 秒
 
 def clean_html(text):
     """
@@ -192,8 +192,77 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    status_code = response.status  # 獲取 HTTP 狀態碼
+                    status_code = response.status
+                    response_text = await response.text()  # 獲取原始回應文本
+                    if status_code != 200:
+                        logger.warning(
+                            json.dumps({
+                                "event": "grok3_api_call",
+                                "function": "analyze_and_screen",
+                                "action": "問題意圖分析失敗",
+                                "query": user_query,
+                                "status": "failed",
+                                "status_code": status_code,
+                                "response_text": response_text[:500],  # 截斷避免日誌過長
+                                "attempt": attempt + 1
+                            }, ensure_ascii=False),
+                            extra={"function": "analyze_and_screen"}
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return {
+                            "direct_response": True,
+                            "intent": "general_query",
+                            "theme": "",
+                            "category_ids": [],
+                            "data_type": "none",
+                            "post_limit": 5,
+                            "reply_limit": 0,
+                            "filters": {},
+                            "processing": "general",
+                            "candidate_thread_ids": [],
+                            "top_thread_ids": [],
+                            "needs_advanced_analysis": False,
+                            "reason": f"API request failed with status {status_code}: {response_text[:200]}"
+                        }
+                    
                     data = await response.json()
+                    # 驗證回應結構
+                    if "choices" not in data or not data["choices"]:
+                        logger.warning(
+                            json.dumps({
+                                "event": "grok3_api_call",
+                                "function": "analyze_and_screen",
+                                "action": "問題意圖分析失敗",
+                                "query": user_query,
+                                "status": "failed",
+                                "status_code": status_code,
+                                "response_text": json.dumps(data, ensure_ascii=False)[:500],
+                                "error": "Missing 'choices' in response",
+                                "attempt": attempt + 1
+                            }, ensure_ascii=False),
+                            extra={"function": "analyze_and_screen"}
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return {
+                            "direct_response": True,
+                            "intent": "general_query",
+                            "theme": "",
+                            "category_ids": [],
+                            "data_type": "none",
+                            "post_limit": 5,
+                            "reply_limit": 0,
+                            "filters": {},
+                            "processing": "general",
+                            "candidate_thread_ids": [],
+                            "top_thread_ids": [],
+                            "needs_advanced_analysis": False,
+                            "reason": "Invalid API response: missing 'choices'"
+                        }
+                    
                     result = json.loads(data["choices"][0]["message"]["content"])
                     # 確保必要字段存在
                     result.setdefault("direct_response", False)
@@ -226,7 +295,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     )
                     return result
         except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
-            status_code = getattr(e, 'status', None) or "unknown"  # 獲取錯誤狀態碼
+            status_code = getattr(e, 'status', None) or "unknown"
             logger.warning(
                 json.dumps({
                     "event": "grok3_api_call",
@@ -408,7 +477,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             for attempt in range(3):
                 try:
                     async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                        status_code = response.status  # 獲取 HTTP 狀態碼
+                        status_code = response.status
                         async for line in response.content:
                             if line and not line.isspace():
                                 line_str = line.decode('utf-8').strip()
@@ -446,7 +515,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         )
                         return
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
-                    status_code = getattr(e, 'status', None) or "unknown"  # 獲取錯誤狀態碼
+                    status_code = getattr(e, 'status', None) or "unknown"
                     logger.warning(
                         json.dumps({
                             "event": "grok3_api_call",
@@ -572,7 +641,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 if progress_callback:
                     progress_callback("正在篩選帖子", 0.3)
                 
-                # 記錄每個帖子的篩選結果
                 for item in initial_threads:
                     thread_id = str(item["thread_id"])
                     no_of_reply = item.get("no_of_reply", 0)
@@ -799,7 +867,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         previous_thread_ids = previous_thread_ids or []
         filtered_items = []
         
-        # 記錄每個帖子的篩選結果
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             no_of_reply = item.get("no_of_reply", 0)
