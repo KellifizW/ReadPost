@@ -17,7 +17,7 @@ from lihkg_api import get_category_name
 nest_asyncio.apply()
 
 # 配置日誌記錄器
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # 香港時區
@@ -119,7 +119,7 @@ async def main():
 
                 # 若無帖子數據
                 if not thread_data:
-                    answer = f"在 {question_cat} 中未找到符合條件的帖子。"
+                    answer = f"在 {question_cat} 中未找到符合條件的帖子，可能回覆數或點贊數過低，請嘗試其他分類。"
                     with st.chat_message("assistant"):
                         st.markdown(answer)
                     st.session_state.chat_history[-1]["answer"] = answer
