@@ -260,7 +260,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據, 確保內容連貫無特殊字符."}, {"role": "user", "content": prompt}],
-        "max_tokens": 3000,
+        "max_tokens": 5000,  # 增加 max_tokens 至 5000
         "temperature": 0.3,
         "stream": True
     }
@@ -269,6 +269,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
     response_chunks = []
     start_time = time.time()
     chunk_count = 0
+    input_tokens = 0
+    output_tokens = 0
 
     for attempt in range(3):
         try:
@@ -289,8 +291,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
                                         response_chunks.append(content)
                                         chunk_count += 1
 
-                                        # 每 50 字或遇到句號記錄一次日誌並 yield
-                                        if len(response_buffer) >= 50 or content.endswith(('。', '！', '？')):
+                                        # 放寬條件：每 100 字或遇到句號時 yield
+                                        if len(response_buffer) >= 100 or content.endswith(('。', '！', '？')):
                                             if chunk_count == 1:
                                                 logger.debug(f"Stream chunk started: {response_buffer[:50]}...")
                                             else:
@@ -305,10 +307,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
                     if response_buffer:
                         logger.debug(f"Stream chunk ended: {response_buffer[:50]}...")
                         yield response_buffer
-                    # 記錄總結統計
+                    # 記錄總結統計，包括 tokens 使用
                     total_response = "".join(response_chunks)
                     duration = time.time() - start_time
-                    logger.info(f"Stream response completed: total_chars={len(total_response)}, duration={duration:.3f}s")
+                    # 簡單估計 tokens（每 4 字符約 1 token）
+                    input_tokens = len(prompt) // 4
+                    output_tokens = len(total_response) // 4
+                    logger.info(f"Stream response completed: total_chars={len(total_response)}, duration={duration:.3f}s, input_tokens={input_tokens}, output_tokens={output_tokens}")
                     return
         except Exception as e:
             logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}")
@@ -343,6 +348,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     thread_data = []
     rate_limit_info = []
+    
+    # 提取 top_thread_ids
+    top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
     
     if is_advanced and top_thread_ids:
         for thread_id in top_thread_ids:
