@@ -16,7 +16,6 @@ import random
 import math
 import time
 import logging
-import traceback
 import streamlit as st
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
@@ -58,6 +57,7 @@ def clean_html(text):
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件。
+    依賴 Grok 3 進行意圖分類和參數設置，減少硬編碼。
     """
     conversation_context = conversation_context or []
     prompt = f"""
@@ -71,20 +71,47 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 判斷問題意圖並分類，選擇以下之一：
-       - list_titles：列出帖子標題。
-       - list_data：查詢可抓取數據類型。
-       - summarize_posts：總結帖子內容。
-       - analyze_sentiment：分析帖子情緒。
-       - general_query：一般問題。
-    2. 若 direct_response=False，識別主題（感動、搞笑、財經等），標記為 theme。
-    3. 確定帖子數量（post_limit，1-10）。
-    4. 若 intent in ["summarize_posts", "analyze_sentiment"] 且提供 thread_data，檢查帖子是否達動態閾值。
-    5. 篩選帖子，設置初始抓取（30-90個標題）。
-    6. 設置參數：direct_response, intent, theme, category_ids, data_type, post_limit, reply_limit, filters, processing, candidate_thread_ids, top_thread_ids, needs_advanced_analysis, reason。
+    1. 分析問題意圖，動態分類（例如：列出帖子、總結內容、分析情緒、一般問題，或其他自定義意圖）。
+    2. 若問題不需抓取帖子（例如一般問題），設置 direct_response=True，category_ids=[]。
+    3. 若問題涉及「熱門」，根據回覆數、點讚數等標準，選最多10個帖子ID（top_thread_ids）。
+    4. 動態確定帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
+    5. 設置篩選條件（filters，例如 min_replies, min_likes），根據問題語義動態調整。
+    6. 若為進階分析（is_advanced=True），檢查是否需要更多帖子或回覆，設置 needs_advanced_analysis。
+    7. 提供候選帖子ID（candidate_thread_ids）和處理方式（processing，例如 list, summarize, sentiment）。
+    8. 若無法確定參數，提供原因（reason）。
 
-    輸出：
-    {{"direct_response": false, "intent": "", "theme": "", "category_ids": [], "data_type": "", "post_limit": 5, "reply_limit": 0, "filters": {{}}, "processing": "", "candidate_thread_ids": [], "top_thread_ids": [], "needs_advanced_analysis": false, "reason": ""}}
+    輸出格式：
+    {{
+        "direct_response": boolean,
+        "intent": string,
+        "theme": string,
+        "category_ids": array,
+        "data_type": string (title_only, replies, both),
+        "post_limit": integer,
+        "reply_limit": integer,
+        "filters": object,
+        "processing": string,
+        "candidate_thread_ids": array,
+        "top_thread_ids": array,
+        "needs_advanced_analysis": boolean,
+        "reason": string
+    }}
+    示例：
+    {{
+        "direct_response": false,
+        "intent": "summarize_posts",
+        "theme": "熱門",
+        "category_ids": ["{cat_id}"],
+        "data_type": "both",
+        "post_limit": 5,
+        "reply_limit": 100,
+        "filters": {{"min_replies": 50, "min_likes": 20}},
+        "processing": "summarize",
+        "candidate_thread_ids": [],
+        "top_thread_ids": [],
+        "needs_advanced_analysis": false,
+        "reason": ""
+    }}
     """
     
     try:
@@ -92,15 +119,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     except KeyError as e:
         logger.error(f"Grok 3 API key missing: {str(e)}", extra={"function": "analyze_and_screen"})
         return {
-            "direct_response": False,
-            "intent": "unknown",
+            "direct_response": True,
+            "intent": "general_query",
             "theme": "",
-            "category_ids": [cat_id],
-            "data_type": "both",
+            "category_ids": [],
+            "data_type": "none",
             "post_limit": 5,
-            "reply_limit": 75,
-            "filters": {"min_replies": 20, "min_likes": 10},
-            "processing": "summarize",
+            "reply_limit": 0,
+            "filters": {},
+            "processing": "general",
             "candidate_thread_ids": [],
             "top_thread_ids": [],
             "needs_advanced_analysis": False,
@@ -116,77 +143,95 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     payload = {
         "model": "grok-3-beta",
         "messages": messages,
-        "max_tokens": 200,
+        "max_tokens": 300,  # 增加 token 以支持更詳細的分析
         "temperature": 0.7
     }
     
-    start_time = time.time()
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                data = await response.json()
-                result = json.loads(data["choices"][0]["message"]["content"])
-                result["category_ids"] = [cat_id] if result.get("intent") == "list_titles" or not result.get("direct_response", False) else []
-                result["intent"] = result.get("intent", "unknown")
-                result["needs_advanced_analysis"] = result.get("needs_advanced_analysis", False)
-                result["reason"] = result.get("reason", "")
-                result["post_limit"] = result.get("post_limit", 5)
-                result["filters"] = result.get("filters", {"min_replies": 0, "min_likes": 0})
-                response_length = len(data["choices"][0]["message"]["content"])
-                duration = time.time() - start_time
-                logger.info(
-                    json.dumps({
-                        "event": "grok3_api_call",
-                        "function": "analyze_and_screen",
-                        "query": user_query,
-                        "status": "success",
-                        "response_length": response_length,
-                        "duration_seconds": duration,
-                        "intent": result["intent"],
-                        "needs_advanced_analysis": result["needs_advanced_analysis"],
-                        "filters": result["filters"]
-                    }, ensure_ascii=False),
-                    extra={"function": "analyze_and_screen"}
-                )
-                return result
-    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
-        response_length = 0
-        duration = time.time() - start_time
-        logger.error(
-            json.dumps({
-                "event": "grok3_api_call",
-                "function": "analyze_and_screen",
-                "query": user_query,
-                "status": "failed",
-                "error_type": type(e).__name__,
-                "error": str(e),
-                "response_length": response_length,
-                "duration_seconds": duration
-            }, ensure_ascii=False),
-            extra={"function": "analyze_and_screen"}
-        )
-        return {
-            "direct_response": True,
-            "intent": "general_query",
-            "theme": "",
-            "category_ids": [],
-            "data_type": "none",
-            "post_limit": 5,
-            "reply_limit": 75,
-            "filters": {"min_replies": 0, "min_likes": 0},
-            "processing": "general",
-            "candidate_thread_ids": [],
-            "top_thread_ids": [],
-            "needs_advanced_analysis": False,
-            "reason": f"Analysis failed: {str(e)}"
-        }
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    data = await response.json()
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    # 確保必要字段存在，設置合理默認值
+                    result.setdefault("direct_response", False)
+                    result.setdefault("intent", "general_query")
+                    result.setdefault("theme", "")
+                    result.setdefault("category_ids", [cat_id] if not result.get("direct_response") else [])
+                    result.setdefault("data_type", "both")
+                    result.setdefault("post_limit", 5)
+                    result.setdefault("reply_limit", 100)
+                    result.setdefault("filters", {"min_replies": 50, "min_likes": 20})
+                    result.setdefault("processing", "summarize")
+                    result.setdefault("candidate_thread_ids", [])
+                    result.setdefault("top_thread_ids", [])
+                    result.setdefault("needs_advanced_analysis", False)
+                    result.setdefault("reason", "")
+                    logger.info(
+                        json.dumps({
+                            "event": "grok3_api_call",
+                            "function": "analyze_and_screen",
+                            "query": user_query,
+                            "status": "success",
+                            "intent": result["intent"],
+                            "needs_advanced_analysis": result["needs_advanced_analysis"],
+                            "filters": result["filters"]
+                        }, ensure_ascii=False),
+                        extra={"function": "analyze_and_screen"}
+                    )
+                    return result
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+            logger.warning(
+                json.dumps({
+                    "event": "grok3_api_call",
+                    "function": "analyze_and_screen",
+                    "query": user_query,
+                    "status": "failed",
+                    "error_type": type(e).__name__,
+                    "error": str(e)
+                }, ensure_ascii=False),
+                extra={"function": "analyze_and_screen"}
+            )
+            if attempt < max_retries - 1:
+                # 使用備用提示詞，簡化要求
+                simplified_prompt = f"""
+                你是 LIHKG 論壇助手，分析用戶問題，輸出 JSON。
+                問題：{user_query}
+                分類：{cat_name}（cat_id={cat_id})
+                步驟：
+                1. 判斷意圖（例如：列出帖子、總結、情緒分析、一般問題）。
+                2. 設置帖子數量（post_limit，1-20）、回覆數量（reply_limit，0-500）。
+                3. 設置篩選條件（filters，例如 min_replies, min_likes）。
+                輸出：
+                {{"direct_response": boolean, "intent": string, "theme": string, "category_ids": array, "data_type": string, "post_limit": integer, "reply_limit": integer, "filters": object, "processing": string, "candidate_thread_ids": array, "top_thread_ids": array, "needs_advanced_analysis": boolean, "reason": string}}
+                """
+                messages[-1]["content"] = simplified_prompt
+                payload["max_tokens"] = 200
+                await asyncio.sleep(2)
+                continue
+            return {
+                "direct_response": True,
+                "intent": "general_query",
+                "theme": "",
+                "category_ids": [],
+                "data_type": "none",
+                "post_limit": 5,
+                "reply_limit": 0,
+                "filters": {},
+                "processing": "general",
+                "candidate_thread_ids": [],
+                "top_thread_ids": [],
+                "needs_advanced_analysis": False,
+                "reason": f"Analysis failed after {max_retries} attempts: {str(e)}"
+            }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
     使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
     """
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 0, "min_likes": 0}
+    filters = filters or {"min_replies": 50, "min_likes": 20}
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -275,7 +320,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "stream": True
     }
     
-    start_time = time.time()
     response_content = ""
     async with aiohttp.ClientSession() as session:
         try:
@@ -302,15 +346,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         continue
                         if needs_advanced_analysis and metadata and filtered_thread_data:
                             yield f"\n建議：為確保分析全面，建議抓取更多帖子頁數。{reason}\n"
-                        duration = time.time() - start_time
                         logger.info(
                             json.dumps({
                                 "event": "grok3_api_call",
                                 "function": "stream_grok3_response",
                                 "query": user_query,
-                                "status": "success",
-                                "response_length": len(response_content),
-                                "duration_seconds": duration
+                                "status": "success"
                             }, ensure_ascii=False),
                             extra={"function": "stream_grok3_response"}
                         )
@@ -326,7 +367,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         continue
                     raise
         except Exception as e:
-            duration = time.time() - start_time
             logger.error(
                 json.dumps({
                     "event": "grok3_api_call",
@@ -334,9 +374,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "query": user_query,
                     "status": "failed",
                     "error_type": type(e).__name__,
-                    "error": str(e),
-                    "response_length": len(response_content),
-                    "duration_seconds": duration
+                    "error": str(e)
                 }, ensure_ascii=False),
                 extra={"function": "stream_grok3_response"}
             )
@@ -399,7 +437,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                         initial_threads = initial_threads[:90]
                         break
                 
-                filters = analysis.get("filters", {"min_replies": 0, "min_likes": 0})
+                filters = analysis.get("filters", {})
                 min_replies = filters.get("min_replies", 0)
                 min_likes = filters.get("min_likes", 0)
                 previous_thread_ids = previous_thread_ids or []
@@ -411,7 +449,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     and str(item["thread_id"]) not in previous_thread_ids
                 ]
                 
-                post_limit = min(analysis.get("post_limit", 5), 10)
+                post_limit = min(analysis.get("post_limit", 5), 20)
                 if not filtered_items:
                     logger.warning(
                         f"No threads meet filters: min_replies={min_replies}, min_likes={min_likes}, trying without filters",
@@ -464,11 +502,11 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "analysis": analysis
             }
         
-        post_limit = min(analysis.get("post_limit", 3), 10)
-        reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
-        filters = analysis.get("filters", {"min_replies": 20, "min_likes": 10})
-        min_replies = filters.get("min_replies", 20)
-        min_likes = filters.get("min_likes", 10)
+        post_limit = min(analysis.get("post_limit", 5), 20)
+        reply_limit = analysis.get("reply_limit", 100)  # 完全依賴 analyze_and_screen
+        filters = analysis.get("filters", {})
+        min_replies = filters.get("min_replies", 0)
+        min_likes = filters.get("min_likes", 0)
         candidate_thread_ids = analysis.get("candidate_thread_ids", [])
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         
@@ -529,10 +567,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 rate_limit_info.extend(thread_result.get("rate_limit_info", []))
                 
                 replies = thread_result.get("replies", [])
-                if not replies and thread_result.get("total_replies", 0) >= min_replies:
-                    logger.warning(f"Invalid thread: {thread_id}", extra={"function": "process_user_question"})
-                    continue
-                
                 all_replies = existing_replies + [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in replies]
                 sorted_replies = sorted(all_replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
                 all_fetched_pages = sorted(set(fetched_pages + thread_result.get("fetched_pages", [])))
@@ -593,9 +627,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 initial_threads = initial_threads[:90]
                 break
         
-        filters = analysis.get("filters", {"min_replies": 20, "min_likes": 10})
-        min_replies = filters.get("min_replies", 20)
-        min_likes = filters.get("min_likes", 10)
+        filters = analysis.get("filters", {})
+        min_replies = filters.get("min_replies", 0)
+        min_likes = filters.get("min_likes", 0)
         filtered_items = [
             item for item in initial_threads
             if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
@@ -630,19 +664,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
-        analysis = await analyze_and_screen(
-            user_query=user_question,
-            cat_name=selected_cat,
-            cat_id=cat_id,
-            thread_titles=[item["title"] for item in filtered_items[:90]],
-            metadata=None,
-            thread_data=None,
-            conversation_context=conversation_context
-        )
-        top_thread_ids = analysis.get("top_thread_ids", [])
         if not top_thread_ids and filtered_items:
-            top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
-            logger.warning(f"No top_thread_ids, randomly selected: {top_thread_ids}", extra={"function": "process_user_question"})
+            # 備用邏輯：若 Grok 3 未提供 top_thread_ids，按熱門程度排序
+            sorted_items = sorted(
+                filtered_items,
+                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                reverse=True
+            )
+            top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+            logger.info(f"Generated top_thread_ids based on popularity: {top_thread_ids}", extra={"function": "process_user_question"})
         
         candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
         if not candidate_threads:
@@ -657,7 +687,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=25,
+                max_replies=reply_limit,
                 fetch_last_pages=0
             )
             request_counter = thread_result.get("request_counter", request_counter)
@@ -666,11 +696,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_info.extend(thread_result.get("rate_limit_info", []))
             
             replies = thread_result.get("replies", [])
-            if not replies and thread_result.get("total_replies", 0) >= min_replies:
-                logger.warning(f"Invalid thread: {thread_id}", extra={"function": "process_user_question"})
-                continue
-            
-            sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:25]
+            sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
             thread_data.append({
                 "thread_id": thread_id,
                 "title": item["title"],
@@ -710,10 +736,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_info.extend(thread_result.get("rate_limit_info", []))
             
             replies = thread_result.get("replies", [])
-            if not replies and thread_result.get("total_replies", 0) >= min_replies:
-                logger.warning(f"Invalid thread: {thread_id}", extra={"function": "process_user_question"})
-                continue
-            
             sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
             thread_data.append({
                 "thread_id": thread_id,
