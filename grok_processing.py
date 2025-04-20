@@ -23,9 +23,11 @@ GROK3_TOKEN_LIMIT = 100000
 
 def clean_html(text):
     """
-    清理 HTML 標籤, 規範化文本.
+    清理 HTML 標籤和特殊字符, 規範化文本.
     """
-    clean = re.compile(r'<[^>]+>')
+    if not isinstance(text, str):
+        return ""
+    clean = re.compile(r'<[^>]+>|[^\w\s.,!?，。！？]')
     text = clean.sub('', text)
     return re.sub(r'\s+', ' ', text).strip()
 
@@ -46,6 +48,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     3. 篩選帖子:
        - 若無標題, 設置初始抓取 (30-150個標題).
        - 從標題選10個候選 (candidate_thread_ids), 再選 top_thread_ids.
+       - 確保 top_thread_ids 在提供的帖子標題中.
     4. 設置參數:
        - theme: 問題主題.
        - category_ids: [cat_id].
@@ -78,7 +81,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "model": "grok-3-beta",
         "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據."}, {"role": "user", "content": prompt}],
         "max_tokens": 600,
-        "temperature": 0.7
+        "temperature": 0.5
     }
 
     try:
@@ -110,53 +113,93 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
 
     filtered_thread_data = {
         tid: {
-            "thread_id": data["thread_id"], "title": data["title"], "no_of_reply": data.get("no_of_reply", 0),
+            "thread_id": data["thread_id"], "title": clean_html(data["title"]), "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0), "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0][:25],
+            "replies": [
+                {
+                    "msg": clean_html(r["msg"]),
+                    "like_count": r.get("like_count", 0),
+                    "dislike_count": r.get("dislike_count", 0),
+                    "reply_time": r.get("reply_time", 0)
+                }
+                for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0
+            ][:25],
             "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items()
     }
 
     prompt_templates = {
         "emotion_focused_summary": f"""
-        總結 LIHKG 感動或溫馨帖子, 300-500字. 問題: {user_query}
+        總結 LIHKG 感動或溫馨帖子, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
         回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦感動情緒, 引用高關注回覆, 適配分類語氣 (吹水台輕鬆, 創意台溫馨).
+        要求:
+        - 開頭介紹帖子標題和主題.
+        - 概述回覆數、點贊數和討論熱度.
+        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其觀點.
+        - 以輕鬆語氣適配吹水台, 溫馨語氣適配創意台.
+        - 結尾總結討論的情感傾向.
         輸出: 總結
         """,
         "humor_focused_summary": f"""
-        總結 LIHKG 幽默或搞笑帖子, 300-500字. 問題: {user_query}
+        總結 LIHKG 幽默或搞笑帖子, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
         回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦幽默情緒, 引用高關注回覆, 適配分類語氣 (吹水台輕鬆, 成人台大膽).
+        要求:
+        - 開頭介紹帖子標題和主題.
+        - 概述回覆數、點贊數和討論熱度.
+        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其幽默點.
+        - 以輕鬆語氣適配吹水台, 大膽語氣適配成人台.
+        - 結尾總結討論的幽默效果.
         輸出: 總結
         """,
         "professional_summary": f"""
-        總結 LIHKG 財經或時事帖子, 300-500字. 問題: {user_query}
+        總結 LIHKG 財經或時事帖子, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
         回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦專業觀點, 引用高關注回覆, 適配分類語氣 (財經台專業, 時事台嚴肅).
+        要求:
+        - 開頭介紹帖子標題和主題.
+        - 概述回覆數、點贊數和討論熱度.
+        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其觀點.
+        - 以專業語氣適配財經台, 嚴肅語氣適配時事台.
+        - 結尾總結討論的觀點分歧.
         輸出: 總結
         """,
         "summarize": f"""
-        總結 LIHKG 帖子, 300-500字. 問題: {user_query}
+        總結 LIHKG 帖子, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
         回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        引用高關注回覆, 適配分類語氣.
+        要求:
+        - 開頭介紹帖子標題和主題.
+        - 概述回覆數、點贊數和討論熱度.
+        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其內容.
+        - 適配分類語氣（吹水台輕鬆, 創意台溫馨, 財經台專業等）.
+        - 結尾總結討論的主要觀點或趨勢.
         輸出: 總結
         """,
         "sentiment": f"""
-        分析 LIHKG 帖子情緒. 問題: {user_query}
+        分析 LIHKG 帖子情緒, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
         回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        判斷情緒分佈 (正面, 負面, 中立), 聚焦高關注回覆.
+        要求:
+        - 開頭介紹帖子標題和主題.
+        - 判斷情緒分佈 (正面, 負面, 中立), 給出百分比.
+        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其情緒.
+        - 適配分類語氣.
+        - 結尾總結情緒依據.
         輸出: 情緒分析: 正面XX%, 負面XX%, 中立XX%\n依據: ...
         """
     }
 
-    prompt = prompt_templates.get(processing, f"直接回答問題, 50-100字. 問題: {user_query}\n輸出: 回應")
+    prompt = prompt_templates.get(processing, f"""
+    直接回答問題, 50-100字, 結構清晰. 問題: {user_query}
+    要求:
+    - 簡潔回答用戶問題.
+    - 若涉及帖子, 提及標題和簡要觀點.
+    - 適配分類語氣.
+    輸出: 回應
+    """)
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
@@ -166,9 +209,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
-        "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據."}, {"role": "user", "content": prompt}],
-        "max_tokens": 1000,
-        "temperature": 0.7,
+        "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據, 確保內容連貫無亂碼."}, {"role": "user", "content": prompt}],
+        "max_tokens": 2000,
+        "temperature": 0.5,
         "stream": True
     }
 
@@ -179,7 +222,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     async for line in response.content:
                         if line and not line.isspace():
-                            line_str = line.decode('utf-8').strip()
+                            line_str = line.decode('utf-8', errors='ignore').strip()
                             if line_str == "data: [DONE]":
                                 break
                             if line_str.startswith("data: "):
@@ -187,18 +230,21 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
                                     chunk = json.loads(line_str[6:])
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content and content not in response_chunks:
+                                        # 清理亂碼和無效字符
+                                        content = re.sub(r'[^\w\s.,!?，。！？]', '', content)
                                         response_chunks.append(content)
                                         yield content
                                 except json.JSONDecodeError:
+                                    logger.debug(f"Invalid JSON chunk: {line_str}")
                                     continue
                     logger.info("Stream response completed")
                     return
         except Exception as e:
             logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(5 * attempt)
                 continue
-            yield f"錯誤: 連線失敗, 請稍後重試"
+            yield f"錯誤: 無法連接到 Grok 3 API，請稍後重試 ({str(e)})"
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, rate_limit_info):
@@ -239,6 +285,12 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         logger.debug(f"Sample thread data: {[{'thread_id': t['thread_id'], 'no_of_reply': t.get('no_of_reply', 0), 'like_count': t.get('like_count', 0)} for t in initial_threads[:5]]}")
     else:
         logger.warning("No threads fetched from API")
+
+    # 驗證 top_thread_ids
+    available_thread_ids = {str(item["thread_id"]) for item in initial_threads}
+    unmatched_ids = [tid for tid in top_thread_ids if str(tid) not in available_thread_ids]
+    if unmatched_ids:
+        logger.warning(f"Top thread IDs not in fetched data: {unmatched_ids}")
 
     filtered_items = []
     for item in initial_threads:
@@ -308,7 +360,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "thread_id": thread_id, "title": item["title"], "no_of_reply": item.get("no_of_reply", 0),
             "last_reply_time": item.get("last_reply_time", 0), "like_count": item.get("like_count", 0),
             "dislike_count": item.get("dislike_count", 0),
-            "replies": [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in sorted_replies],
+            "replies": [
+                {"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)}
+                for r in sorted_replies
+            ],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
         st.session_state.thread_cache[thread_id]["data"].update({
