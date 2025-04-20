@@ -117,9 +117,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing):
-    """
-    使用 Grok 3 API 生成流式回應.
-    """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
@@ -145,48 +142,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
     }
 
     prompt_templates = {
-        "emotion_focused_summary": f"""
-        總結 LIHKG 感動或溫馨帖子, 300-500字, 結構清晰. 問題: {user_query}
-        帖子: {json.dumps(metadata, ensure_ascii=False)}
-        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        要求:
-        - 開頭介紹帖子標題、ID和主題.
-        - 概述回覆數、點贊數和討論熱度.
-        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其觀點.
-        - 若回覆數據不足, 註明限制並簡化總結.
-        - 以輕鬆語氣適配吹水台, 溫馨語氣適配創意台.
-        - 結尾總結討論的情感傾向.
-        - 確保無特殊字符或亂碼.
-        輸出: 總結
-        """,
-        "humor_focused_summary": f"""
-        總結 LIHKG 幽默或搞笑帖子, 300-500字, 結構清晰. 問題: {user_query}
-        帖子: {json.dumps(metadata, ensure_ascii=False)}
-        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        要求:
-        - 開頭介紹帖子標題、ID和主題.
-        - 概述回覆數、點贊數和討論熱度.
-        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其幽默點.
-        - 若回覆數據不足, 註明限制並簡化總結.
-        - 以輕鬆語氣適配吹水台, 大膽語氣適配成人台.
-        - 結尾總結討論的幽默效果.
-        - 確保無特殊字符或亂碼.
-        輸出: 總結
-        """,
-        "professional_summary": f"""
-        總結 LIHKG 財經或時事帖子, 300-500字, 結構清晰. 問題: {user_query}
-        帖子: {json.dumps(metadata, ensure_ascii=False)}
-        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        要求:
-        - 開頭介紹帖子標題、ID和主題.
-        - 概述回覆數、點贊數和討論熱度.
-        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其觀點.
-        - 若回覆數據不足, 註明限制並簡化總結.
-        - 以專業語氣適配財經台, 嚴肅語氣適配時事台.
-        - 結尾總結討論的觀點分歧.
-        - 確保無特殊字符或亂碼.
-        輸出: 總結
-        """,
         "summarize": f"""
         總結 LIHKG 帖子, 300-500字, 結構清晰. 問題: {user_query}
         帖子: {json.dumps(metadata, ensure_ascii=False)}
@@ -200,20 +155,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
         - 結尾總結討論的主要觀點或趨勢.
         - 確保無特殊字符或亂碼.
         輸出: 總結
-        """,
-        "sentiment": f"""
-        分析 LIHKG 帖子情緒, 300-500字, 結構清晰. 問題: {user_query}
-        帖子: {json.dumps(metadata, ensure_ascii=False)}
-        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        要求:
-        - 開頭介紹帖子標題、ID和主題.
-        - 判斷情緒分佈 (正面, 負面, 中立), 給出百分比.
-        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其情緒.
-        - 若回覆數據不足, 註明限制並簡化分析.
-        - 適配分類語氣.
-        - 結尾總結情緒依據.
-        - 確保無特殊字符或亂碼.
-        輸出: 情緒分析: 正面XX%, 負面XX%, 中立XX%\n依據: ...
         """
     }
 
@@ -241,7 +182,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
         "stream": True
     }
 
+    response_buffer = ""
     response_chunks = []
+    start_time = time.time()
+    chunk_count = 0
+
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as session:
@@ -257,13 +202,30 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content and content not in response_chunks:
                                         content = re.sub(r'[^\w\s.,!?，。！？]', '', content)
-                                        logger.debug(f"Stream chunk: {content[:50]}...")
+                                        response_buffer += content
                                         response_chunks.append(content)
-                                        yield content
+                                        chunk_count += 1
+
+                                        # 每 50 字或遇到句號記錄一次日誌
+                                        if len(response_buffer) >= 50 or content.endswith(('。', '！', '？')):
+                                            if chunk_count == 1:
+                                                logger.debug(f"Stream chunk started: {response_buffer[:50]}...")
+                                            else:
+                                                logger.debug(f"Stream chunk: {response_buffer[:50]}...")
+                                            yield response_buffer
+                                            response_buffer = ""
+
                                 except json.JSONDecodeError:
                                     logger.debug(f"Invalid JSON chunk: {line_str}")
                                     continue
-                    logger.info("Stream response completed")
+                    # 記錄剩餘的緩衝內容
+                    if response_buffer:
+                        logger.debug(f"Stream chunk ended: {response_buffer[:50]}...")
+                        yield response_buffer
+                    # 記錄總結統計
+                    total_response = "".join(response_chunks)
+                    duration = time.time() - start_time
+                    logger.info(f"Stream response completed: total_chars={len(total_response)}, duration={duration:.3f}s")
                     return
         except Exception as e:
             logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}")
