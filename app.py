@@ -12,6 +12,7 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
+import json
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 from lihkg_api import get_category_name
 
@@ -66,7 +67,11 @@ async def main():
         "財經台": 15, "成人台": 29, "創意台": 31
     }
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
-    cat_id = cat_id_map[selected_cat]
+    cat_id = str(cat_id_map[selected_cat])  # 確保 cat_id 為字符串
+    st.write(f"當前討論區：{selected_cat}")
+
+    # 記錄選單選擇
+    logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
     # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
@@ -84,7 +89,7 @@ async def main():
     # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題（例如：有哪些搞笑話題？）或一般問題（例如：你是誰？）")
     if user_question and not st.session_state.awaiting_response:
-        logger.info(f"User query: {user_question}, category: {selected_cat}")
+        logger.info(f"User query: {user_question}, category: {selected_cat}, cat_id: {cat_id}")
         with st.chat_message("user"):
             st.markdown(user_question)
         st.session_state.awaiting_response = True
@@ -127,12 +132,14 @@ async def main():
                             metadata=[],
                             thread_data={},
                             processing=analysis.get("processing", "general"),
+                            selected_cat=selected_cat,
                             conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
                             grok_container.markdown(response)
                     logger.info(f"Direct response generated for non-LIHKG query: {user_question}")
                     st.session_state.chat_history[-1]["answer"] = response
+                    st.session_state.conversation_context.append({"role": "user", "content": user_question})
                     st.session_state.conversation_context.append({"role": "assistant", "content": response})
                     st.session_state.awaiting_response = False
                     return
@@ -165,6 +172,7 @@ async def main():
                     with st.chat_message("assistant"):
                         st.markdown(answer)
                     st.session_state.chat_history[-1]["answer"] = answer
+                    st.session_state.conversation_context.append({"role": "user", "content": user_question})
                     st.session_state.conversation_context.append({"role": "assistant", "content": answer})
                     st.session_state.awaiting_response = False
                     return
@@ -196,12 +204,22 @@ async def main():
                         metadata=metadata,
                         thread_data={item["thread_id"]: item for item in thread_data},
                         processing=analysis["processing"],
+                        selected_cat=selected_cat,
                         conversation_context=st.session_state.conversation_context
                     ):
                         response += chunk
                         grok_container.markdown(response)
 
-                logger.info(f"Processed query: {user_question}, category={question_cat}, threads={len(thread_data)}, rate_limit={rate_limit_info}")
+                logger.info(
+                    json.dumps({
+                        "event": "query_processed",
+                        "query": user_question,
+                        "category": question_cat,
+                        "cat_id": cat_id,
+                        "threads": len(thread_data),
+                        "rate_limit_info": rate_limit_info
+                    }, ensure_ascii=False)
+                )
 
                 # 進階分析（避免重複帖子）
                 processed_thread_ids = [str(item["thread_id"]) for item in thread_data]
@@ -221,7 +239,7 @@ async def main():
                         user_question=user_question,
                         selected_cat=question_cat,
                         cat_id=cat_id,
-                        analysis=analysis_advanced["suggestions"],
+                        analysis=analysis_advanced,
                         request_counter=st.session_state.request_counter,
                         last_reset=st.session_state.last_reset,
                         rate_limit_until=st.session_state.rate_limit_until,
@@ -261,6 +279,7 @@ async def main():
                             metadata=metadata_advanced,
                             thread_data={item["thread_id"]: item for item in thread_data_advanced},
                             processing=analysis["processing"],
+                            selected_cat=selected_cat,
                             conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
@@ -278,6 +297,7 @@ async def main():
                 with st.chat_message("assistant"):
                     st.markdown(error_message)
                 st.session_state.chat_history[-1]["answer"] = error_message
+                st.session_state.conversation_context.append({"role": "user", "content": user_question})
                 st.session_state.conversation_context.append({"role": "assistant", "content": error_message})
                 st.session_state.awaiting_response = False
 
@@ -315,6 +335,7 @@ async def main():
                             metadata=[item for item in thread_data if str(item["thread_id"]) == thread_id],
                             thread_data={thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
                             processing="summarize",
+                            selected_cat=selected_cat,
                             conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
