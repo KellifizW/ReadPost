@@ -18,7 +18,9 @@ from lihkg_api import get_category_name
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter("%(asctime)s - %(level
+
+name)s - %(message)s")
 
 # 檔案處理器：寫入 app.log
 file_handler = logging.FileHandler("app.log")
@@ -82,7 +84,7 @@ async def main():
             st.markdown(chat["answer"])
 
     # 用戶輸入
-    user_question = st.chat_input("請輸入 LIHKG 話題（例如：有哪些搞笑話題？）")
+    user_question = st.chat_input("請輸入 LIHKG 話題（例如：有哪些搞笑話題？）或一般問題（例如：你是誰？）")
     if user_question and not st.session_state.awaiting_response:
         logger.info(f"User query: {user_question}, category: {selected_cat}")
         with st.chat_message("user"):
@@ -102,13 +104,13 @@ async def main():
                     return
 
                 # 重置聊天記錄（若問題變化較大）
-                if not st.session_state.last_user_query or len(set(user_query.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
+                if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
                     st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                     st.session_state.thread_cache = {}
                     st.session_state.conversation_context = []
                     st.session_state.last_user_query = user_question
 
-                # 分析問題並篩選帖子
+                # 分析問題並決定處理方式
                 analysis = await analyze_and_screen(
                     user_query=user_question,
                     cat_name=selected_cat,
@@ -116,21 +118,27 @@ async def main():
                     conversation_context=st.session_state.conversation_context
                 )
 
-                # 若無相關分類，直接生成回應
-                if not analysis.get("category_ids"):
+                # 若問題無關 LIHKG，直接生成回應
+                if analysis.get("direct_response", False) or not analysis.get("category_ids"):
                     response = ""
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
-                        async for chunk in stream_grok3_response(user_question, [], {}, "summarize", st.session_state.conversation_context):
+                        async for chunk in stream_grok3_response(
+                            user_question=user_question,
+                            metadata=[],
+                            thread_data={},
+                            processing="summarize",
+                            conversation_context=st.session_state.conversation_context
+                        ):
                             response += chunk
                             grok_container.markdown(response)
-                    logger.info(f"Direct response generated for query: {user_question}")
+                    logger.info(f"Direct response generated for non-LIHKG query: {user_question}")
                     st.session_state.chat_history[-1]["answer"] = response
                     st.session_state.conversation_context.append({"role": "assistant", "content": response})
                     st.session_state.awaiting_response = False
                     return
 
-                # 處理用戶問題
+                # 處理 LIHKG 相關問題
                 result = await process_user_question(
                     user_question=user_question,
                     selected_cat=selected_cat,
@@ -185,18 +193,20 @@ async def main():
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     async for chunk in stream_grok3_response(
-                        user_question,
-                        metadata,
-                        {item["thread_id"]: item for item in thread_data},
-                        analysis["processing"],
-                        st.session_state.conversation_context
+                        user_question=user_question,
+                        metadata=metadata,
+                        thread_data={item["thread_id"]: item for item in thread_data},
+                        processing=analysis["processing"],
+                        conversation_context=st.session_state.conversation_context
                     ):
                         response += chunk
                         grok_container.markdown(response)
 
                 logger.info(f"Processed query: {user_question}, category={question_cat}, threads={len(thread_data)}, rate_limit={rate_limit_info}")
 
-                # 進階分析
+                # 進階分析（避免重複帖子）
+                processed_thread_ids = [str(item["thread_id"]) for item in thread_data]
+                logger.info(f"Starting advanced analysis, excluding thread_ids: {processed_thread_ids}")
                 analysis_advanced = await analyze_and_screen(
                     user_query=user_question,
                     cat_name=question_cat,
@@ -212,12 +222,12 @@ async def main():
                         user_question=user_question,
                         selected_cat=question_cat,
                         cat_id=cat_id,
-                        analysis=analysis,
+                        analysis=analysis_advanced["suggestions"],
                         request_counter=st.session_state.request_counter,
                         last_reset=st.session_state.last_reset,
                         rate_limit_until=st.session_state.rate_limit_until,
                         is_advanced=True,
-                        previous_thread_ids=[str(item["thread_id"]) for item in thread_data],
+                        previous_thread_ids=processed_thread_ids,
                         previous_thread_data={item["thread_id"]: item for item in thread_data},
                         conversation_context=st.session_state.conversation_context
                     )
@@ -248,11 +258,11 @@ async def main():
                             response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
                         response += "\n"
                         async for chunk in stream_grok3_response(
-                            user_question,
-                            metadata_advanced,
-                            {item["thread_id"]: item for item in thread_data_advanced},
-                            analysis["processing"],
-                            st.session_state.conversation_context
+                            user_question=user_question,
+                            metadata=metadata_advanced,
+                            thread_data={item["thread_id"]: item for item in thread_data_advanced},
+                            processing=analysis["processing"],
+                            conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
                             grok_container.markdown(response)
@@ -302,11 +312,11 @@ async def main():
                     with st.chat_message("assistant"):
                         grok_container = st.empty()
                         async for chunk in stream_grok3_response(
-                            st.session_state.last_user_query,
-                            [item for item in thread_data if str(item["thread_id"]) == thread_id],
-                            {thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
-                            "summarize",
-                            st.session_state.conversation_context
+                            user_question=st.session_state.last_user_query,
+                            metadata=[item for item in thread_data if str(item["thread_id"]) == thread_id],
+                            thread_data={thread_id: next(item for item in thread_data if str(item["thread_id"]) == thread_id)},
+                            processing="summarize",
+                            conversation_context=st.session_state.conversation_context
                         ):
                             response += chunk
                             grok_container.markdown(response)
