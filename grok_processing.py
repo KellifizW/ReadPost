@@ -142,7 +142,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     data = await response.json()
                     logger.info(f"Grok 3 API response: status={response.status}")
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    # 確保 filters 的 keywords 為列表
                     if "strategy" in result and "filters" in result["strategy"]:
                         if result["strategy"]["filters"].get("keywords") is None:
                             result["strategy"]["filters"]["keywords"] = []
@@ -195,20 +194,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "like_count": r.get("like_count", 0),
                     "dislike_count": r.get("dislike_count", 0),
                     "reply_time": r.get("reply_time", 0)
-                } for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0
+                } for r in data.get("replies", []) if r.get("msg") and (r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0)
             ][:25],
             "fetched_pages": data.get("fetched_pages", [])
-        } for tid, data in thread_data.items() if "thread_id" in data
+        } for tid, data in thread_data.items() if "thread_id" in data and data.get("replies")
     }
     
     needs_advanced_analysis = False
     reason = ""
     for tid, data in filtered_thread_data.items():
-        total_pages = (data["no_of_reply"] + 24) // 25
+        total_pages = max(1, (data["no_of_reply"] + 24) // 25)
         target_pages = math.ceil(total_pages * 0.6)
         if len(data["fetched_pages"]) < target_pages:
             needs_advanced_analysis = True
             reason += f"帖子 {tid} 僅抓取 {len(data['fetched_pages'])}/{target_pages} 頁，未達60%。 "
+    
+    if not filtered_thread_data:
+        logger.warning("No valid thread data for streaming response")
+        yield "無有效帖子數據，請稍後重試"
+        return
     
     prompt_templates = {
         "list_with_summary": f"""
@@ -248,11 +252,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     }
     
     prompt = prompt_templates.get(processing, f"直接回答問題，100-200字。問題：{user_query}\n輸出：回應")
-    if len(prompt) > GROK3_TOKEN_LIMIT:
+    if len(prompt) > GROK3_TOKEN_LIMIT - 500:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
-        prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
-        logger.info(f"Prompt truncated: length={len(prompt)}")
+        prompt = prompt_templates[processing].replace(
+            json.dumps(filtered_thread_data, ensure_ascii=False),
+            json.dumps(filtered_thread_data, ensure_ascii=False)
+        )
+        logger.info(f"Prompt truncated: original_length={len(prompt)}, new_length={len(prompt)}")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -265,6 +272,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     for attempt in range(3):
         try:
+            logger.info(f"Streaming Grok 3 response: attempt={attempt+1}, prompt_length={len(prompt)}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=60) as response:
                     if response.status == 429:
@@ -284,16 +292,17 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content and "進階分析建議：" not in content:
                                         yield content
-                                except json.JSONDecodeError:
-                                    logger.warning(f"Failed to parse chunk: {line_str}")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"Failed to parse chunk: {line_str}, error={str(e)}")
                                     continue
+                    logger.info("Streaming completed successfully")
                     return
         except Exception as e:
-            logger.error(f"Streaming failed: attempt={attempt+1}, error={str(e)}")
+            logger.error(f"Streaming failed: attempt={attempt+1}, error={str(e)}, prompt_length={len(prompt)}")
             if attempt < 2:
                 await asyncio.sleep(min(5 * (2 ** attempt), 15))
                 continue
-            yield f"錯誤: 連線失敗，請稍後重試"
+            yield f"錯誤: 連線失敗，請稍後重試（錯誤詳情：{str(e)}）"
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
@@ -310,7 +319,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     reply_limit = 200 if is_advanced else min(strategy.get("reply_limit", 50), 50)
     filters = strategy.get("filters", {})
     min_replies = filters.get("min_replies", 20)
-    keywords = filters.get("keywords", []) or []  # 確保 keywords 為列表
+    keywords = filters.get("keywords", []) or []
     sub_theme = filters.get("sub_theme", "")
     top_thread_ids = list(set(strategy.get("top_thread_ids", [])))
     
@@ -327,7 +336,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             existing_replies = cached_data.get("replies", [])
             total_replies = cached_data.get("no_of_reply", 0)
             
-            total_pages = (total_replies + 24) // 25
+            total_pages = max(1, (total_replies + 24) // 25)
             target_pages = math.ceil(total_pages * 0.6)
             remaining_pages = max(0, target_pages - len(fetched_pages))
             
@@ -357,7 +366,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             
             replies = thread_result.get("replies", [])
             if not replies and thread_result.get("total_replies", 0) >= min_replies:
-                logger.warning(f"Failed to fetch thread content: thread_id={thread_id}")
+                logger.warning(f"Failed to fetch thread content: thread_id={thread_id}, total_replies={thread_result.get('total_replies', 0)}")
                 continue
             
             all_replies = existing_replies + [
@@ -425,7 +434,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     logger.info(f"Filtered threads: cat_id={cat_id}, initial_count={len(initial_threads)}, filtered_count={len(filtered_items)}")
     logger.debug(f"Filtered thread IDs: {[item['thread_id'] for item in filtered_items]}")
     
-    # 記錄無效的 item
     for item in initial_threads:
         if item.get("title") is None or not isinstance(item.get("title"), str):
             logger.warning(f"Invalid thread title: thread_id={item.get('thread_id', 'unknown')}, title={item.get('title')}")
@@ -524,10 +532,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         
         replies = thread_result.get("replies", []) or []
         if not replies and thread_result.get("total_replies", 0) >= min_replies:
-            logger.warning(f"Failed to fetch thread content: thread_id={thread_id}")
+            logger.warning(f"Failed to fetch thread content: thread_id={thread_id}, total_replies={thread_result.get('total_replies', 0)}")
             continue
         
         sorted_replies = sorted(replies, key=lambda x: x.get("reply_time", 0), reverse=True)[:reply_limit]
+        if not sorted_replies:
+            logger.warning(f"No valid replies for thread_id={thread_id}")
+            continue
+        
         thread_data.append({
             "thread_id": thread_id, 
             "title": item.get("title", "未知標題"), 
@@ -554,6 +566,32 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
         logger.info(f"Fetched thread: thread_id={thread_id}, replies={len(replies)}, pages={len(thread_result.get('fetched_pages', []))}")
         await asyncio.sleep(0.5)
+    
+    if not thread_data:
+        logger.warning(f"No valid thread data for cat_id={cat_id}")
+        metadata = [
+            {"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0)}
+            for item in sorted(initial_threads, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:5]
+            if "thread_id" in item and item.get("title") is not None and isinstance(item.get("title"), str)
+        ] if initial_threads else []
+        direct_answer = ""
+        async for content in stream_grok3_response(
+            user_query=user_question, 
+            metadata=metadata, 
+            thread_data={}, 
+            processing="direct_answer", 
+            strategy=strategy
+        ):
+            direct_answer += content
+        return {
+            "selected_cat": selected_cat, 
+            "thread_data": [], 
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, 
+            "last_reset": last_reset, 
+            "rate_limit_until": rate_limit_until,
+            "direct_answer": direct_answer
+        }
     
     return {
         "selected_cat": selected_cat, 
