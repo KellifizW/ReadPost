@@ -1,4 +1,3 @@
-```python
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 包含數據處理邏輯（進階分析、緩存管理）和輔助函數。
@@ -559,4 +558,3 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         "last_reset": last_reset, 
         "rate_limit_until": rate_limit_until
     }
-```
