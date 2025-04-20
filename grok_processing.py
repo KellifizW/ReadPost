@@ -25,6 +25,7 @@ import math
 import time
 import logging
 import streamlit as st
+from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 logger = logging.getLogger(__name__)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
