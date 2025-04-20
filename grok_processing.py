@@ -17,6 +17,7 @@ import math
 import time
 import logging
 import streamlit as st
+from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 配置日誌記錄器
 logging.basicConfig(
