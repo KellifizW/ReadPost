@@ -65,6 +65,7 @@ async def main():
     # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題（例如：有哪些搞笑話題？）")
     if user_question and not st.session_state.awaiting_response:
+        logger.info(f"User question: {user_question}")
         with st.chat_message("user"):
             st.markdown(user_question)
         st.session_state.awaiting_response = True
@@ -101,7 +102,7 @@ async def main():
                             grok_container.markdown(response)
                     st.session_state.chat_history[-1]["answer"] = response
                     st.session_state.awaiting_response = False
-                    logger.info("Direct response generated")
+                    logger.info(f"Direct response generated: {response[:100]}...")
                     return
 
                 # 處理用戶問題
@@ -148,7 +149,7 @@ async def main():
                         response += chunk
                         grok_container.markdown(response)
 
-                logger.info(f"Response generated: category={question_cat}, threads={len(thread_data)}")
+                logger.info(f"Response generated: category={question_cat}, threads={len(thread_data)}, response={response[:100]}...")
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.last_user_query = user_question
                 st.session_state.awaiting_response = False
