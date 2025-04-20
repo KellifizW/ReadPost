@@ -1,3 +1,4 @@
+```python
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 包含數據處理邏輯（進階分析、緩存管理）和輔助函數。
@@ -174,17 +175,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 精簡 thread_data 並檢查數據完整性
     filtered_thread_data = {
         tid: {
             "thread_id": data["thread_id"],
             "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0),
-            "replies": [{"msg": r["msg"], "reply_time": r.get("reply_time", 0)} for r in data.get("replies", [])[:10]]
+            "like_count": data.get("like_count", 0),
+            "dislike_count": data.get("dislike_count", 0),
+            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0][:25],
+            "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items() if "thread_id" in data and "title" in data
     }
-    # 過濾 metadata，確保包含 thread_id 和 title
+    
     filtered_metadata = [
         {"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0)}
         for item in metadata if isinstance(item, dict) and "thread_id" in item and "title" in item
@@ -197,14 +200,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     for data in filtered_thread_data.values():
         total_pages = (data["no_of_reply"] + 24) // 25
         target_pages = math.ceil(total_pages * 0.6)
-        fetched_pages = data.get("fetched_pages", [])
-        if len(fetched_pages) < target_pages:
+        if len(data["fetched_pages"]) < target_pages:
             needs_advanced_analysis = True
-            reason += f"帖子 {data['thread_id']} 僅抓取 {len(fetched_pages)}/{target_pages} 頁，未達60%。"
+            reason += f"帖子 {data['thread_id']} 僅抓取 {len(data['fetched_pages'])}/{target_pages} 頁，未達60%。"
     
     strategy = strategy or {"intent": "direct_answer", "filters": {}, "processing": "direct_answer"}
     max_tokens = 300 if len(user_query) < 50 else 1000
-    temperature = 0.5 if strategy.get("intent") in ["list_hot_threads", "express_preference"] else 0.9
+    temperature = 0.5 if strategy.get("intent") in ["list_hot_threads", "express_preference"] else 0.7
     
     prompt_templates = {
         "list_with_summary": f"""
@@ -224,26 +226,39 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         5. 確保每個帖子數據包含 thread_id、title 和回覆數據，若缺少則跳過。
         輸出：熱門帖子清單及概述\n偏好（若適用）：[帖子 ID, 標題, 偏好原因]
         """,
-        "summarize": f"""
-        總結 LIHKG 帖子，300-500字。問題：{user_query}
-        篩選策略：{json.dumps(strategy, ensure_ascii=False)}
+        "emotion_focused_summary": f"""
+        總結 LIHKG 感動或溫馨帖子，300-500字。問題：{user_query}
         帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        步驟：
-        1. 根據篩選策略，總結相關帖子內容，引用高關注回覆，適配分類語氣。
-        2. 若無相關帖子，直接回答問題，基於一般知識。
-        3. 若數據不足，建議用戶提供更具體問題。
+        聚焦感動情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，創意台溫馨）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        """,
+        "humor_focused_summary": f"""
+        總結 LIHKG 幽默或搞笑帖子，300-500字。問題：{user_query}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
+        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
+        聚焦幽默情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，成人台大膽）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        """,
+        "professional_summary": f"""
+        總結 LIHKG 財經或時事帖子，300-500字。問題：{user_query}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
+        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
+        聚焦專業觀點，引用高關注回覆，適配分類語氣（財經台專業，時事台嚴肅）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        """,
+        "summarize": f"""
+        總結 LIHKG 帖子，300-500字。問題：{user_query}
+        帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
+        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
+        引用高關注回覆，適配分類語氣。
         輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """,
         "sentiment": f"""
         分析 LIHKG 帖子情緒。問題：{user_query}
-        篩選策略：{json.dumps(strategy, ensure_ascii=False)}
         帖子：{json.dumps(filtered_metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        步驟：
-        1. 根據篩選策略，判斷情緒分佈（正面、負面、中立），聚焦高關注回覆。
-        2. 若無相關帖子，直接回答問題，基於一般知識。
-        3. 若數據不足，建議用戶提供更具體問題。
+        判斷情緒分佈（正面、負面、中立），聚焦高關注回覆。
         輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """,
         "direct_answer": f"""
@@ -258,7 +273,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         """
     }
     
-    prompt = prompt_templates.get(processing, prompt_templates["list_with_summary"])
+    prompt = prompt_templates.get(processing, prompt_templates["summarize"])
     if len(prompt) > GROK3_TOKEN_LIMIT:
         filtered_thread_data = {
             tid: {k: v for k, v in data.items() if k != "replies"} for tid, data in filtered_thread_data.items()
@@ -297,15 +312,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content and "進階分析建議：" not in content:
                                         yield content
-                                except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error: error={str(e)}, line={line_str}")
+                                except json.JSONDecodeError:
                                     continue
                     logger.info(f"Grok 3 API response: status={response.status}, stream_completed=True")
                     return
         except Exception as e:
-            logger.error(f"Grok 3 API failed: attempt={attempt+1}, error={str(e)}")
+            logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(min(2 * (2 ** attempt), 10))
+                await asyncio.sleep(2 ** attempt)
                 continue
             yield f"錯誤: 連線失敗，請稍後重試"
             return
@@ -524,7 +538,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "title": item.get("title", "未知標題"), 
             "no_of_reply": item.get("no_of_reply", 0),
             "last_reply_time": item.get("last_reply_time", 0),
-            "replies": [{"msg": clean_html(r["msg"]), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:10],
+            "like_count": item.get("like_count", 0),
+            "dislike_count": item.get("dislike_count", 0),
+            "replies": [{"msg": clean_html(r["msg"]), "like_count": r.get("like_count", 0), "dislike_count": r.get("dislike_count", 0), "reply_time": r.get("reply_time", 0)} for r in sorted_replies][:10],
             "fetched_pages": thread_result.get("fetched_pages", [1])
         })
         st.session_state.thread_cache[thread_id]["data"].update({
@@ -543,3 +559,4 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         "last_reset": last_reset, 
         "rate_limit_until": rate_limit_until
     }
+```
