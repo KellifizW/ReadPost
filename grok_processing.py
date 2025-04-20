@@ -17,39 +17,14 @@ import math
 import time
 import logging
 import streamlit as st
-from datetime import datetime
-import pytz
-from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
-
-# 香港時區
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
-
-# 日誌過濾器：完全過濾 in-event 日誌
-class InEventFilter(logging.Filter):
-    def filter(self, record):
-        # 完全過濾掉所有 in-event 日誌
-        if "in-event" in record.msg.lower():
-            return False
-        return True
 
 # 配置日誌記錄器
 logging.basicConfig(
+    filename="app.log",
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S %Z",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("grok_processing.log")  # 保存日誌到文件
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-logger.addFilter(InEventFilter())
-
-# 確保全局日誌級別為 INFO
-logging.getLogger().setLevel(logging.INFO)
-
-# 設置日誌時間為香港時區
-logging.Formatter.converter = lambda *args: datetime.now(HONG_KONG_TZ).timetuple()
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -64,16 +39,17 @@ def clean_html(text):
         str: 清理後的純文本。
     """
     if not isinstance(text, str):
-        logger.debug(f"Invalid input to clean_html: {text}")
-        return ""
-    original = text
-    clean = re.compile(r'<[^>]+>|[\u200B-\u200F\u202A-\u202E]|[^\w\s.,!?，。！？]')
-    text = clean.sub('', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    logger.debug(f"clean_html input: {original[:50]}... output: {text[:50]}...")
-    return text
+        text = str(text)
+    try:
+        clean = re.compile(r'<[^>]+>')
+        text = clean.sub('', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    except Exception as e:
+        logger.error(f"HTML cleaning failed: {str(e)}")
+        return text
 
-async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False):
+async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題並篩選 LIHKG 帖子。
     Args:
@@ -84,34 +60,41 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         metadata (list): 帖子元數據。
         thread_data (dict): 帖子回覆數據。
         is_advanced (bool): 是否進行進階分析。
+        conversation_context (list): 對話歷史。
     Returns:
         dict: 分析結果，包含主題、篩選參數等。
     """
+    conversation_context = conversation_context or []
     prompt = f"""
-    你是一個智能助手，分析用戶問題並篩選 LIHKG 帖子。以繁體中文回覆，輸出 JSON。
+    你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣（例如吹水台輕鬆幽默，財經台專業嚴謹）。輸出 JSON。
 
     問題：{user_query}
     分類：{cat_name}（cat_id={cat_id})
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
     {'帖子標題：' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else ''}
     {'元數據：' + json.dumps(metadata, ensure_ascii=False) if metadata else ''}
     {'回覆數據：' + json.dumps(thread_data, ensure_ascii=False) if thread_data else ''}
 
     步驟：
-    1. 識別主題（感動、搞笑、財經等），標記為 theme。
-    2. 判斷意圖（總結、情緒分析、幽默總結）。
-    3. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
+    1. 識別主題（感動、搞笑、財經等），標記為 theme，根據問題和分類推斷。
+    2. 判斷意圖（總結、情緒分析、幽默總結、深入討論）。
+    3. 確定帖子數量（post_limit，1-10）：
+       - 廣泛問題（例如“有哪些搞笑話題”）需要更多帖子（5-10）。
+       - 具體問題（例如“某事件討論”）需要較少帖子（1-3）。
+       - 參考對話歷史調整數量。
+    4. {'檢查帖子是否達60%頁數（總頁數*0.6，向上取整），若未達標，設置 needs_advanced_analysis=True。' if is_advanced else '篩選帖子：'}
        {'- 若無標題，設置初始抓取（30-90個標題）。' if not thread_titles else '- 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。'}
-    4. 設置參數：
+    5. 設置參數：
        - theme：問題主題。
        - category_ids：[cat_id]。
        - data_type："title"、"replies"、"both"。
-       - post_limit：從問題提取（默認2，最大10）。
+       - post_limit：建議的帖子數量。
        - reply_limit：{200 if is_advanced else 75}。
        - filters：根據主題（感動：like_count≥5；搞笑：like_count≥10；財經：like_count≥10；其他：min_replies≥20，min_likes≥10）。
        - processing：emotion_focused_summary、humor_focused_summary、professional_summary、summarize、sentiment。
        - candidate_thread_ids：10個候選ID。
-       - top_thread_ids：最終選定ID。
-    5. 若無關LIHKG，返回空category_ids。
+       - top_thread_ids：最終選定ID（不多於 post_limit）。
+    6. 若無關LIHKG，返回空category_ids。
 
     輸出：
     {"{ \"needs_advanced_analysis\": false, \"suggestions\": { \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [] }, \"reason\": \"\" }" if is_advanced else "{ \"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"category_suggestion\": \"\" }"}
@@ -122,7 +105,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     except KeyError:
         logger.error("Grok 3 API key missing")
         return {
-            "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
+            "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 3,
             "reply_limit": 200 if is_advanced else 75, "filters": {"min_replies": 20, "min_likes": 10},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": "Missing API key"
@@ -131,9 +114,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         }
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    messages = [
+        {"role": "system", "content": "你代表 LIHKG 論壇的集體意見，以繁體中文回答，僅基於提供數據，語氣適配分類。"},
+        *conversation_context,
+        {"role": "user", "content": prompt}
+    ]
     payload = {
         "model": "grok-3-beta",
-        "messages": [{"role": "system", "content": "以繁體中文回答，僅基於提供數據。"}, {"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": 600,
         "temperature": 0.7
     }
@@ -147,12 +135,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     result["suggestions"]["category_ids"] = [cat_id]
                 else:
                     result["category_ids"] = [cat_id]
-                logger.info(f"Analysis result: {str(result)[:50]}...")
+                logger.info(f"Analysis completed: theme={result.get('theme')}, post_limit={result.get('post_limit')}")
                 return result
     except Exception as e:
         logger.error(f"Analysis failed: {str(e)}")
         return {
-            "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
+            "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 3,
             "reply_limit": 200 if is_advanced else 75, "filters": {"min_replies": 20, "min_likes": 10},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": f"Analysis failed: {str(e)}"
@@ -161,7 +149,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "reason": f"Analysis failed: {str(e)}"
         }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, conversation_context=None):
     """
     使用 Grok 3 API 生成流式回應。
     Args:
@@ -169,161 +157,143 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
         metadata (list): 帖子元數據。
         thread_data (dict): 帖子回覆數據。
         processing (str): 處理類型（總結、情緒分析等）。
+        conversation_context (list): 對話歷史。
     Yields:
         str: 回應片段。
     """
+    conversation_context = conversation_context or []
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError:
+        logger.error("Grok 3 API key missing")
         yield "錯誤: 缺少 API 密鑰"
         return
-
+    
     filtered_thread_data = {
         tid: {
-            "thread_id": data["thread_id"], "title": clean_html(data["title"]), "no_of_reply": data.get("no_of_reply", 0),
+            "thread_id": data["thread_id"], "title": data["title"], "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0), "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": [
-                {
-                    "msg": clean_html(r["msg"]),
-                    "like_count": r.get("like_count", 0),
-                    "dislike_count": r.get("dislike_count", 0),
-                    "reply_time": r.get("reply_time", 0)
-                }
-                for r in data.get("replies", []) if r.get("like_count", 0) != 0 or r.get("dislike_count", 0) != 0
-            ][:25],
+            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:25],
             "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items()
     }
-
+    
+    needs_advanced_analysis = False
+    reason = ""
+    for data in filtered_thread_data.values():
+        total_pages = (data["no_of_reply"] + 24) // 25
+        target_pages = math.ceil(total_pages * 0.6)
+        if len(data["fetched_pages"]) < target_pages:
+            needs_advanced_analysis = True
+            reason += f"帖子 {data['thread_id']} 僅抓取 {len(data['fetched_pages'])}/{total_pages} 頁，未達60%。"
+    
     prompt_templates = {
-        "summarize": f"""
-        總結 LIHKG 帖子, 300-500字, 結構清晰. 問題: {user_query}
-        帖子: {json.dumps(metadata, ensure_ascii=False)}
-        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
-        要求:
-        - 開頭介紹帖子標題、ID和主題.
-        - 概述回覆數、點贊數和討論熱度.
-        - 引用1-2條高關注回覆（like_count或dislike_count>0）, 說明其內容.
-        - 若回覆數據不足, 註明限制並簡化總結.
-        - 適配分類語氣（吹水台輕鬆, 創意台溫馨, 財經台專業等）.
-        - 結尾總結討論的主要觀點或趨勢.
-        - 確保無特殊字符或亂碼.
-        輸出: 總結
-        """,
         "emotion_focused_summary": f"""
-        總結 LIHKG 感動或溫馨帖子，300-500字。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，總結感動或溫馨帖子，300-500字。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦感動情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，創意台溫馨）。
-        輸出：總結
+        聚焦感動情緒，引用高關注回覆（like_count≥5），語氣適配分類（吹水台輕鬆，創意台溫馨）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """,
         "humor_focused_summary": f"""
-        總結 LIHKG 幽默或搞笑帖子，300-500字。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，總結幽默或搞笑帖子，300-500字。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦幽默情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，成人台大膽）。
-        輸出：總結
+        聚焦幽默情緒，引用高關注回覆（like_count≥5），語氣適配分類（吹水台輕鬆，成人台大膽）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """,
         "professional_summary": f"""
-        總結 LIHKG 財經或時事帖子，300-500字。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，總結財經或時事帖子，300-500字。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦專業觀點，引用高關注回覆，適配分類語氣（財經台專業，時事台嚴肅）。
-        輸出：總結
+        聚焦專業觀點，引用高關注回覆（like_count≥5），語氣適配分類（財經台專業，時事台嚴肅）。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
+        """,
+        "summarize": f"""
+        你是 LIHKG 論壇的集體意見代表，總結帖子，300-500字。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+        帖子：{json.dumps(metadata, ensure_ascii=False)}
+        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
+        引用高關注回覆（like_count≥5），語氣適配分類。
+        輸出：總結\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """,
         "sentiment": f"""
-        分析 LIHKG 帖子情緒。問題：{user_query}
+        你是 LIHKG 論壇的集體意見代表，分析帖子情緒。問題：{user_query}
+        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        判斷情緒分佈（正面、負面、中立），聚焦高關注回覆。
-        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...
+        判斷情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
+        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...\n進階分析建議：needs_advanced_analysis={needs_advanced_analysis}, reason={reason}
         """
     }
-
+    
     prompt = prompt_templates.get(processing, f"""
-    直接回答問題, 50-100字, 結構清晰. 問題: {user_query}
-    要求:
-    - 簡潔回答用戶問題.
-    - 若涉及帖子, 提及標題和簡要觀點.
-    - 適配分類語氣.
-    - 確保無特殊字符或亂碼.
-    輸出: 回應
+    你是 LIHKG 論壇的集體意見代表，直接回答問題，50-100字。問題：{user_query}
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    輸出：回應
     """)
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
         prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
         logger.info(f"Truncated prompt: {len(prompt)} characters")
-
+    
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    messages = [
+        {"role": "system", "content": "你代表 LIHKG 論壇的集體意見，以繁體中文回答，僅基於提供數據，語氣適配分類。"},
+        *conversation_context,
+        {"role": "user", "content": prompt}
+    ]
     payload = {
         "model": "grok-3-beta",
-        "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據, 確保內容連貫無特殊字符."}, {"role": "user", "content": prompt}],
-        "max_tokens": 5000,  # 增加 max_tokens 至 5000
-        "temperature": 0.3,
+        "messages": messages,
+        "max_tokens": 2000,
+        "temperature": 0.7,
         "stream": True
     }
-
-    response_buffer = ""
-    response_chunks = []
-    start_time = time.time()
-    chunk_count = 0
-    input_tokens = 0
-    output_tokens = 0
-
+    
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=30) as response:
                     async for line in response.content:
                         if line and not line.isspace():
-                            line_str = line.decode('utf-8', errors='replace').strip()
+                            line_str = line.decode('utf-8').strip()
                             if line_str == "data: [DONE]":
                                 break
                             if line_str.startswith("data: "):
                                 try:
                                     chunk = json.loads(line_str[6:])
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content and content not in response_chunks:
-                                        content = clean_html(content)  # 清理特殊字符
-                                        response_buffer += content
-                                        response_chunks.append(content)
-                                        chunk_count += 1
-
-                                        # 放寬條件：每 100 字或遇到句號時 yield
-                                        if len(response_buffer) >= 100 or content.endswith(('。', '！', '？')):
-                                            if chunk_count == 1:
-                                                logger.debug(f"Stream chunk started: {response_buffer[:50]}...")
-                                            else:
-                                                logger.debug(f"Stream chunk: {response_buffer[:50]}...")
-                                            yield response_buffer
-                                            response_buffer = ""
-
+                                    if content and "進階分析建議：" not in content:
+                                        if "###" in content:
+                                            logger.warning(f"Detected ### in response, retrying with simplified prompt")
+                                            raise ValueError("Content moderation detected")
+                                        yield content
                                 except json.JSONDecodeError:
-                                    logger.debug(f"Invalid JSON chunk: {line_str}")
+                                    logger.warning("JSON decode error in stream chunk")
                                     continue
-                    # 記錄剩餘的緩衝內容
-                    if response_buffer:
-                        logger.debug(f"Stream chunk ended: {response_buffer[:50]}...")
-                        yield response_buffer
-                    # 記錄總結統計，包括 tokens 使用
-                    total_response = "".join(response_chunks)
-                    duration = time.time() - start_time
-                    # 簡單估計 tokens（每 4 字符約 1 token）
-                    input_tokens = len(prompt) // 4
-                    output_tokens = len(total_response) // 4
-                    logger.info(f"Stream response completed: total_chars={len(total_response)}, duration={duration:.3f}s, input_tokens={input_tokens}, output_tokens={output_tokens}")
+                    logger.info(f"Stream response completed for query: {user_query}")
                     return
         except Exception as e:
             logger.warning(f"Grok 3 request failed, attempt {attempt+1}: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(5 * attempt)
+                # Simplify prompt by reducing reply content
+                for tid in filtered_thread_data:
+                    filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:5]
+                prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
+                payload["messages"][-1]["content"] = prompt
+                await asyncio.sleep(2 ** attempt)
                 continue
-            yield f"錯誤: 無法連接到 Grok 3 API，請稍後重試 ({str(e)})"
+            logger.error(f"Stream response failed: {str(e)}")
+            yield f"錯誤: 連線失敗，請稍後重試"
             return
 
-async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None):
+async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
     Args:
@@ -337,20 +307,20 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         is_advanced (bool): 是否進階分析。
         previous_thread_ids (list): 前次帖子 ID。
         previous_thread_data (dict): 前次帖子數據。
+        conversation_context (list): 對話歷史。
     Returns:
         dict: 處理結果，包含帖子數據、速率限制信息等。
     """
-    post_limit = min(analysis.get("post_limit", 2), 10)
+    post_limit = min(analysis.get("post_limit", 3), 10)
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
-    
-    # 設置唯一的過濾條件：min_replies = 25
-    min_replies = 25
+    filters = analysis.get("filters", {})
+    min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)
+    min_likes = 10 if analysis.get("theme") == "搞笑" else filters.get("min_likes", 20)
+    candidate_thread_ids = analysis.get("candidate_thread_ids", [])
+    top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
     
     thread_data = []
     rate_limit_info = []
-    
-    # 提取 top_thread_ids
-    top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
     
     if is_advanced and top_thread_ids:
         for thread_id in top_thread_ids:
@@ -403,6 +373,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             logger.info(f"Advanced thread {thread_id}: replies={len(sorted_replies)}, pages={len(all_fetched_pages)}/{target_pages}")
             await asyncio.sleep(1)
         
+        logger.info(f"Advanced processing completed: {len(thread_data)} threads")
         return {
             "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
             "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
@@ -421,10 +392,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             initial_threads = initial_threads[:90]
             break
     
-    # 僅使用 min_replies = 25 作為過濾條件
     filtered_items = [
         item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies
+        if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
     ]
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
     
@@ -439,7 +409,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "timestamp": time.time()
         }
     
-    analysis = await analyze_and_screen(user_query=user_question, cat_name=selected_cat, cat_id=cat_id, thread_titles=filtered_items[:90], metadata=None, thread_data=None)
+    analysis = await analyze_and_screen(
+        user_query=user_question, cat_name=selected_cat, cat_id=cat_id, thread_titles=filtered_items[:90],
+        metadata=None, thread_data=None, conversation_context=conversation_context
+    )
     top_thread_ids = analysis.get("top_thread_ids", [])
     if not top_thread_ids and filtered_items:
         top_thread_ids = [item["thread_id"] for item in random.sample(filtered_items, min(post_limit, len(filtered_items)))]
@@ -516,6 +489,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         logger.info(f"Fetched final thread {thread_id}: replies={len(replies)}")
         await asyncio.sleep(1)
     
+    logger.info(f"Processing completed: {len(thread_data)} threads for query: {user_question}")
     return {
         "selected_cat": selected_cat, "thread_data": thread_data, "rate_limit_info": rate_limit_info,
         "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
