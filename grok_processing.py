@@ -1,5 +1,5 @@
 """
-Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
+Grok 3 API 處理模組, 負責問題分析, 帖子篩選和回應生成.
 """
 
 import aiohttp
@@ -23,7 +23,7 @@ GROK3_TOKEN_LIMIT = 100000
 
 def clean_html(text):
     """
-    清理 HTML 標籤，規範化文本。
+    清理 HTML 標籤, 規範化文本.
     """
     clean = re.compile(r'<[^>]+>')
     text = clean.sub('', text)
@@ -31,35 +31,36 @@ def clean_html(text):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None):
     """
-    分析用戶問題並篩選 LIHKG 帖子。
+    分析用戶問題並篩選 LIHKG 帖子.
     """
     prompt = f"""
-    你是一個智能助手，分析用戶問題並篩選 LIHKG 帖子。以繁體中文回覆，輸出 JSON。
+    你是一個智能助手, 分析用戶問題並篩選 LIHKG 帖子. 以繁體中文回覆, 輸出 JSON.
 
-    問題：{user_query}
-    分類：{cat_name}（cat_id={cat_id})
-    {'帖子標題：' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else ''}
+    問題: {user_query}
+    分類: {cat_name} (cat_id={cat_id})
+    {'帖子標題: ' + json.dumps(thread_titles, ensure_ascii=False) if thread_titles else ''}
 
-    步驟：
-    1. 識別主題（感動、搞笑、財經等），標記為 theme。
-    2. 判斷意圖（總結、情緒分析、幽默總結）。
-    3. 篩選帖子：
-       - 若無標題，設置初始抓取（30-90個標題）。
-       - 從標題選10個候選（candidate_thread_ids），再選top_thread_ids。
-    4. 設置參數：
-       - theme：問題主題。
-       - category_ids：[cat_id]。
-       - data_type："both"。
-       - post_limit：從問題提取（默認2，最大10）。
-       - reply_limit：75。
-       - filters：根據主題（感動：like_count≥5；搞笑：like_count≥10；財經：like_count≥10；其他：min_replies≥20，min_likes≥10）。
-       - processing：emotion_focused_summary、humor_focused_summary、professional_summary、summarize、sentiment。
-       - candidate_thread_ids：10個候選ID。
-       - top_thread_ids：最終選定ID。
-    5. 若無關LIHKG，返回空category_ids。
+    步驟:
+    1. 識別主題 (感動, 搞笑, 財經等), 標記為 theme.
+    2. 判斷意圖 (總結, 情緒分析, 幽默總結).
+    3. 篩選帖子:
+       - 若無標題, 設置初始抓取 (30-90個標題).
+       - 從標題選10個候選 (candidate_thread_ids), 再選 top_thread_ids.
+    4. 設置參數:
+       - theme: 問題主題.
+       - category_ids: [cat_id].
+       - data_type: "both".
+       - post_limit: 從問題提取 (默認2, 最大10).
+       - reply_limit: 75.
+       - filters: 根據主題 (感動: like_count>=5; 搞笑: like_count>=10; 財經: like_count>=10; 其他: min_replies>=20, min_likes>=10).
+       - processing: emotion_focused_summary, humor_focused_summary, professional_summary, summarize, sentiment.
+       - candidate_thread_ids: 10個候選ID.
+       - top_thread_ids: 最終選定ID.
+    5. 若無關 LIHKG, 返回空 category_ids.
 
-    輸出：
-    {{\"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"category_suggestion\": \"\"}}
+    輸出:
+    {{"theme": "", "category_ids": [], "data_type": "", "post_limit": 0, "reply_limit": 0, "filters": {{}}, "processing": "", "candidate_thread_ids": [], "top_thread_ids": [], "category_suggestion": ""}}
+    """
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -75,7 +76,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
-        "messages": [{"role": "system", "content": "以繁體中文回答，僅基於提供數據。"}, {"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據."}, {"role": "user", "content": prompt}],
         "max_tokens": 600,
         "temperature": 0.7
     }
@@ -119,43 +120,43 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
 
     prompt_templates = {
         "emotion_focused_summary": f"""
-        總結 LIHKG 感動或溫馨帖子, 300-500字. 問題：{user_query}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦感動情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，創意台溫馨）。
-        輸出：總結
+        總結 LIHKG 感動或溫馨帖子, 300-500字. 問題: {user_query}
+        帖子: {json.dumps(metadata, ensure_ascii=False)}
+        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
+        聚焦感動情緒, 引用高關注回覆, 適配分類語氣 (吹水台輕鬆, 創意台溫馨).
+        輸出: 總結
         """,
         "humor_focused_summary": f"""
-        總結 LIHKG 幽默或搞笑帖子，300-500字。問題：{user_query}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦幽默情緒，引用高關注回覆，適配分類語氣（吹水台輕鬆，成人台大膽）。
-        輸出：總結
+        總結 LIHKG 幽默或搞笑帖子, 300-500字. 問題: {user_query}
+        帖子: {json.dumps(metadata, ensure_ascii=False)}
+        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
+        聚焦幽默情緒, 引用高關注回覆, 適配分類語氣 (吹水台輕鬆, 成人台大膽).
+        輸出: 總結
         """,
         "professional_summary": f"""
-        總結 LIHKG 財經或時事帖子，300-500字。問題：{user_query}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        聚焦專業觀點，引用高關注回覆，適配分類語氣（財經台專業，時事台嚴肅）。
-        輸出：總結
+        總結 LIHKG 財經或時事帖子, 300-500字. 問題: {user_query}
+        帖子: {json.dumps(metadata, ensure_ascii=False)}
+        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
+        聚焦專業觀點, 引用高關注回覆, 適配分類語氣 (財經台專業, 時事台嚴肅).
+        輸出: 總結
         """,
         "summarize": f"""
-        總結 LIHKG 帖子，300-500字。問題：{user_query}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        引用高關注回覆，適配分類語氣。
-        輸出：總結
+        總結 LIHKG 帖子, 300-500字. 問題: {user_query}
+        帖子: {json.dumps(metadata, ensure_ascii=False)}
+        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
+        引用高關注回覆, 適配分類語氣.
+        輸出: 總結
         """,
         "sentiment": f"""
-        分析 LIHKG 帖子情緒。問題：{user_query}
-        帖子：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        判斷情緒分佈（正面、負面、中立），聚焦高關注回覆。
-        輸出：情緒分析：正面XX%，負面XX%，中立XX%\n依據：...
+        分析 LIHKG 帖子情緒. 問題: {user_query}
+        帖子: {json.dumps(metadata, ensure_ascii=False)}
+        回覆: {json.dumps(filtered_thread_data, ensure_ascii=False)}
+        判斷情緒分佈 (正面, 負面, 中立), 聚焦高關注回覆.
+        輸出: 情緒分析: 正面XX%, 負面XX%, 中立XX%\n依據: ...
         """
     }
 
-    prompt = prompt_templates.get(processing, f"直接回答問題，50-100字。問題：{user_query}\n輸出：回應")
+    prompt = prompt_templates.get(processing, f"直接回答問題, 50-100字. 問題: {user_query}\n輸出: 回應")
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
@@ -165,7 +166,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
-        "messages": [{"role": "system", "content": "以繁體中文回答，僅基於提供數據。"}, {"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": "以繁體中文回答, 僅基於提供數據."}, {"role": "user", "content": prompt}],
         "max_tokens": 1000,
         "temperature": 0.7,
         "stream": True
@@ -197,12 +198,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing):
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
                 continue
-            yield f"錯誤: 連線失敗，請稍後重試"
+            yield f"錯誤: 連線失敗, 請稍後重試"
             return
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, rate_limit_info):
     """
-    處理用戶問題，抓取並分析 LIHKG 帖子。
+    處理用戶問題, 抓取並分析 LIHKG 帖子.
     """
     post_limit = min(analysis.get("post_limit", 2), 10)
     reply_limit = min(analysis.get("reply_limit", 75), 75)
