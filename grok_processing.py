@@ -220,7 +220,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     for page in range(1, 4):
         result = await get_lihkg_topic_list(
             cat_id=cat_id, start_page=page, max_pages=1,
-            request_counter=rate_limit_info["counter"], last_reset=rate_limit_info["last_reset"], rate_limit_info=rate_limit_info["until"]
+            request_counter=rate_limit_info["counter"], last_reset=rate_limit_info["last_reset"], rate_limit_until=rate_limit_info["until"]
         )
         rate_limit_info["counter"] = result.get("request_counter", rate_limit_info["counter"])
         rate_limit_info["last_reset"] = result.get("last_reset", rate_limit_info["last_reset"])
@@ -270,9 +270,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             request_counter=rate_limit_info["counter"], last_reset=rate_limit_info["last_reset"], rate_limit_until=rate_limit_info["until"],
             max_replies=reply_limit, fetch_last_pages=2
         )
-        rate_limit_info["counter"] = thread_result.get("request_counter", rate_limit_info["counter"])
-        rate_limit_info["last_reset"] = thread_result.get("last_reset", rate_limit_info["last_reset"])
-        rate_limit_info["until"] = thread_result.get("rate_limit_until", rate_limit_info["until"])
+        rate_limit_info["counter"] = result.get("request_counter", rate_limit_info["counter"])
+        rate_limit_info["last_reset"] = result.get("last_reset", rate_limit_info["last_reset"])
+        rate_limit_info["until"] = result.get("rate_limit_until", rate_limit_info["until"])
 
         replies = thread_result.get("replies", [])
         if not replies and thread_result.get("total_replies", 0) >= min_replies:
