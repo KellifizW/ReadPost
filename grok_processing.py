@@ -59,8 +59,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     5. 若無關LIHKG，返回空category_ids。
 
     輸出：
-    { "theme": "", "category_ids": [], "data_type": "", "post_limit": 0, "reply_limit": 0, "filters": {}, "processing": "", "candidate_thread_ids": [], "top_thread_ids": [], "category_suggestion": "" }
-    """
+    {{\"theme\": \"\", \"category_ids\": [], \"data_type\": \"\", \"post_limit\": 0, \"reply_limit\": 0, \"filters\": {{}}, \"processing\": \"\", \"candidate_thread_ids\": [], \"top_thread_ids\": [], \"category_suggestion\": \"\"}}
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
