@@ -16,12 +16,19 @@ from grok_processing import analyze_and_screen, stream_grok3_response, process_u
 from lihkg_api import get_category_name
 
 # 配置日誌記錄器
-logging.basicConfig(
-    filename="app.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# 檔案處理器：寫入 app.log
+file_handler = logging.FileHandler("app.log")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 控制台處理器：輸出到 stdout
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # 應用 asyncio 補丁
 nest_asyncio.apply()
@@ -95,7 +102,7 @@ async def main():
                     return
 
                 # 重置聊天記錄（若問題變化較大）
-                if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
+                if not st.session_state.last_user_query or len(set(user_query.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
                     st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                     st.session_state.thread_cache = {}
                     st.session_state.conversation_context = []
