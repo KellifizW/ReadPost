@@ -14,7 +14,7 @@ import streamlit as st
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 配置日誌記錄器
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Grok 3 API 配置
@@ -52,7 +52,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
        - data_type: "both".
        - post_limit: 從問題提取 (默認2, 最大10).
        - reply_limit: 75.
-       - filters: 根據主題 (感動: like_count>=2; 搞笑: like_count>=2; 財經: like_count>=2; 其他: min_replies>=5, min_likes>=2).
+       - filters: 根據主題 (感動: like_count>=0; 搞笑: like_count>=0; 財經: like_count>=0; 其他: min_replies>=2, min_likes>=0).
        - processing: emotion_focused_summary, humor_focused_summary, professional_summary, summarize, sentiment.
        - candidate_thread_ids: 10個候選ID.
        - top_thread_ids: 最終選定ID.
@@ -68,7 +68,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error("Grok 3 API key missing")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 5, "min_likes": 2},
+            "reply_limit": 75, "filters": {"min_replies": 2, "min_likes": 0},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": "Missing API key"
         }
@@ -93,7 +93,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         logger.error(f"Analysis failed: {str(e)}")
         return {
             "theme": "未知", "category_ids": [cat_id], "data_type": "both", "post_limit": 2,
-            "reply_limit": 75, "filters": {"min_replies": 5, "min_likes": 2},
+            "reply_limit": 75, "filters": {"min_replies": 2, "min_likes": 0},
             "processing": "summarize", "candidate_thread_ids": [], "top_thread_ids": [],
             "category_suggestion": f"Analysis failed: {str(e)}"
         }
@@ -208,8 +208,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     post_limit = min(analysis.get("post_limit", 2), 10)
     reply_limit = min(analysis.get("reply_limit", 75), 75)
     filters = analysis.get("filters", {})
-    min_replies = filters.get("min_replies", 5)
-    min_likes = filters.get("min_likes", 2)
+    min_replies = filters.get("min_replies", 2)
+    min_likes = filters.get("min_likes", 0)
     top_thread_ids = analysis.get("top_thread_ids", [])
 
     logger.info(f"Filtering threads with min_replies={min_replies}, min_likes={min_likes}")
@@ -272,9 +272,13 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
 
     # 選擇帖子
     candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
-    if not candidate_threads and filtered_items:
-        candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items)))
-        logger.info(f"No top_thread_ids, randomly selected: {[item['thread_id'] for item in candidate_threads]}")
+    if not candidate_threads:
+        if filtered_items:
+            candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items)))
+            logger.info(f"No top_thread_ids matched, randomly selected: {[item['thread_id'] for item in candidate_threads]}")
+        else:
+            logger.warning(f"No candidate threads available, using any available threads")
+            candidate_threads = random.sample(initial_threads, min(post_limit, len(initial_threads))) if initial_threads else []
 
     # 抓取帖子內容
     for item in candidate_threads:
