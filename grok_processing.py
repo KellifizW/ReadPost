@@ -382,10 +382,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                                     f"Detected ### in response chunk: {content}",
                                                     extra={"function": "stream_grok3_response"}
                                                 )
-                                                # 僅在明確為審核標記時重試
                                                 if "Content Moderation" in content or "Blocked" in content:
                                                     raise ValueError("Content moderation detected")
-                                                # 否則繼續處理
                                             response_content += content
                                             yield content
                                     except json.JSONDecodeError as e:
@@ -423,7 +421,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         payload["messages"][-1]["content"] = prompt
                         await asyncio.sleep(2 + attempt * 2)
                         continue
-                    # 備用回應
                     yield f"錯誤：生成回應失敗（{str(e)}）。以下為可用帖子：\n"
                     for tid, data in filtered_thread_data.items():
                         yield f"- 帖子 ID: {tid} 標題: {data['title']}\n"
@@ -447,7 +444,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
-    增強第二次分析邏輯，確保 top_thread_ids 生成。
+    記錄每個帖子未成為 top_thread_ids 的原因。
     """
     try:
         logger.info(f"Processing query: {user_question}, category: {selected_cat}, cat_id: {cat_id}", extra={"function": "process_user_question"})
@@ -504,13 +501,35 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 min_replies = filters.get("min_replies", 0)
                 min_likes = filters.get("min_likes", 0)
                 previous_thread_ids = previous_thread_ids or []
+                filtered_items = []
                 
-                filtered_items = [
-                    item for item in initial_threads
-                    if item.get("no_of_reply", 0) >= min_replies
-                    and int(item.get("like_count", 0)) >= min_likes
-                    and str(item["thread_id"]) not in previous_thread_ids
-                ]
+                # 記錄每個帖子的篩選結果
+                for item in initial_threads:
+                    thread_id = str(item["thread_id"])
+                    no_of_reply = item.get("no_of_reply", 0)
+                    like_count = int(item.get("like_count", 0))
+                    reasons = []
+                    
+                    if no_of_reply < min_replies:
+                        reasons.append(f"no_of_reply={no_of_reply} < min_replies={min_replies}")
+                    if like_count < min_likes:
+                        reasons.append(f"like_count={like_count} < min_likes={min_likes}")
+                    if thread_id in previous_thread_ids:
+                        reasons.append("thread_id in previous_thread_ids")
+                    
+                    if not reasons:
+                        filtered_items.append(item)
+                    else:
+                        logger.info(
+                            json.dumps({
+                                "event": "thread_filtering",
+                                "function": "process_user_question",
+                                "thread_id": thread_id,
+                                "status": "excluded",
+                                "reason": "; ".join(reasons)
+                            }, ensure_ascii=False),
+                            extra={"function": "process_user_question"}
+                        )
                 
                 post_limit = min(analysis.get("post_limit", 5), 20)
                 if not filtered_items:
@@ -693,11 +712,37 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 0)
         min_likes = filters.get("min_likes", 0)
-        filtered_items = [
-            item for item in initial_threads
-            if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
-            and str(item["thread_id"]) not in previous_thread_ids
-        ]
+        previous_thread_ids = previous_thread_ids or []
+        filtered_items = []
+        
+        # 記錄每個帖子的篩選結果
+        for item in initial_threads:
+            thread_id = str(item["thread_id"])
+            no_of_reply = item.get("no_of_reply", 0)
+            like_count = int(item.get("like_count", 0))
+            reasons = []
+            
+            if no_of_reply < min_replies:
+                reasons.append(f"no_of_reply={no_of_reply} < min_replies={min_replies}")
+            if like_count < min_likes:
+                reasons.append(f"like_count={like_count} < min_likes={min_likes}")
+            if thread_id in previous_thread_ids:
+                reasons.append("thread_id in previous_thread_ids")
+            
+            if not reasons:
+                filtered_items.append(item)
+            else:
+                logger.info(
+                    json.dumps({
+                        "event": "thread_filtering",
+                        "function": "process_user_question",
+                        "thread_id": thread_id,
+                        "status": "excluded",
+                        "reason": "; ".join(reasons)
+                    }, ensure_ascii=False),
+                    extra={"function": "process_user_question"}
+                )
+        
         logger.info(
             json.dumps({
                 "event": "thread_filtering",
@@ -727,7 +772,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
-        # 若 top_thread_ids 為空，傳入 initial_threads 重新分析
         if not top_thread_ids and filtered_items:
             logger.info(f"No top_thread_ids, triggering re-analysis with {len(filtered_items)} threads", extra={"function": "process_user_question"})
             analysis = await analyze_and_screen(
@@ -756,7 +800,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 extra={"function": "process_user_question"}
             )
         
-        # 後備邏輯：僅在再分析失敗後使用
         if not top_thread_ids and filtered_items:
             sorted_items = sorted(
                 filtered_items,
