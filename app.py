@@ -170,12 +170,21 @@ async def main():
 
                 # 處理用戶問題
                 result = await process_user_question(
-                    user_question=user_question, selected_cat=selected_cat, cat_id=cat_id, analysis=analysis,
-                    rate_limit_info=rate_limit_info
+                    user_question=user_question,
+                    selected_cat=selected_cat,
+                    cat_id=cat_id,
+                    analysis=analysis,
+                    request_counter=rate_limit_info["counter"],
+                    last_reset=rate_limit_info["last_reset"],
+                    rate_limit_until=rate_limit_info["until"]
                 )
 
                 # 更新速率限制狀態
-                st.session_state.rate_limit_info = result.get("rate_limit_info", rate_limit_info)
+                st.session_state.rate_limit_info = {
+                    "counter": result.get("request_counter", rate_limit_info["counter"]),
+                    "last_reset": result.get("last_reset", rate_limit_info["last_reset"]),
+                    "until": result.get("rate_limit_until", rate_limit_info["until"])
+                }
                 thread_data = result.get("thread_data", [])
                 question_cat = result.get("selected_cat", selected_cat)
 
