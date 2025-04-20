@@ -337,11 +337,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     """
     post_limit = min(analysis.get("post_limit", 2), 10)
     reply_limit = 200 if is_advanced else min(analysis.get("reply_limit", 75), 75)
-    filters = analysis.get("filters", {})
-    min_replies = 20 if analysis.get("theme") == "搞笑" else filters.get("min_replies", 50)
-    min_likes = 10 if analysis.get("theme") == "搞笑" else filters.get("min_likes", 20)
-    candidate_thread_ids = analysis.get("candidate_thread_ids", [])
-    top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else (previous_thread_ids or [])
+    
+    # 設置唯一的過濾條件：min_replies = 25
+    min_replies = 25
     
     thread_data = []
     rate_limit_info = []
@@ -415,9 +413,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             initial_threads = initial_threads[:90]
             break
     
+    # 僅使用 min_replies = 25 作為過濾條件
     filtered_items = [
         item for item in initial_threads
-        if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes
+        if item.get("no_of_reply", 0) >= min_replies
     ]
     logger.info(f"Filtered items: {len(filtered_items)} from {len(initial_threads)}")
     
