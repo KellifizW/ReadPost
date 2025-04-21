@@ -989,7 +989,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.8)
         
-        for idx, item in enumerate(candidate_threads):
+for idx, item in enumerate(candidate_threads):
             thread_id = str(item["thread_id"])
             thread_result = await get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -997,8 +997,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=reply_limit,
-                fetch_last_pages=0
+                max_replies=reply_limit,  # 確保使用 reply_limit
+                fetch_last_pages=2  # 修正為抓取 2 頁回覆
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
@@ -1006,6 +1006,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_info.extend(thread_result.get("rate_limit_info", []))
             
             replies = thread_result.get("replies", [])
+            logger.info(
+                json.dumps({
+                    "event": "thread_fetch_raw",
+                    "function": "process_user_question",
+                    "thread_id": thread_id,
+                    "raw_replies": len(replies)
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
             sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
             thread_data.append({
                 "thread_id": thread_id,
@@ -1022,7 +1031,17 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "fetched_pages": thread_data[-1]["fetched_pages"]
             })
             st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
-            logger.info(f"Fetched candidate thread {thread_id}: replies={len(replies)}", extra={"function": "process_user_question"})
+            logger.info(
+                json.dumps({
+                    "event": "thread_data_update",
+                    "function": "process_user_question",
+                    "thread_id": thread_id,
+                    "replies_stored": len(sorted_replies),
+                    "fetched_pages": thread_result.get("fetched_pages", [])
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
+            logger.info(f"Fetched candidate thread {thread_id}: replies={len(sorted_replies)}", extra={"function": "process_user_question"})
             if progress_callback:
                 progress_callback(f"已抓取候選帖子 {idx + 1}/{len(candidate_threads)}", 0.8 + 0.1 * ((idx + 1) / len(candidate_threads)))
             await asyncio.sleep(1)
@@ -1030,6 +1049,25 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         final_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
         if not final_threads:
             final_threads = candidate_threads[:post_limit]
+        
+        if final_threads:
+            logger.info(
+                json.dumps({
+                    "event": "top_thread_selection",
+                    "function": "process_user_question",
+                    "query": user_question,
+                    "top_thread_ids": [item["thread_id"] for item in final_threads],
+                    "details": [
+                        {
+                            "thread_id": str(item["thread_id"]),
+                            "title": item["title"],
+                            "no_of_reply": item.get("no_of_reply", 0),
+                            "like_count": item.get("like_count", 0)
+                        } for item in final_threads
+                    ]
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
         
         if progress_callback:
             progress_callback("正在抓取最終帖子內容", 0.9)
@@ -1051,6 +1089,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_info.extend(thread_result.get("rate_limit_info", []))
             
             replies = thread_result.get("replies", [])
+            logger.info(
+                json.dumps({
+                    "event": "thread_fetch_raw",
+                    "function": "process_user_question",
+                    "thread_id": thread_id,
+                    "raw_replies": len(replies)
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
             sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
             thread_data.append({
                 "thread_id": thread_id,
@@ -1067,7 +1114,17 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "fetched_pages": thread_data[-1]["fetched_pages"]
             })
             st.session_state.thread_cache[thread_id]["timestamp"] = time.time()
-            logger.info(f"Fetched final thread {thread_id}: replies={len(replies)}", extra={"function": "process_user_question"})
+            logger.info(
+                json.dumps({
+                    "event": "thread_data_update",
+                    "function": "process_user_question",
+                    "thread_id": thread_id,
+                    "replies_stored": len(sorted_replies),
+                    "fetched_pages": thread_result.get("fetched_pages", [])
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
+            logger.info(f"Fetched final thread {thread_id}: replies={len(sorted_replies)}", extra={"function": "process_user_question"})
             if progress_callback:
                 progress_callback(f"已抓取最終帖子 {idx + 1}/{len(final_threads)}", 0.9 + 0.1 * ((idx + 1) / len(final_threads)))
             await asyncio.sleep(1)
