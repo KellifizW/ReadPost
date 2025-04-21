@@ -423,19 +423,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         根據問題語義提供直接回應，聚焦問題核心（50-100 字）。
+        若問題為「你是誰」，回答：「我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。」
         輸出：直接回應
         """
     }
     
     if not metadata and not filtered_thread_data:
-        prompt = f"""
-        你是 Grok 3，以繁體中文回答。問題：{user_query}
-        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-        若問題要求列出數據類型，回答：「我可以抓取 LIHKG 討論區的帖子標題、帖子 ID、回覆數量、最後回覆時間、點贊數、踩數，及部分回覆內容、回覆點贊與踩數、回覆時間。若需具體帖子分析，請提供更多細節！」（100-150字）。
-        若問題為一般問題，直接回應。
-        若無帖子數據且問題要求帖子，回答：「目前無可用帖子標題。」
-        輸出：直接回應
-        """
+        prompt = prompt_templates["general"]
     else:
         prompt = prompt_templates.get(processing, prompt_templates["general"])
     
@@ -478,6 +472,27 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 try:
                     async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                         status_code = response.status
+                        if status_code != 200:
+                            response_text = await response.text()
+                            logger.warning(
+                                json.dumps({
+                                    "event": "grok3_api_call",
+                                    "function": "stream_grok3_response",
+                                    "action": "回應生成失敗",
+                                    "query": user_query,
+                                    "status": "failed",
+                                    "status_code": status_code,
+                                    "response_text": response_text[:500],
+                                    "attempt": attempt + 1
+                                }, ensure_ascii=False),
+                                extra={"function": "stream_grok3_response"}
+                            )
+                            if attempt < 2:
+                                await asyncio.sleep(2 + attempt * 2)
+                                continue
+                            yield f"錯誤：API 請求失敗（狀態碼 {status_code}）。請稍後重試。"
+                            return
+                        
                         async for line in response.content:
                             if line and not line.isspace():
                                 line_str = line.decode('utf-8').strip()
@@ -547,9 +562,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         )
                         await asyncio.sleep(2 + attempt * 2)
                         continue
-                    yield f"錯誤：生成回應失敗（{str(e)}）。以下為可用帖子：\n"
-                    for tid, data in filtered_thread_data.items():
-                        yield f"- 帖子 ID: {tid} 標題: {data['title']}\n"
+                    yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試。"
                     return
         except Exception as e:
             status_code = "unknown"
