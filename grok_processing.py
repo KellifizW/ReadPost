@@ -449,10 +449,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         帖子元數據：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         篩選條件：{json.dumps(filters, ensure_ascii=False)}
-        主題：{processing.get('theme', '未知')}
-        主題關鍵詞：{json.dumps(processing.get('theme_keywords', []), ensure_ascii=False)}
+        主題：{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}
+        主題關鍵詞：{json.dumps(processing.get('theme_keywords', []) if isinstance(processing, dict) else [], ensure_ascii=False)}
         任務：
-        1. 分析所有帖子標題，比較其與主題『{processing.get('theme', '未知')}』的相關性（考慮香港俚語，如「On9」指愚蠢、荒誕或搞笑）。
+        1. 分析所有帖子標題，比較其與主題『{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}』的相關性（考慮香港俚語，如「On9」指愚蠢、荒誕或搞笑）。
         2. 按相關性排序，選出最相關的帖子。
         3. 若無強相關帖子，選最接近的並說明。
         4. 引用最多3條高關注回覆（like_count≥5），說明其與主題的相關性。
@@ -460,13 +460,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
            - 帖子 ID: [thread_id] 標題: [title]
            - 為何最相關: [原因，150-200字]
            - 代表性回覆: [回覆內容及相關性說明]
-        6. 若無帖子，回答：「在 {selected_cat} 中未找到符合『{processing.get('theme', '未知')}』的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
+        6. 若無帖子，回答：「在 {selected_cat} 中未找到符合『{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}』的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
         7. 字數：300-500字。
         輸出：主題帖子詳情或無帖子提示
         """
     }
     
-    intent = processing.get('intent', 'general') if isinstance(processing, dict) else processing
+    intent = processing.get('intent', 'general') if isinstance(processing, dict) else 'general'
     if intent not in prompt_templates:
         intent = "general"
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
