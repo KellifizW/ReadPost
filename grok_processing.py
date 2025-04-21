@@ -445,24 +445,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     prompt = prompt_templates.get(intent, prompt_templates["general"])
     
-    # 記錄提示詞選擇和輸入參數
-    logger.debug(
-        json.dumps({
-            "event": "stream_grok3_response_setup",
-            "function": "stream_grok3_response",
-            "query": user_query,
-            "intent": intent,
-            "prompt_template": intent,
-            "thread_data_length": len(filtered_thread_data),
-            "metadata_length": len(metadata),
-            "processing": processing,
-            "filters": filters,
-            "needs_advanced_analysis": needs_advanced_analysis,
-            "reason": reason
-        }, ensure_ascii=False),
-        extra={"function": "stream_grok3_response"}
-    )
-    
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
@@ -541,16 +523,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                                 if "Content Moderation" in content or "Blocked" in content:
                                                     raise ValueError("Content moderation detected")
                                             response_content += content
-                                            logger.debug(
-                                                json.dumps({
-                                                    "event": "stream_grok3_response_chunk",
-                                                    "function": "stream_grok3_response",
-                                                    "query": user_query,
-                                                    "chunk_content": content[:100],
-                                                    "total_length": len(response_content)
-                                                }, ensure_ascii=False),
-                                                extra={"function": "stream_grok3_response"}
-                                            )
                                             yield content
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"JSON decode error in stream chunk: {str(e)}", extra={"function": "stream_grok3_response"})
@@ -666,21 +638,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "query": user_question,
                     "reason": "Direct response or general query, no thread fetching needed",
                     "intent": analysis.get("intent", "unknown")
-                }, ensure_ascii=False),
-                extra={"function": "process_user_question"}
-            )
-            # 記錄返回結果結構
-            logger.debug(
-                json.dumps({
-                    "event": "process_user_question_return",
-                    "function": "process_user_question",
-                    "query": user_question,
-                    "result": {
-                        "selected_cat": selected_cat,
-                        "thread_data_length": 0,
-                        "rate_limit_info": [],
-                        "analysis": analysis
-                    }
                 }, ensure_ascii=False),
                 extra={"function": "process_user_question"}
             )
@@ -810,21 +767,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 extra={"function": "process_user_question"}
             )
             
-            # 記錄返回結果結構
-            logger.debug(
-                json.dumps({
-                    "event": "process_user_question_return",
-                    "function": "process_user_question",
-                    "query": user_question,
-                    "result": {
-                        "selected_cat": selected_cat,
-                        "thread_data_length": len(thread_data),
-                        "rate_limit_info": rate_limit_info,
-                        "analysis": analysis
-                    }
-                }, ensure_ascii=False),
-                extra={"function": "process_user_question"}
-            )
             return {
                 "selected_cat": selected_cat,
                 "thread_data": thread_data,
@@ -925,21 +867,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 await asyncio.sleep(1)
             
             logger.info(f"Advanced processing completed: {len(thread_data)} threads", extra={"function": "process_user_question"})
-            # 記錄返回結果結構
-            logger.debug(
-                json.dumps({
-                    "event": "process_user_question_return",
-                    "function": "process_user_question",
-                    "query": user_question,
-                    "result": {
-                        "selected_cat": selected_cat,
-                        "thread_data_length": len(thread_data),
-                        "rate_limit_info": rate_limit_info,
-                        "analysis": analysis
-                    }
-                }, ensure_ascii=False),
-                extra={"function": "process_user_question"}
-            )
+
             return {
                 "selected_cat": selected_cat,
                 "thread_data": thread_data,
@@ -1226,21 +1154,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             await asyncio.sleep(1)
         
         logger.info(f"Processing completed: {len(thread_data)} threads for query: {user_question}", extra={"function": "process_user_question"})
-        # 記錄返回結果結構
-        logger.debug(
-            json.dumps({
-                "event": "process_user_question_return",
-                "function": "process_user_question",
-                "query": user_question,
-                "result": {
-                    "selected_cat": selected_cat,
-                    "thread_data_length": len(thread_data),
-                    "rate_limit_info": rate_limit_info,
-                    "analysis": analysis
-                }
-            }, ensure_ascii=False),
-            extra={"function": "process_user_question"}
-        )
+
         return {
             "selected_cat": selected_cat,
             "thread_data": thread_data,
@@ -1263,21 +1177,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }, ensure_ascii=False),
             extra={"function": "process_user_question"}
         )
-        # 記錄異常返回結果結構
-        logger.debug(
-            json.dumps({
-                "event": "process_user_question_return_error",
-                "function": "process_user_question",
-                "query": user_question,
-                "result": {
-                    "selected_cat": selected_cat,
-                    "thread_data_length": len(thread_data) if 'thread_data' in locals() else 0,
-                    "rate_limit_info": rate_limit_info if 'rate_limit_info' in locals() else [{"message": f"Processing failed: {str(e)}"}],
-                    "analysis": analysis or {}
-                }
-            }, ensure_ascii=False),
-            extra={"function": "process_user_question"}
-        )
+
         return {
             "selected_cat": selected_cat,
             "thread_data": thread_data if 'thread_data' in locals() else [],
