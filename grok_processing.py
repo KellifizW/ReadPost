@@ -1,6 +1,7 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復回覆提取問題，採用分階段抓取策略，簡化回覆處理邏輯。
+修復 analyze_and_screen 中提示詞格式化錯誤，轉義 JSON 結構中的大括號。
 主要函數：
 - analyze_and_screen：分析問題，識別細粒度意圖，動態設置篩選條件和主題關鍵詞。
 - stream_grok3_response：生成流式回應，動態選擇模板，支持靈活的一般性查詢。
@@ -58,8 +59,28 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     """
     分析用戶問題，識別細粒度意圖，動態設置篩選條件和主題關鍵詞。
     使用 Grok 3 提取主題和關鍵詞，支持靈活的帖子匹配。
+    修復提示詞格式化錯誤，轉義 JSON 結構中的大括號。
     """
     conversation_context = conversation_context or []
+    # JSON 輸出規範，獨立定義以避免 f-string 格式化問題
+    output_format = """
+    {
+        "direct_response": {{boolean}},
+        "intent": {{string}},
+        "theme": {{string}},
+        "category_ids": {{array}},
+        "data_type": {{string}} (title_only, replies, both),
+        "post_limit": {{integer}},
+        "reply_limit": {{integer}},
+        "filters": {{object}},
+        "processing": {{string}},
+        "candidate_thread_ids": {{array}},
+        "top_thread_ids": {{array}},
+        "needs_advanced_analysis": {{boolean}},
+        "reason": {{string}},
+        "theme_keywords": {{array}}
+    }
+    """
     prompt = f"""
     你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣。輸出 JSON。
 
@@ -97,24 +118,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     8. 若無法生成 top_thread_ids，提供原因（reason）。
 
     輸出格式：
-    {
-        "direct_response": boolean,
-        "intent": string,
-        "theme": string,
-        "category_ids": array,
-        "data_type": string (title_only, replies, both),
-        "post_limit": integer,
-        "reply_limit": integer,
-        "filters": object,
-        "processing": string,
-        "candidate_thread_ids": array,
-        "top_thread_ids": array,
-        "needs_advanced_analysis": boolean,
-        "reason": string,
-        "theme_keywords": array
-    }
+    {output_format}
     示例（主題為搞笑）：
-    {
+    {{
         "direct_response": false,
         "intent": "find_themed",
         "theme": "搞笑",
@@ -122,16 +128,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "data_type": "both",
         "post_limit": 5,
         "reply_limit": 100,
-        "filters": {"min_replies": 50, "min_likes": 10},
+        "filters": {{"min_replies": 50, "min_likes": 10}},
         "processing": "summarize",
         "candidate_thread_ids": [],
         "top_thread_ids": ["3915677", "3910235"],
         "needs_advanced_analysis": false,
         "reason": "",
         "theme_keywords": ["搞笑", "爆笑", "趣事", "笑話"]
-    }
+    }}
     若無數據：
-    {
+    {{
         "direct_response": false,
         "intent": "summarize_posts",
         "theme": "熱門",
@@ -139,14 +145,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "data_type": "both",
         "post_limit": 10,
         "reply_limit": 200,
-        "filters": {"min_replies": 50, "min_likes": 20},
+        "filters": {{"min_replies": 50, "min_likes": 20}},
         "processing": "summarize",
         "candidate_thread_ids": [],
         "top_thread_ids": [],
         "needs_advanced_analysis": true,
         "reason": "無帖子數據，建議抓取更多帖子",
         "theme_keywords": []
-    }
+    }}
     """
     
     try:
@@ -321,7 +327,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 4. 設置篩選條件（filters，例如 min_replies=50-200, min_likes=10-100）。
                 5. 若有帖子標題，選最多10個帖子ID（top_thread_ids），按回覆數*0.6+點讚數*0.4排序。
                 輸出：
-                {"direct_response": boolean, "intent": string, "theme": string, "category_ids": array, "data_type": string, "post_limit": integer, "reply_limit": integer, "filters": object, "processing": string, "candidate_thread_ids": array, "top_thread_ids": array, "needs_advanced_analysis": boolean, "reason": string, "theme_keywords": array}
+                {output_format}
                 """
                 messages[-1]["content"] = simplified_prompt
                 payload["max_tokens"] = 300
