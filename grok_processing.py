@@ -22,7 +22,7 @@ from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(function)s - %(message)s")
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
 
 # 檔案處理器：寫入 app.log
 file_handler = logging.FileHandler("app.log")
@@ -37,7 +37,7 @@ logger.addHandler(stream_handler)
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 60  # 秒
+API_TIMEOUT = 90  # 秒
 
 def clean_html(text):
     """
@@ -741,7 +741,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if no_of_reply < min_replies or like_count < min_likes or thread_id in previous_thread_ids:
                 return None
             
-            # 快速抓取前幾條回覆進行主題匹配
             thread_result = await get_lihkg_thread_content(
                 thread_id=thread_id,
                 cat_id=cat_id,
@@ -761,9 +760,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             帖子標題：{title}
             回覆內容：{json.dumps(reply_texts[:5], ensure_ascii=False)}
             任務：
-            1. 分析標題和回覆是否與主題相關。
-            2. 若相關，設置 is_relevant=true，並提供匹配的關鍵詞（matched_keywords）。
+            1. 分析標題和回覆是否與主題相關，考慮語義相似性、同義詞和香港俚語（例如「on9」可匹配「蠢」「傻」，「感動」可匹配「感人」「催淚」）。
+            2. 若相關，設置 is_relevant=true，提供匹配的關鍵詞（matched_keywords）。
             3. 若不相關，設置 is_relevant=false，說明原因（reason）。
+            4. 若標題無明確主題詞但回覆內容強烈反映主題，視為相關。
             輸出：
             {{
                 "is_relevant": boolean,
@@ -785,23 +785,34 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "temperature": 0.7
                 }
                 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                        if response.status != 200:
-                            logger.warning(f"Theme matching failed for thread {thread_id}: status {response.status}")
-                            return None
-                        data = await response.json()
-                        result = json.loads(data["choices"][0]["message"]["content"])
-                        if result.get("is_relevant", False):
-                            return {
-                                "thread": thread,
-                                "matched_keywords": result.get("matched_keywords", []),
-                                "score": no_of_reply * 0.6 + like_count * 0.4
-                            }
-                        logger.info(f"Thread {thread_id} not relevant: {result.get('reason', 'Unknown')}")
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                                if response.status != 200:
+                                    logger.warning(f"Theme matching failed for thread {thread_id}: status {response.status}", extra={"function": "match_theme_with_grok"})
+                                    return None
+                                data = await response.json()
+                                result = json.loads(data["choices"][0]["message"]["content"])
+                                if result.get("is_relevant", False):
+                                    return {
+                                        "thread": thread,
+                                        "matched_keywords": result.get("matched_keywords", []),
+                                        "score": no_of_reply * 0.6 + like_count * 0.4
+                                    }
+                                logger.info(f"Thread {thread_id} not relevant: {result.get('reason', 'Unknown')}", extra={"function": "match_theme_with_grok"})
+                                return None
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt
+                            logger.warning(f"Retry {attempt + 1} for thread {thread_id} after {wait_time}s: {str(e)}", extra={"function": "match_theme_with_grok"})
+                            await asyncio.sleep(wait_time)
+                            continue
+                        logger.error(f"Theme matching failed for thread {thread_id} after {max_retries} attempts: {str(e)}", extra={"function": "match_theme_with_grok"})
                         return None
             except Exception as e:
-                logger.error(f"Theme matching error for thread {thread_id}: {str(e)}")
+                logger.error(f"Theme matching error for thread {thread_id}: {str(e)}", extra={"function": "match_theme_with_grok"})
                 return None
         
         # 並行處理主題匹配
@@ -831,23 +842,25 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             extra={"function": "process_user_question"}
         )
         
-        # 若無符合主題的帖子，放寬篩選條件
+        # 若無符合主題的帖子，放寬篩選條件但保留主題相關性
         if not filtered_items:
             logger.warning(
-                f"No threads meet theme '{theme}' with keywords {theme_keywords}, trying relaxed filters",
+                f"No threads meet theme '{theme}' with keywords {theme_keywords}, trying relaxed filters with theme relevance",
                 extra={"function": "process_user_question"}
             )
-            filtered_threads = [
-                item for item in initial_threads
-                if str(item["thread_id"]) not in previous_thread_ids
-                and item.get("no_of_reply", 0) >= min_replies // 2
-                and int(item.get("like_count", 0)) >= min_likes // 2
-            ]
-            filtered_threads = sorted(
-                filtered_threads,
-                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                reverse=True
-            )[:post_limit]
+            filtered_threads = []
+            for item in initial_threads:
+                if str(item["thread_id"]) not in previous_thread_ids:
+                    no_of_reply = item.get("no_of_reply", 0)
+                    like_count = int(item.get("like_count", 0))
+                    title = item.get("title", "").lower()
+                    if no_of_reply >= min_replies // 2 and like_count >= min_likes // 2:
+                        score = no_of_reply * 0.6 + like_count * 0.4
+                        if any(keyword.lower() in title for keyword in theme_keywords):
+                            score *= 1.5
+                        filtered_threads.append({"thread": item, "score": score})
+            filtered_threads = sorted(filtered_threads, key=lambda x: x["score"], reverse=True)[:post_limit]
+            filtered_threads = [item["thread"] for item in filtered_threads]
         
         # 更新緩存
         for item in initial_threads:
