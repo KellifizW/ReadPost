@@ -387,11 +387,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         帖子元數據：{json.dumps(metadata, ensure_ascii=False)}
         篩選條件：{json.dumps(filters, ensure_ascii=False)}
-        僅列出帖子標題，格式為：
-        - 帖子 ID: [thread_id] 標題: [title]
-        若無符合條件的帖子，回答：「無符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」並列出最多5個最新帖子標題（無篩選）。
-        若無任何帖子，回答：「目前無可用帖子標題。」
-        輸出：標題列表
+        任務：
+        1. 列出帖子標題，格式為：
+           - 帖子 ID: [thread_id] 標題: [title]
+        2. 若無符合條件的帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
+        3. 若無任何帖子，回答：「在 {selected_cat} 中目前無可用帖子。」
+        輸出：標題列表或無帖子提示
         """,
         "summarize": f"""
         你是 LIHKG 論壇的集體意見代表，以繁體中文回答。問題：{user_query}
@@ -400,11 +401,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         任務：
         1. 分析每個帖子的主題和核心觀點，引用高關注回覆（like_count≥5）。
-        2. 總結熱門話題的趨勢，例如社會議題、娛樂八卦或時事。
+        2. 總結熱門話題的趨勢（例如社會議題、娛樂八卦）。
         3. 提取用戶關注點和討論熱度原因。
-        4. 字數：400-600字。
-        若數據不足，說明原因並建議抓取更多回覆。
-        輸出：詳細總結
+        4. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
+        5. 字數：400-600字。
+        輸出：詳細總結或無帖子提示
         """,
         "sentiment": f"""
         你是 LIHKG 論壇的集體意見代表，以繁體中文回答。問題：{user_query}
@@ -414,10 +415,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         任務：
         1. 分析每個帖子的情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
         2. 量化情緒比例（例如 正面40%，負面30%，中立30%）。
-        3. 說明情緒背後的原因，例如爭議性話題或流行文化影響。
-        4. 字數：300-500字。
-        若數據不足，說明原因並建議抓取更多回覆。
-        輸出：情緒分析
+        3. 說明情緒背後的原因。
+        4. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
+        5. 字數：300-500字。
+        輸出：情緒分析或無帖子提示
         """,
         "introduce": f"""
         你是 Grok 3，以繁體中文回答。問題：{user_query}
@@ -429,8 +430,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         根據問題語義提供直接回應，聚焦問題核心（50-100 字）。
-        若問題涉及 LIHKG 論壇數據但無具體要求，建議用戶提供更明確的查詢。
-        輸出：直接回應
+        若問題涉及 LIHKG 論壇數據但無具體要求，回答：「請提供更明確的查詢以分析 {selected_cat} 的帖子。」
+        若無帖子數據，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
+        輸出：直接回應或無帖子提示
         """
     }
     
@@ -438,7 +440,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     intent = processing if processing in prompt_templates else "general"
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
         intent = "introduce"
-    elif not metadata and not filtered_thread_data:
+    elif not metadata and not filtered_thread_data and processing not in ["general", "introduce"]:
         intent = "general"
     
     prompt = prompt_templates.get(intent, prompt_templates["general"])
@@ -539,13 +541,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                                 if "Content Moderation" in content or "Blocked" in content:
                                                     raise ValueError("Content moderation detected")
                                             response_content += content
-                                            # 記錄回應片段
                                             logger.debug(
                                                 json.dumps({
                                                     "event": "stream_grok3_response_chunk",
                                                     "function": "stream_grok3_response",
                                                     "query": user_query,
-                                                    "chunk_content": content[:100],  # 限制長度
+                                                    "chunk_content": content[:100],
                                                     "total_length": len(response_content)
                                                 }, ensure_ascii=False),
                                                 extra={"function": "stream_grok3_response"}
@@ -556,10 +557,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         continue
                         if not response_content:
                             logger.warning(f"No content generated for query: {user_query}")
-                            response_content = "我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。"
+                            response_content = "無法生成回應，請稍後重試。"
                             yield response_content
-                        if needs_advanced_analysis and metadata and filtered_thread_data and intent not in ["general", "introduce"]:
-                            yield f"\n建議：為確保分析全面，建議抓取更多帖子頁數。{reason}\n"
                         logger.info(
                             json.dumps({
                                 "event": "grok3_api_call",
