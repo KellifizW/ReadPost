@@ -15,10 +15,11 @@ import logging
 import json
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 
-# 配置日誌記錄器
+# 配置日誌記錄器（移除多個處理器）
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+logger.handlers.clear()  # 清除現有處理器
 file_handler = logging.FileHandler("app.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -65,7 +66,7 @@ async def main():
     cat_id = str(cat_id_map[selected_cat])
     st.write(f"當前討論區：{selected_cat}")
 
-    # 記錄選單選擇
+    # 記錄選單選擇（僅記錄一次）
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
     # 顯示速率限制狀態
@@ -138,16 +139,23 @@ async def main():
                 with st.chat_message("assistant"):
                     grok_container = st.empty()
                     update_progress("正在生成回應", 0.9)
-                    async for chunk in stream_grok3_response(
-                        user_query=user_question,
-                        metadata=[],
-                        thread_data={},
-                        processing=analysis.get("processing", "general"),
-                        selected_cat=selected_cat,
-                        conversation_context=st.session_state.conversation_context
-                    ):
-                        response += chunk
-                        grok_container.markdown(response)
+                    logger.info(f"Streaming response for general query: {user_question}")
+                    try:
+                        async for chunk in stream_grok3_response(
+                            user_query=user_question,
+                            metadata=[],
+                            thread_data={},
+                            processing=analysis.get("processing", "general"),
+                            selected_cat=selected_cat,
+                            conversation_context=st.session_state.conversation_context
+                        ):
+                            response += chunk
+                            grok_container.markdown(response)
+                    except Exception as e:
+                        error_message = f"生成回應失敗：{str(e)}"
+                        logger.error(f"Stream response error: {error_message}")
+                        grok_container.markdown(error_message)
+                        response = error_message
                 st.session_state.chat_history[-1]["answer"] = response
                 st.session_state.conversation_context.append({"role": "user", "content": user_question})
                 st.session_state.conversation_context.append({"role": "assistant", "content": response})
@@ -218,6 +226,7 @@ async def main():
             with st.chat_message("assistant"):
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
+                logger.info(f"Streaming response for LIHKG query: {user_question}")
                 async for chunk in stream_grok3_response(
                     user_query=user_question,
                     metadata=metadata,
