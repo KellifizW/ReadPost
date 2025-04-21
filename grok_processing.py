@@ -376,21 +376,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     
     # 驗證輸入數據
-    if not metadata or not thread_data:
-        logger.warning(
-            json.dumps({
-                "event": "data_validation",
-                "function": "stream_grok3_response",
-                "query": user_query,
-                "metadata_count": len(metadata) if metadata else 0,
-                "thread_data_count": len(thread_data) if thread_data else 0,
-                "reason": "Missing metadata or thread_data"
-            }, ensure_ascii=False),
-            extra={"function": "stream_grok3_response"}
-        )
-        yield f"錯誤：在 {selected_cat} 中未找到足夠數據進行分析，請稍後重試。"
-        return
+    logger.info(
+        json.dumps({
+            "event": "data_validation",
+            "function": "stream_grok3_response",
+            "query": user_query,
+            "metadata_count": len(metadata) if metadata else 0,
+            "thread_data_count": len(thread_data) if thread_data else 0
+        }, ensure_ascii=False),
+        extra={"function": "stream_grok3_response"}
+    )
     
+    # 放寬回覆過濾條件，確保數據不被過濾為空
     filtered_thread_data = {
         tid: {
             "thread_id": data["thread_id"],
@@ -399,10 +396,46 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
-            "replies": [r for r in data.get("replies", []) if r.get("like_count", 0) >= 5][:50],
+            "replies": data.get("replies", [])[:50],  # 取前50條回覆，無需like_count限制
             "fetched_pages": data.get("fetched_pages", [])
         } for tid, data in thread_data.items()
     }
+    
+    # 記錄過濾後的回覆數量
+    for tid in filtered_thread_data:
+        logger.info(
+            json.dumps({
+                "event": "filtered_thread_data",
+                "function": "stream_grok3_response",
+                "thread_id": tid,
+                "reply_count": len(filtered_thread_data[tid]["replies"])
+            }, ensure_ascii=False),
+            extra={"function": "stream_grok3_response"}
+        )
+    
+    # 若filtered_thread_data為空，嘗試使用原始thread_data
+    if not any(data["replies"] for data in filtered_thread_data.values()):
+        logger.warning(
+            json.dumps({
+                "event": "data_validation",
+                "function": "stream_grok3_response",
+                "query": user_query,
+                "reason": "Filtered thread data has no replies, using raw thread data"
+            }, ensure_ascii=False),
+            extra={"function": "stream_grok3_response"}
+        )
+        filtered_thread_data = {
+            tid: {
+                "thread_id": data["thread_id"],
+                "title": data["title"],
+                "no_of_reply": data.get("no_of_reply", 0),
+                "last_reply_time": data.get("last_reply_time", 0),
+                "like_count": data.get("like_count", 0),
+                "dislike_count": data.get("dislike_count", 0),
+                "replies": data.get("replies", [])[:10],  # 取前10條回覆
+                "fetched_pages": data.get("fetched_pages", [])
+            } for tid, data in thread_data.items()
+        }
     
     prompt_templates = {
         "list": f"""
@@ -423,7 +456,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         任務：
-        1. 分析每個帖子的主題和核心觀點，引用高關注回覆（like_count≥5）。
+        1. 分析每個帖子的主題和核心觀點，引用高關注回覆（若無高關注回覆，引用前幾條回覆）。
         2. 總結熱門話題的趨勢（例如社會議題、娛樂八卦）。
         3. 提取用戶關注點和討論熱度原因。
         4. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
@@ -436,7 +469,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         帖子：{json.dumps(metadata, ensure_ascii=False)}
         回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
         任務：
-        1. 分析每個帖子的情緒分佈（正面、負面、中立），聚焦高關注回覆（like_count≥5）。
+        1. 分析每個帖子的情緒分佈（正面、負面、中立），聚焦高關注回覆（若無高關注回覆，分析前幾條回覆）。
         2. 量化情緒比例（例如 正面40%，負面30%，中立30%）。
         3. 說明情緒背後的原因。
         4. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
@@ -456,48 +489,31 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         若問題涉及 LIHKG 論壇數據但無具體要求，回答：「請提供更明確的查詢以分析 {selected_cat} 的帖子，例如具體主題或分析類型。」
         若無帖子數據，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
         輸出：直接回應或無帖子提示
-        """,
-        "themed": f"""
-        你是 LIHKG 論壇的數據助手，以繁體中文回答。問題：{user_query}
-        對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-        帖子元數據：{json.dumps(metadata, ensure_ascii=False)}
-        回覆：{json.dumps(filtered_thread_data, ensure_ascii=False)}
-        篩選條件：{json.dumps(filters, ensure_ascii=False)}
-        主題：{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}
-        主題關鍵詞：{json.dumps(processing.get('theme_keywords', []) if isinstance(processing, dict) else [], ensure_ascii=False)}
-        任務：
-        1. 分析所有帖子標題，比較其與主題『{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}』的相關性（考慮香港俚語，如「On9」指愚蠢、荒誕或搞笑）。
-        2. 按相關性排序，選出最相關的帖子。
-        3. 若無強相關帖子，選最接近的並說明。
-        4. 引用最多3條高關注回覆（like_count≥5），說明其與主題的相關性。
-        5. 輸出格式：
-           - 帖子 ID: [thread_id] 標題: [title]
-           - 為何最相關: [原因，150-200字]
-           - 代表性回覆: [回覆內容及相關性說明]
-        6. 若無帖子，回答：「在 {selected_cat} 中未找到符合『{processing.get('theme', '未知') if isinstance(processing, dict) else '未知'}』的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
-        7. 字數：300-500字。
-        輸出：主題帖子詳情或無帖子提示
         """
     }
     
     intent = processing.get('intent', 'general') if isinstance(processing, dict) else 'general'
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
         intent = "introduce"
-    elif not metadata or not filtered_thread_data:
-        intent = "general"
     
     # 確保 summarize_posts 意圖正確執行
-    if intent == "summarize_posts" and metadata and filtered_thread_data:
+    if intent == "summarize_posts" and metadata and thread_data:
         prompt = prompt_templates["summarize"]
     else:
         prompt = prompt_templates.get(intent, prompt_templates["general"])
     
-    # 檢查提示詞長度並動態調整
-    if len(prompt) > GROK3_TOKEN_LIMIT:
-        for tid in filtered_thread_data:
-            filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
-        prompt = prompt.replace(json.dumps(filtered_thread_data, ensure_ascii=False), json.dumps(filtered_thread_data, ensure_ascii=False))
-        logger.info(f"Truncated prompt: {len(prompt)} characters", extra={"function": "stream_grok3_response"})
+    # 檢查提示詞長度
+    if len(prompt) < 500:
+        logger.warning(
+            json.dumps({
+                "event": "prompt_validation",
+                "function": "stream_grok3_response",
+                "query": user_query,
+                "prompt_length": len(prompt),
+                "reason": "Prompt too short, likely missing data"
+            }, ensure_ascii=False),
+            extra={"function": "stream_grok3_response"}
+        )
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
