@@ -1,6 +1,6 @@
 """
 Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
-負責用戶交互、聊天記錄管理和速率限制狀態顯示。
+僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
 """
@@ -12,14 +12,13 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
-import json
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-logger.handlers.clear()  # 清除現有處理器
+logger.handlers.clear()
 file_handler = logging.FileHandler("app.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -133,45 +132,8 @@ async def main():
             )
             logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
-            # 非 LIHKG 問題直接回應
-            if not analysis.get("category_ids"):
-                response = ""
-                with st.chat_message("assistant"):
-                    grok_container = st.empty()
-                    update_progress("正在生成回應", 0.9)
-                    logger.info(f"Starting stream_grok3_response for general query: {user_question}")
-                    try:
-                        async for chunk in stream_grok3_response(
-                            user_query=user_question,
-                            metadata=[],
-                            thread_data={},
-                            processing=analysis.get("processing", "general"),
-                            selected_cat=selected_cat,
-                            conversation_context=st.session_state.conversation_context
-                        ):
-                            response += chunk
-                            grok_container.markdown(response)
-                        if not response:
-                            logger.warning(f"No response generated for query: {user_question}")
-                            response = "無法生成回應，請稍後重試。"
-                            grok_container.markdown(response)
-                    except Exception as e:
-                        error_message = f"生成回應失敗：{str(e)}"
-                        logger.error(f"Stream response error: {error_message}")
-                        grok_container.markdown(error_message)
-                        response = error_message
-                st.session_state.chat_history[-1]["answer"] = response
-                st.session_state.conversation_context.append({"role": "user", "content": user_question})
-                st.session_state.conversation_context.append({"role": "assistant", "content": response})
-                update_progress("完成", 1.0)
-                time.sleep(0.5)
-                status_text.empty()
-                progress_bar.empty()
-                st.session_state.awaiting_response = False
-                return
-
-            # 處理 LIHKG 問題
-            update_progress("正在處理 LIHKG 查詢", 0.2)
+            # 處理問題
+            update_progress("正在處理查詢", 0.2)
             result = await process_user_question(
                 user_question=user_question,
                 selected_cat=selected_cat,
@@ -189,121 +151,29 @@ async def main():
             st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
 
-            thread_data = result.get("thread_data", [])
-            question_cat = result.get("selected_cat", selected_cat)
-
-            # 無帖子數據
-            if not thread_data:
-                answer = f"在 {question_cat} 中未找到符合條件的帖子。"
-                logger.info(f"No threads found for query: {user_question}")
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
-                st.session_state.chat_history[-1]["answer"] = answer
-                st.session_state.conversation_context.append({"role": "user", "content": user_question})
-                st.session_state.conversation_context.append({"role": "assistant", "content": answer})
-                update_progress("完成", 1.0)
-                time.sleep(0.5)
-                status_text.empty()
-                progress_bar.empty()
-                st.session_state.awaiting_response = False
-                return
-
-            # 準備回應
-            post_limit = analysis.get("post_limit", 3)
-            thread_data = thread_data[:post_limit]
-            theme = analysis.get("theme", "相關")
-            response = f"以下是從 {question_cat} 收集的{theme}帖子：\n\n"
-            metadata = [
-                {
-                    "thread_id": item["thread_id"],
-                    "title": item["title"],
-                    "no_of_reply": item.get("no_of_reply", 0),
-                    "last_reply_time": item.get("last_reply_time", "0"),
-                    "like_count": item.get("like_count", 0),
-                    "dislike_count": item.get("dislike_count", 0)
-                } for item in thread_data
-            ]
-            for meta in metadata:
-                response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
-            response += "\n"
-
             # 顯示回應
+            response = ""
             with st.chat_message("assistant"):
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
-                logger.info(f"Starting stream_grok3_response for LIHKG query: {user_question}")
+                logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
                 async for chunk in stream_grok3_response(
                     user_query=user_question,
-                    metadata=metadata,
-                    thread_data={item["thread_id"]: item for item in thread_data},
-                    processing=analysis["processing"],
+                    metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
+                    thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
+                    processing=analysis.get("processing", "general"),
                     selected_cat=selected_cat,
-                    conversation_context=st.session_state.conversation_context
+                    conversation_context=st.session_state.conversation_context,
+                    needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
+                    reason=analysis.get("reason", ""),
+                    filters=analysis.get("filters", {})
                 ):
                     response += chunk
                     grok_container.markdown(response)
-
-            # 進階分析
-            processed_thread_ids = [str(item["thread_id"]) for item in thread_data]
-            update_progress("正在進行進階分析", 0.95)
-            analysis_advanced = await analyze_and_screen(
-                user_query=user_question,
-                cat_name=question_cat,
-                cat_id=cat_id,
-                thread_titles=None,
-                metadata=metadata,
-                thread_data={item["thread_id"]: item for item in thread_data},
-                is_advanced=True,
-                conversation_context=st.session_state.conversation_context
-            )
-            if analysis_advanced.get("needs_advanced_analysis"):
-                result = await process_user_question(
-                    user_question=user_question,
-                    selected_cat=question_cat,
-                    cat_id=cat_id,
-                    analysis=analysis_advanced,
-                    request_counter=st.session_state.request_counter,
-                    last_reset=st.session_state.last_reset,
-                    rate_limit_until=st.session_state.rate_limit_until,
-                    is_advanced=True,
-                    previous_thread_ids=processed_thread_ids,
-                    previous_thread_data={item["thread_id"]: item for item in thread_data},
-                    conversation_context=st.session_state.conversation_context,
-                    progress_callback=update_progress
-                )
-                st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
-                st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
-                st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
-
-                thread_data_advanced = result.get("thread_data", [])
-                if thread_data_advanced:
-                    for item in thread_data_advanced:
-                        thread_id = str(item["thread_id"])
-                        st.session_state.thread_cache[thread_id] = {"data": item, "timestamp": time.time()}
-                    metadata_advanced = [
-                        {
-                            "thread_id": item["thread_id"],
-                            "title": item["title"],
-                            "no_of_reply": item.get("no_of_reply", 0),
-                            "last_reply_time": item.get("last_reply_time", "0"),
-                            "like_count": item.get("like_count", 0),
-                            "dislike_count": item.get("dislike_count", 0)
-                        } for item in thread_data_advanced
-                    ]
-                    response += f"\n\n更深入的『{theme}』帖子分析：\n\n"
-                    for meta in metadata_advanced:
-                        response += f"帖子 ID: {meta['thread_id']}\n標題: {meta['title']}\n"
-                    response += "\n"
-                    async for chunk in stream_grok3_response(
-                        user_query=user_question,
-                        metadata=metadata_advanced,
-                        thread_data={item["thread_id"]: item for item in thread_data_advanced},
-                        processing=analysis["processing"],
-                        selected_cat=selected_cat,
-                        conversation_context=st.session_state.conversation_context
-                    ):
-                        response += chunk
-                        grok_container.markdown(response)
+                if not response:
+                    logger.warning(f"No response generated for query: {user_question}")
+                    response = "無法生成回應，請稍後重試。"
+                    grok_container.markdown(response)
 
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_question})
