@@ -594,7 +594,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     支持進度回調以更新界面。
     """
     try:
-        logger.info(f"Processing query: {user_question}, category: {selected_cat}, cat_id: {cat_id}", extra={"function": "process_user_question"})
+        logger.info(
+            json.dumps({
+                "event": "process_user_question",
+                "function": "process_user_question",
+                "query": user_question,
+                "category": selected_cat,
+                "cat_id": cat_id
+            }, ensure_ascii=False),
+            extra={"function": "process_user_question"}
+        )
         
         if rate_limit_until > time.time():
             logger.warning(f"Rate limit active until {rate_limit_until}", extra={"function": "process_user_question"})
@@ -989,7 +998,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.8)
         
-for idx, item in enumerate(candidate_threads):
+        for idx, item in enumerate(candidate_threads):
             thread_id = str(item["thread_id"])
             thread_result = await get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -997,8 +1006,8 @@ for idx, item in enumerate(candidate_threads):
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=reply_limit,  # 確保使用 reply_limit
-                fetch_last_pages=2  # 修正為抓取 2 頁回覆
+                max_replies=reply_limit,
+                fetch_last_pages=2
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
@@ -1154,8 +1163,8 @@ for idx, item in enumerate(candidate_threads):
         )
         return {
             "selected_cat": selected_cat,
-            "thread_data": [],
-            "rate_limit_info": [{"message": f"Processing failed: {str(e)}"}],
+            "thread_data": thread_data if 'thread_data' in locals() else [],
+            "rate_limit_info": rate_limit_info if 'rate_limit_info' in locals() else [{"message": f"Processing failed: {str(e)}"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
