@@ -1006,8 +1006,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=reply_limit,
-                fetch_last_pages=2
+                max_replies=25,  # 採用舊版參數
+                fetch_last_pages=0  # 採用舊版參數
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
@@ -1024,7 +1024,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 }, ensure_ascii=False),
                 extra={"function": "process_user_question"}
             )
-            sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:reply_limit]
+            sorted_replies = sorted(replies, key=lambda x: x.get("like_count", 0), reverse=True)[:25]
             thread_data.append({
                 "thread_id": thread_id,
                 "title": item["title"],
@@ -1089,8 +1089,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=reply_limit,
-                fetch_last_pages=2
+                max_replies=reply_limit,  # 採用舊版參數，保持靈活性
+                fetch_last_pages=2  # 採用舊版參數
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
