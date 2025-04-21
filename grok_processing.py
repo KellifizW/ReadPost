@@ -423,7 +423,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         根據問題語義提供直接回應，聚焦問題核心（50-100 字）。
-        若問題為「你是誰」，回答：「我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。」
+        若問題為「你是誰」或類似問題，回答：「我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。」
         輸出：直接回應
         """
     }
@@ -515,6 +515,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"JSON decode error in stream chunk: {str(e)}", extra={"function": "stream_grok3_response"})
                                         continue
+                        if not response_content:
+                            logger.warning(f"No content generated for query: {user_query}")
+                            response_content = "我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。"
+                            yield response_content
                         if needs_advanced_analysis and metadata and filtered_thread_data:
                             yield f"\n建議：為確保分析全面，建議抓取更多帖子頁數。{reason}\n"
                         logger.info(
