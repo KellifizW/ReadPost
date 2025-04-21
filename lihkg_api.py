@@ -63,8 +63,8 @@ class RateLimiter:
             self.requests = self.requests[1:]
         self.requests.append(now)
 
-# 初始化速率限制器，放寬為每 60 秒 30 次請求
-rate_limiter = RateLimiter(max_requests=30, period=60)
+# 初始化速率限制器，放寬為每 60 秒 50 次請求
+rate_limiter = RateLimiter(max_requests=50, period=60)
 
 def get_category_name(cat_id):
     """
