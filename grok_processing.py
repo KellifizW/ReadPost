@@ -12,11 +12,9 @@ import aiohttp
 import asyncio
 import json
 import re
-import random
-import math
-import time
 import logging
 import streamlit as st
+import time
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 配置日誌記錄器
@@ -377,6 +375,22 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
+    # 驗證輸入數據
+    if not metadata or not thread_data:
+        logger.warning(
+            json.dumps({
+                "event": "data_validation",
+                "function": "stream_grok3_response",
+                "query": user_query,
+                "metadata_count": len(metadata) if metadata else 0,
+                "thread_data_count": len(thread_data) if thread_data else 0,
+                "reason": "Missing metadata or thread_data"
+            }, ensure_ascii=False),
+            extra={"function": "stream_grok3_response"}
+        )
+        yield f"錯誤：在 {selected_cat} 中未找到足夠數據進行分析，請稍後重試。"
+        return
+    
     filtered_thread_data = {
         tid: {
             "thread_id": data["thread_id"],
@@ -439,7 +453,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         你是 Grok 3，以繁體中文回答。問題：{user_query}
         對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
         根據問題語義提供直接回應，聚焦問題核心（50-100 字）。
-        若問題涉及 LIHKG 論壇數據但無具體要求，回答：「請提供更明確的查詢以分析 {selected_cat} 的帖子。」
+        若問題涉及 LIHKG 論壇數據但無具體要求，回答：「請提供更明確的查詢以分析 {selected_cat} 的帖子，例如具體主題或分析類型。」
         若無帖子數據，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters.get('min_replies', 0)}，點讚數≥{filters.get('min_likes', 0)}）。」
         輸出：直接回應或無帖子提示
         """,
@@ -467,15 +481,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     }
     
     intent = processing.get('intent', 'general') if isinstance(processing, dict) else 'general'
-    if intent not in prompt_templates:
-        intent = "general"
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
         intent = "introduce"
-    elif not metadata and not filtered_thread_data and intent not in ["general", "introduce"]:
+    elif not metadata or not filtered_thread_data:
         intent = "general"
     
-    prompt = prompt_templates.get(intent, prompt_templates["general"])
+    # 確保 summarize_posts 意圖正確執行
+    if intent == "summarize_posts" and metadata and filtered_thread_data:
+        prompt = prompt_templates["summarize"]
+    else:
+        prompt = prompt_templates.get(intent, prompt_templates["general"])
     
+    # 檢查提示詞長度並動態調整
     if len(prompt) > GROK3_TOKEN_LIMIT:
         for tid in filtered_thread_data:
             filtered_thread_data[tid]["replies"] = filtered_thread_data[tid]["replies"][:10]
