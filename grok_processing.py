@@ -590,7 +590,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，抓取並分析 LIHKG 帖子。
-    記錄每個帖子未成為 top_thread_ids 的原因。
+    記錄每個帖子未成為 top_thread_ids 的原因（僅總結性日誌）。
     支持進度回調以更新界面。
     """
     try:
@@ -605,6 +605,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             extra={"function": "process_user_question"}
         )
         
+        # 檢查速率限制（兼容放寬的配置：50 次/120 秒）
         if rate_limit_until > time.time():
             logger.warning(f"Rate limit active until {rate_limit_until}", extra={"function": "process_user_question"})
             return {
@@ -617,125 +618,143 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "analysis": analysis
             }
         
+        # 修正：對於 general_query 或 direct_response，直接返回，跳過抓取
+        if analysis.get("direct_response", False) or analysis.get("intent") == "general_query":
+            logger.info(
+                json.dumps({
+                    "event": "skip_thread_fetch",
+                    "function": "process_user_question",
+                    "query": user_question,
+                    "reason": "Direct response or general query, no thread fetching needed",
+                    "intent": analysis.get("intent", "unknown")
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
+            return {
+                "selected_cat": selected_cat,
+                "thread_data": [],
+                "rate_limit_info": [],
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis
+            }
+        
         if progress_callback:
             progress_callback("正在抓取帖子列表", 0.1)
         
-        if analysis.get("direct_response", True) or analysis.get("intent") == "list_titles":
+        # 處理 list_titles 意圖
+        if analysis.get("intent") == "list_titles":
             thread_data = []
             rate_limit_info = []
-            if analysis.get("intent") == "list_titles":
-                initial_threads = []
-                for page in range(1, 4):
-                    result = await get_lihkg_topic_list(
-                        cat_id=cat_id,
-                        start_page=page,
-                        max_pages=1,
-                        request_counter=request_counter,
-                        last_reset=last_reset,
-                        rate_limit_until=rate_limit_until
-                    )
-                    request_counter = result.get("request_counter", request_counter)
-                    last_reset = result.get("last_reset", last_reset)
-                    rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                    rate_limit_info.extend(result.get("rate_limit_info", []))
-                    items = result.get("items", [])
-                    initial_threads.extend(items)
-                    logger.info(
-                        json.dumps({
-                            "event": "thread_fetch",
-                            "function": "process_user_question",
-                            "cat_id": cat_id,
-                            "page": page,
-                            "items_fetched": len(items)
-                        }, ensure_ascii=False),
-                        extra={"function": "process_user_question"}
-                    )
-                    if not items:
-                        logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}", extra={"function": "process_user_question"})
-                    if len(initial_threads) >= 90:
-                        initial_threads = initial_threads[:90]
-                        break
-                    if progress_callback:
-                        progress_callback(f"已抓取第 {page}/3 頁帖子", 0.1 + 0.2 * (page / 3))
-                
-                filters = analysis.get("filters", {})
-                min_replies = filters.get("min_replies", 0)
-                min_likes = filters.get("min_likes", 0)
-                previous_thread_ids = previous_thread_ids or []
-                filtered_items = []
-                
-                if progress_callback:
-                    progress_callback("正在篩選帖子", 0.3)
-                
-                for item in initial_threads:
-                    thread_id = str(item["thread_id"])
-                    no_of_reply = item.get("no_of_reply", 0)
-                    like_count = int(item.get("like_count", 0))
-                    reasons = []
-                    
-                    if no_of_reply < min_replies:
-                        reasons.append(f"no_of_reply={no_of_reply} < min_replies={min_replies}")
-                    if like_count < min_likes:
-                        reasons.append(f"like_count={like_count} < min_likes={min_likes}")
-                    if thread_id in previous_thread_ids:
-                        reasons.append("thread_id in previous_thread_ids")
-                    
-                    if not reasons:
-                        filtered_items.append(item)
-                    else:
-                        logger.info(
-                            json.dumps({
-                                "event": "thread_filtering",
-                                "function": "process_user_question",
-                                "thread_id": thread_id,
-                                "status": "excluded",
-                                "reason": "; ".join(reasons)
-                            }, ensure_ascii=False),
-                            extra={"function": "process_user_question"}
-                        )
-                
-                post_limit = min(analysis.get("post_limit", 5), 20)
-                if not filtered_items:
-                    logger.warning(
-                        f"No threads meet filters: min_replies={min_replies}, min_likes={min_likes}, trying without filters",
-                        extra={"function": "process_user_question"}
-                    )
-                    filtered_items = [
-                        item for item in initial_threads
-                        if str(item["thread_id"]) not in previous_thread_ids
-                    ]
-                
-                thread_data = [
-                    {
-                        "thread_id": str(item["thread_id"]),
-                        "title": item["title"],
-                        "no_of_reply": item.get("no_of_reply", 0),
-                        "last_reply_time": item.get("last_reply_time", 0),
-                        "like_count": item.get("like_count", 0),
-                        "dislike_count": item.get("dislike_count", 0),
-                        "replies": [],
-                        "fetched_pages": []
-                    } for item in filtered_items[:post_limit]
-                ]
-                for item in thread_data:
-                    thread_id = item["thread_id"]
-                    if thread_id not in st.session_state.thread_cache:
-                        st.session_state.thread_cache[thread_id] = {
-                            "data": item,
-                            "timestamp": time.time()
-                        }
+            initial_threads = []
+            for page in range(1, 4):
+                result = await get_lihkg_topic_list(
+                    cat_id=cat_id,
+                    start_page=page,
+                    max_pages=1,
+                    request_counter=request_counter,
+                    last_reset=last_reset,
+                    rate_limit_until=rate_limit_until
+                )
+                request_counter = result.get("request_counter", request_counter)
+                last_reset = result.get("last_reset", last_reset)
+                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+                rate_limit_info.extend(result.get("rate_limit_info", []))
+                items = result.get("items", [])
+                initial_threads.extend(items)
                 logger.info(
                     json.dumps({
-                        "event": "thread_preparation",
+                        "event": "thread_fetch",
                         "function": "process_user_question",
-                        "query": user_question,
-                        "initial_threads": len(initial_threads),
-                        "filtered_items": len(filtered_items),
-                        "thread_data": len(thread_data),
-                        "filters": filters
+                        "cat_id": cat_id,
+                        "page": page,
+                        "items_fetched": len(items)
                     }, ensure_ascii=False),
                     extra={"function": "process_user_question"}
                 )
+                if not items:
+                    logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}", extra={"function": "process_user_question"})
+                if len(initial_threads) >= 90:
+                    initial_threads = initial_threads[:90]
+                    break
+                if progress_callback:
+                    progress_callback(f"已抓取第 {page}/3 頁帖子", 0.1 + 0.2 * (page / 3))
+            
+            filters = analysis.get("filters", {})
+            min_replies = filters.get("min_replies", 0)
+            min_likes = filters.get("min_likes", 0)
+            previous_thread_ids = previous_thread_ids or []
+            filtered_items = []
+            
+            if progress_callback:
+                progress_callback("正在篩選帖子", 0.3)
+            
+            # 修正：移除單帖篩選日誌，僅記錄總結
+            for item in initial_threads:
+                thread_id = str(item["thread_id"])
+                no_of_reply = item.get("no_of_reply", 0)
+                like_count = int(item.get("like_count", 0))
+                if (no_of_reply >= min_replies and
+                    like_count >= min_likes and
+                    thread_id not in previous_thread_ids):
+                    filtered_items.append(item)
+            
+            # 記錄總結性篩選日誌
+            logger.info(
+                json.dumps({
+                    "event": "thread_filtering_summary",
+                    "function": "process_user_question",
+                    "initial_threads": len(initial_threads),
+                    "filtered_items": len(filtered_items),
+                    "filters": filters,
+                    "excluded_thread_ids": previous_thread_ids
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
+            
+            post_limit = min(analysis.get("post_limit", 5), 20)
+            if not filtered_items:
+                logger.warning(
+                    f"No threads meet filters: min_replies={min_replies}, min_likes={min_likes}, trying without filters",
+                    extra={"function": "process_user_question"}
+                )
+                filtered_items = [
+                    item for item in initial_threads
+                    if str(item["thread_id"]) not in previous_thread_ids
+                ]
+            
+            thread_data = [
+                {
+                    "thread_id": str(item["thread_id"]),
+                    "title": item["title"],
+                    "no_of_reply": item.get("no_of_reply", 0),
+                    "last_reply_time": item.get("last_reply_time", 0),
+                    "like_count": item.get("like_count", 0),
+                    "dislike_count": item.get("dislike_count", 0),
+                    "replies": [],
+                    "fetched_pages": []
+                } for item in filtered_items[:post_limit]
+            ]
+            for item in thread_data:
+                thread_id = item["thread_id"]
+                if thread_id not in st.session_state.thread_cache:
+                    st.session_state.thread_cache[thread_id] = {
+                        "data": item,
+                        "timestamp": time.time()
+                    }
+            logger.info(
+                json.dumps({
+                    "event": "thread_preparation",
+                    "function": "process_user_question",
+                    "query": user_question,
+                    "initial_threads": len(initial_threads),
+                    "filtered_items": len(filtered_items),
+                    "thread_data": len(thread_data),
+                    "filters": filters
+                }, ensure_ascii=False),
+                extra={"function": "process_user_question"}
+            )
             
             return {
                 "selected_cat": selected_cat,
@@ -893,36 +912,20 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         previous_thread_ids = previous_thread_ids or []
         filtered_items = []
         
+        # 修正：移除單帖篩選日誌，僅記錄總結
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             no_of_reply = item.get("no_of_reply", 0)
             like_count = int(item.get("like_count", 0))
-            reasons = []
-            
-            if no_of_reply < min_replies:
-                reasons.append(f"no_of_reply={no_of_reply} < min_replies={min_replies}")
-            if like_count < min_likes:
-                reasons.append(f"like_count={like_count} < min_likes={min_likes}")
-            if thread_id in previous_thread_ids:
-                reasons.append("thread_id in previous_thread_ids")
-            
-            if not reasons:
+            if (no_of_reply >= min_replies and
+                like_count >= min_likes and
+                thread_id not in previous_thread_ids):
                 filtered_items.append(item)
-            else:
-                logger.info(
-                    json.dumps({
-                        "event": "thread_filtering",
-                        "function": "process_user_question",
-                        "thread_id": thread_id,
-                        "status": "excluded",
-                        "reason": "; ".join(reasons)
-                    }, ensure_ascii=False),
-                    extra={"function": "process_user_question"}
-                )
         
+        # 記錄總結性篩選日誌
         logger.info(
             json.dumps({
-                "event": "thread_filtering",
+                "event": "thread_filtering_summary",
                 "function": "process_user_question",
                 "initial_threads": len(initial_threads),
                 "filtered_items": len(filtered_items),
@@ -1006,8 +1009,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=25,  # 採用舊版參數
-                fetch_last_pages=0  # 採用舊版參數
+                max_replies=25,
+                fetch_last_pages=0
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
@@ -1089,8 +1092,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 request_counter=request_counter,
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until,
-                max_replies=reply_limit,  # 採用舊版參數，保持靈活性
-                fetch_last_pages=2  # 採用舊版參數
+                max_replies=reply_limit,
+                fetch_last_pages=2
             )
             request_counter = thread_result.get("request_counter", request_counter)
             last_reset = thread_result.get("last_reset", last_reset)
