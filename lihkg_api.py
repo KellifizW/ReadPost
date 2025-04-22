@@ -144,14 +144,14 @@ def get_category_name(cat_id):
     根據分類 ID 返回分類名稱。
     """
     categories = {
-        "1": "吹水台", "2": "熱門台", "5": "時事台", "14": "上班台",
+        "1": "吹水台/熱門台", "5": "時事台", "14": "上班台",
         "15": "財經台", "29": "成人台", "31": "創意台"
     }
     return categories.get(str(cat_id), "未知分類")
 
-async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counter=0, last_reset=0, rate_limit_until=0):
+async def get_lihkg_topic_list(cat_id, order="now", start_page=1, max_pages=3, request_counter=0, last_reset=0, rate_limit_until=0):
     """
-    抓取指定分類的帖子標題列表。
+    抓取指定分類的帖子標題列表，根據 order 參數動態排序。
     """
     items = []
     rate_limit_info = []
@@ -170,7 +170,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
         last_reset = current_time
     
     for page in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now&order=now"
+        url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=45&type=now&order={order}"
         data, page_rate_limit_info = await api_client.get(url, "get_lihkg_topic_list")
         request_counter += 1
         rate_limit_info.extend(page_rate_limit_info)
@@ -178,14 +178,14 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
         if data and data.get("response", {}).get("items"):
             filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
             items.extend(filtered_items)
-            logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
+            logger.info(f"Fetched cat_id={cat_id}, order={order}, page={page}, items={len(filtered_items)}")
         else:
-            logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
+            logger.error(f"No data fetched for cat_id={cat_id}, order={order}, page={page}")
         
         await asyncio.sleep(1)
     
     return {
-        "items": items[:90],
+        "items": items[:135],
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
