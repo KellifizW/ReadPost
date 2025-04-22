@@ -1,7 +1,7 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
-修復 `'prioritize'` 錯誤，根據 `fetch_dates` 意圖跳過不必要的 `prioritize_threads_with_grok` 流程。
+修復 `'prioritize'` 錯誤，強化 `prioritize_threads_with_grok` 的錯誤處理。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板。
@@ -81,7 +81,10 @@ class PromptBuilder:
         return prompt
 
     def build_prioritize(self, query, cat_name, cat_id, threads):
-        config = self.config["prioritize"]
+        config = self.config.get("prioritize", None)
+        if not config:
+            logger.error("Prompt configuration for 'prioritize' not found in prompts.json")
+            raise ValueError("Prompt configuration for 'prioritize' not found")
         context = config["context"].format(
             query=query,
             cat_name=cat_name,
@@ -306,7 +309,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID。
-    修復 'prioritize' 錯誤，確保返回值始終為字典。
+    強化錯誤處理，確保始終返回字典格式，修復 `'prioritize'` 錯誤。
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -315,12 +318,16 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
     prompt_builder = PromptBuilder()
-    prompt = prompt_builder.build_prioritize(
-        query=user_query,
-        cat_name=cat_name,
-        cat_id=cat_id,
-        threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
-    )
+    try:
+        prompt = prompt_builder.build_prioritize(
+            query=user_query,
+            cat_name=cat_name,
+            cat_id=cat_id,
+            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
+        )
+    except Exception as e:
+        logger.error(f"Failed to build prioritize prompt: {str(e)}")
+        return {"top_thread_ids": [], "reason": f"Prompt building failed: {str(e)}"}
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -351,6 +358,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         return {"top_thread_ids": [], "reason": "Invalid API response: missing choices"}
                     
                     content = data["choices"][0]["message"]["content"]
+                    logger.info(f"Raw API response for prioritization: {content}")
                     try:
                         result = json.loads(content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result or "reason" not in result:
@@ -360,13 +368,16 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         return result
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse prioritization result as JSON: {content}, error: {str(e)}")
+                        if content.strip() == "prioritize":
+                            logger.error("API returned 'prioritize' string, indicating a prompt configuration issue")
+                            return {"top_thread_ids": [], "reason": "Prompt configuration error: API returned 'prioritize'"}
                         return {"top_thread_ids": [], "reason": f"Failed to parse API response as JSON: {str(e)}"}
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            return {"top_thread_ids": [], "reason": f"Prioritization failed: {str(e)}"}
+            return {"top_thread_ids": [], "reason": f"Prioritization failed after {max_retries} attempts: {str(e)}"}
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
@@ -640,7 +651,7 @@ def unix_to_readable(timestamp):
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
-    修復 `'prioritize'` 錯誤，根據 `fetch_dates` 意圖跳過 `prioritize_threads_with_grok` 流程。
+    修復 `'prioritize'` 錯誤，強化錯誤處理。
     """
     try:
         logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
@@ -736,7 +747,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if intent == "fetch_dates":
             if progress_callback:
                 progress_callback("正在處理日期相關資料", 0.4)
-            # 直接使用 filtered_items，按時間排序
             sorted_items = sorted(
                 filtered_items,
                 key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
@@ -754,7 +764,18 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     logger.error(f"Invalid prioritization result: {prioritization}")
                     prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
                 top_thread_ids = prioritization.get("top_thread_ids", [])
-                logger.info(f"Grok prioritized threads: {top_thread_ids}")
+                if not top_thread_ids:
+                    logger.warning(f"Prioritization failed: {prioritization.get('reason', 'Unknown reason')}")
+                    # 回退機制：按熱門程度排序
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                        reverse=True
+                    )
+                    top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+                    logger.info(f"Fallback to popularity sorting: {top_thread_ids}")
+                else:
+                    logger.info(f"Grok prioritized threads: {top_thread_ids}")
             
             if not top_thread_ids and filtered_items:
                 if sort_method == "popular":
