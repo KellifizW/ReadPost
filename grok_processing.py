@@ -1,10 +1,10 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
-修復回覆提取問題，採用分階段抓取策略，簡化回覆處理邏輯。
+修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
 主要函數：
-- analyze_and_screen：分析問題，識別細粒度意圖，動態設置篩選條件和主題關鍵詞。
-- stream_grok3_response：生成流式回應，動態選擇模板，支持靈活的一般性查詢。
-- process_user_question：處理用戶問題，分階段抓取帖子內容，確保回覆數據穩定儲存。
+- analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
+- stream_grok3_response：生成流式回應，動態選擇模板。
+- process_user_question：處理用戶問題，抓取帖子並生成總結。
 - clean_html：清理 HTML 標籤。
 """
 
@@ -13,7 +13,6 @@ import asyncio
 import json
 import re
 import random
-import math
 import time
 import logging
 import streamlit as st
@@ -50,7 +49,34 @@ class PromptBuilder:
         except Exception as e:
             logger.error(f"Failed to load prompts.json: {str(e)}")
             self.config = {
-                "analyze": {"system": "", "context": "", "data": "", "instructions": ""},
+                "analyze": {
+                    "system": "你是 LIHKG 論壇助手，分析用戶問題，識別意圖和主題，設置篩選條件，輸出 JSON。",
+                    "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話上下文：{conversation_context}",
+                    "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
+                    "instructions": """
+                    分析用戶問題，輸出 JSON：
+                    {
+                        "direct_response": bool,
+                        "intent": str ("summarize_posts", "list_posts", "sentiment_analysis", "general_query", "introduce"),
+                        "theme": str,
+                        "category_ids": array,
+                        "data_type": str ("titles", "replies", "both", "none"),
+                        "post_limit": int,
+                        "reply_limit": int,
+                        "filters": object (e.g., {"min_replies": int, "min_likes": int, "sort": str, "time_range": str}),
+                        "processing": str ("summarize", "list", "sentiment", "general"),
+                        "candidate_thread_ids": array,
+                        "top_thread_ids": array,
+                        "needs_advanced_analysis": bool,
+                        "reason": str,
+                        "theme_keywords": array
+                    }
+                    - 若問題提及版塊（如「吹水台」）或主題（如「時事」），設置 intent: "summarize_posts"，direct_response: false。
+                    - 若問題要求分析主題，設置 theme 和 theme_keywords，篩選條件放寬（min_replies=20, min_likes=5）。
+                    - 若問題明確要求自我介紹，設置 intent: "introduce"。
+                    - 若問題無法解析，設置 intent: "summarize_posts"，進入通用分析流程。
+                    """
+                },
                 "response": {
                     "list": {"system": "", "context": "", "data": "", "instructions": ""},
                     "summarize": {"system": "", "context": "", "data": "", "instructions": ""},
@@ -110,14 +136,16 @@ def clean_html(text):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，識別細粒度意圖，動態設置篩選條件和主題關鍵詞。
+    分析用戶問題，識別意圖，放寬語義要求，確保廣泛查詢進入分析流程。
     """
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    # 檢查是否包含時事相關關鍵詞
-    current_affairs_keywords = ["時事", "新聞", "熱話", "政治", "經濟", "社會", "國際"]
-    is_current_affairs = any(keyword in user_query for keyword in current_affairs_keywords)
+    # 檢查是否包含版塊或主題相關關鍵詞
+    category_keywords = ["吹水台", "時事台", "娛樂台", "科技台"]
+    theme_keywords = ["時事", "新聞", "熱話", "政治", "經濟", "社會", "國際", "娛樂", "科技"]
+    is_category_related = any(keyword in user_query for keyword in category_keywords)
+    is_theme_related = any(keyword in user_query for keyword in theme_keywords)
     
     prompt = prompt_builder.build_analyze(
         query=user_query,
@@ -152,7 +180,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。若問題包含「時事」「新聞」「熱話」等關鍵詞，設置意圖為「summarize_posts」，主題為「時事」，並放寬篩選條件（min_replies=20, min_likes=5）。"},
+        {
+            "role": "system",
+            "content": """
+            你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。
+            - 若問題提及版塊（如「吹水台」）或主題（如「時事」「新聞」），設置 intent: "summarize_posts"，direct_response: false，進入帖子分析流程。
+            - 若問題要求分析主題，設置 theme 和 theme_keywords，篩選條件放寬（min_replies=20, min_likes=5）。
+            - 若問題明確要求自我介紹，設置 intent: "introduce"。
+            - 若問題模糊或無法解析，設置 intent: "summarize_posts"，選擇版塊熱門帖子進行總結。
+            """
+        },
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
@@ -195,15 +232,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             await asyncio.sleep(2)
                             continue
                         return {
-                            "direct_response": True,
-                            "intent": "general_query",
-                            "theme": "",
-                            "category_ids": [],
-                            "data_type": "none",
+                            "direct_response": False,
+                            "intent": "summarize_posts",
+                            "theme": "general",
+                            "category_ids": [cat_id],
+                            "data_type": "both",
                             "post_limit": 5,
-                            "reply_limit": 0,
-                            "filters": {},
-                            "processing": "general",
+                            "reply_limit": 50,
+                            "filters": {"min_replies": 20, "min_likes": 5},
+                            "processing": "summarize",
                             "candidate_thread_ids": [],
                             "top_thread_ids": [],
                             "needs_advanced_analysis": False,
@@ -228,15 +265,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             await asyncio.sleep(2)
                             continue
                         return {
-                            "direct_response": True,
-                            "intent": "general_query",
-                            "theme": "",
-                            "category_ids": [],
-                            "data_type": "none",
+                            "direct_response": False,
+                            "intent": "summarize_posts",
+                            "theme": "general",
+                            "category_ids": [cat_id],
+                            "data_type": "both",
                             "post_limit": 5,
-                            "reply_limit": 0,
-                            "filters": {},
-                            "processing": "general",
+                            "reply_limit": 50,
+                            "filters": {"min_replies": 20, "min_likes": 5},
+                            "processing": "summarize",
                             "candidate_thread_ids": [],
                             "top_thread_ids": [],
                             "needs_advanced_analysis": False,
@@ -247,23 +284,27 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     result = json.loads(data["choices"][0]["message"]["content"])
                     logger.debug(f"Raw intent analysis response: {result}")
                     
-                    # 若查詢包含時事關鍵詞，強制設置意圖和主題
-                    if is_current_affairs:
+                    # 放寬意圖識別：若提及版塊或主題，強制進入分析流程
+                    if is_category_related or is_theme_related:
+                        result["direct_response"] = False
                         result["intent"] = "summarize_posts"
-                        result["theme"] = "時事"
+                        result["theme"] = "時事" if is_theme_related else "general"
                         result["filters"] = {"min_replies": 20, "min_likes": 5}
-                        result["theme_keywords"] = current_affairs_keywords
-                        result["needs_advanced_analysis"] = True
+                        result["theme_keywords"] = theme_keywords if is_theme_related else []
+                        result["needs_advanced_analysis"] = is_theme_related
                         result["post_limit"] = 10
                         result["reply_limit"] = 50
+                        result["category_ids"] = [cat_id]
+                        result["data_type"] = "both"
+                        result["processing"] = "summarize"
                     
                     result.setdefault("direct_response", False)
-                    result.setdefault("intent", "general_query")
-                    result.setdefault("theme", "")
-                    result.setdefault("category_ids", [cat_id] if not result.get("direct_response") else [])
+                    result.setdefault("intent", "summarize_posts")
+                    result.setdefault("theme", "general")
+                    result.setdefault("category_ids", [cat_id])
                     result.setdefault("data_type", "both")
                     result.setdefault("post_limit", 5)
-                    result.setdefault("reply_limit", 100)
+                    result.setdefault("reply_limit", 50)
                     result.setdefault("filters", {"min_replies": 20, "min_likes": 5})
                     result.setdefault("processing", "summarize")
                     result.setdefault("candidate_thread_ids", [])
@@ -321,15 +362,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 await asyncio.sleep(2)
                 continue
             return {
-                "direct_response": True,
-                "intent": "general_query",
-                "theme": "",
-                "category_ids": [],
-                "data_type": "none",
+                "direct_response": False,
+                "intent": "summarize_posts",
+                "theme": "general",
+                "category_ids": [cat_id],
+                "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 0,
-                "filters": {},
-                "processing": "general",
+                "reply_limit": 50,
+                "filters": {"min_replies": 20, "min_likes": 5},
+                "processing": "summarize",
                 "candidate_thread_ids": [],
                 "top_thread_ids": [],
                 "needs_advanced_analysis": False,
@@ -480,14 +521,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             } for tid, data in thread_data.items()
         }
     
-    intent = processing.get('intent', 'general') if isinstance(processing, dict) else processing
+    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     logger.debug(f"Selected intent: {intent}")
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
         intent = "introduce"
     elif intent == "summarize_posts" and (metadata or thread_data):
         intent = "summarize"
-    elif not metadata and not thread_data and intent not in ["general", "introduce"]:
-        intent = "general"
+    elif not metadata and not thread_data:
+        intent = "summarize"
     
     prompt = prompt_builder.build_response(
         intent=intent,
@@ -704,7 +745,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                                 }, ensure_ascii=False)
                                             )
                                             return
-                            response_content = "無法生成回應，請稍後重試或提供更具體的查詢。"
+                            response_content = "無法生成詳細總結，可能是數據不足。以下是吹水台的通用概述：吹水台討論涵蓋時事、娛樂等多主題，網民觀點多元。"
                             yield response_content
                             logger.info(
                                 json.dumps({
@@ -834,33 +875,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "analysis": analysis
             }
         
-        if analysis.get("direct_response", False) or analysis.get("intent") == "general_query":
-            logger.info(
-                json.dumps({
-                    "event": "skip_thread_fetch",
-                    "query": user_question,
-                    "reason": "Direct response or general query, no thread fetching needed",
-                    "intent": analysis.get("intent", "unknown")
-                }, ensure_ascii=False)
-            )
-            return {
-                "selected_cat": selected_cat,
-                "thread_data": [],
-                "rate_limit_info": [],
-                "request_counter": request_counter,
-                "last_reset": last_reset,
-                "rate_limit_until": rate_limit_until,
-                "analysis": analysis
-            }
-        
         if progress_callback:
             progress_callback("正在抓取帖子列表", 0.1)
         
         post_limit = min(analysis.get("post_limit", 5), 20)
         reply_limit = analysis.get("reply_limit", 50)
         filters = analysis.get("filters", {})
-        min_replies = filters.get("min_replies", 20)  # 放寬預設值
-        min_likes = filters.get("min_likes", 5)      # 放寬預設值
+        min_replies = filters.get("min_replies", 20)
+        min_likes = filters.get("min_likes", 5)
         sort_method = filters.get("sort", "popular")
         time_range = filters.get("time_range", "recent")
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
@@ -870,7 +892,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info = []
         initial_threads = []
         
-        # 抓取帖子列表，增加到 5 頁
+        # 抓取帖子列表
         for page in range(1, 6):
             result = await get_lihkg_topic_list(
                 cat_id=cat_id,
@@ -942,7 +964,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }, ensure_ascii=False)
         )
         
-        # 若 filtered_items 為空，放寬篩選條件並重新篩選
+        # 若 filtered_items 為空，放寬篩選條件
         if not filtered_items and initial_threads:
             logger.warning("No filtered items, relaxing filters")
             min_replies = 10
