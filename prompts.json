@@ -50,7 +50,7 @@
     - 問題："吹水台有什麼熱門話題？" -> {"intent": "summarize_posts", "theme": "general", "direct_response": false, "category_ids": [{cat_id}], "data_type": "both", "post_limit": 10, "reply_limit": 100, "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}, "processing": "summarize", "reason": "要求分析吹水台熱門話題"}
     - 問題："你是誰？" -> {"intent": "introduce", "theme": "", "direct_response": true, "category_ids": [], "data_type": "none", "post_limit": 0, "reply_limit": 0, "filters": {}, "processing": "general", "reason": "要求自我介紹"}
     - 問題："天氣如何？" -> {"intent": "general_query", "theme": "", "direct_response": true, "category_ids": [], "data_type": "none", "post_limit": 0, "reply_limit": 0, "filters": {}, "processing": "general", "reason": "問題與 LIHKG 無關"}
-    """,
+    """
   },
   "response": {
     "list": {
@@ -115,6 +115,18 @@
       輸出：情緒分析或無帖子提示
       """
     },
+    "compare": {
+      "system": "你是 LIHKG 論壇助手，比較多個版塊的話題。",
+      "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+      "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+      "instructions": """
+      任務：
+      1. 比較指定版塊的話題和趨勢，突出差異和共同點。
+      2. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
+      3. 字數：400-600字。
+      輸出：比較分析或無帖子提示
+      """
+    },
     "introduce": {
       "system": "你是 Grok 3，以繁體中文回答。",
       "context": "問題：{query}\n對話歷史：{conversation_context}",
@@ -135,6 +147,18 @@
       3. 若無帖子數據，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請提供更具體的主題或試試其他版塊！」
       4. 若問題極其模糊，回答：「您嘅問題有啲籠統，唔知點幫您喎！不如話清楚啲，例如想分析吹水台嘅時事定娛樂話題？」（100-200字）。
       輸出：簡化總結、上下文回應或提示更具體查詢
+      """
+    },
+    "themed": {
+      "system": "你是 LIHKG 論壇助手，尋找特定主題的帖子。",
+      "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+      "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+      "instructions": """
+      任務：
+      1. 根據主題詞（如「時事」「搞笑」），篩選相關帖子，總結內容，引用高關注回覆。
+      2. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
+      3. 字數：400-600字。
+      輸出：主題相關總結或無帖子提示
       """
     }
   }
