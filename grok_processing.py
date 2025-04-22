@@ -73,7 +73,9 @@ class PromptBuilder:
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
         )
-        return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        logger.debug(f"Built analyze prompt: length={len(prompt)}, query={query}")
+        return prompt
 
     def build_response(self, intent, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
         config = self.config["response"].get(intent, self.config["response"]["general"])
@@ -87,7 +89,9 @@ class PromptBuilder:
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
             filters=json.dumps(filters or {}, ensure_ascii=False)
         )
-        return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        logger.debug(f"Built response prompt: intent={intent}, length={len(prompt)}, query={query}")
+        return prompt
 
 def clean_html(text):
     """
@@ -437,12 +441,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             }, ensure_ascii=False)
         )
     
-    if not any(data["replies"] for data in filtered_thread_data.values()):
+    if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
         logger.warning(
             json.dumps({
                 "event": "data_validation",
                 "query": user_query,
-                "reason": "Filtered thread data has no replies, using raw thread data"
+                "reason": "Filtered thread data has no replies, using metadata for summary"
             }, ensure_ascii=False)
         )
         filtered_thread_data = {
@@ -453,15 +457,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
-                "replies": data.get("replies", [])[:max_replies_per_thread],
+                "replies": [],
                 "fetched_pages": data.get("fetched_pages", [])
             } for tid, data in thread_data.items()
         }
     
     intent = processing.get('intent', 'general') if isinstance(processing, dict) else processing
+    logger.debug(f"Selected intent: {intent}")
     if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
         intent = "introduce"
-    elif intent == "summarize_posts" and metadata and thread_data:
+    elif intent == "summarize_posts" and (metadata or thread_data):
         intent = "summarize"
     elif not metadata and not thread_data and intent not in ["general", "introduce"]:
         intent = "general"
@@ -508,23 +513,32 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "event": "prompt_validation",
                 "query": user_query,
                 "prompt_length": prompt_length,
-                "reason": "Prompt too short, likely missing data"
+                "reason": "Prompt too short, retrying with simplified data"
             }, ensure_ascii=False)
         )
+        simplified_thread_data = {
+            tid: {
+                "thread_id": data["thread_id"],
+                "title": data["title"],
+                "no_of_reply": data.get("no_of_reply", 0),
+                "like_count": data.get("like_count", 0),
+                "replies": data["replies"][:5]  # 減少到 5 條回覆
+            } for tid, data in filtered_thread_data.items()
+        }
         prompt = prompt_builder.build_response(
-            intent="summarize",
+            intent=intent,
             query=user_query,
             selected_cat=selected_cat,
             conversation_context=conversation_context,
             metadata=metadata,
-            thread_data={},
+            thread_data=simplified_thread_data,
             filters=filters
         )
         logger.info(
             json.dumps({
                 "event": "prompt_fallback",
                 "query": user_query,
-                "reason": "Using simplified prompt due to insufficient data",
+                "reason": "Using simplified prompt with reduced data",
                 "new_prompt_length": len(prompt)
             }, ensure_ascii=False)
         )
@@ -533,6 +547,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         json.dumps({
             "event": "prompt_content",
             "query": user_query,
+            "intent": intent,
             "prompt": prompt[:1000] + "..." if len(prompt) > 1000 else prompt
         }, ensure_ascii=False)
     )
@@ -605,9 +620,87 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         logger.warning(f"JSON decode error in stream chunk: {str(e)}")
                                         continue
                         if not response_content:
-                            logger.warning(f"No content generated for query: {user_query}")
-                            response_content = "無法生成回應，請稍後重試。"
+                            logger.warning(
+                                json.dumps({
+                                    "event": "grok3_api_call",
+                                    "action": "回應生成失敗",
+                                    "query": user_query,
+                                    "reason": "No content generated",
+                                    "attempt": attempt + 1
+                                }, ensure_ascii=False)
+                            )
+                            if attempt < 2:
+                                # 簡化提示詞並重試
+                                simplified_thread_data = {
+                                    tid: {
+                                        "thread_id": data["thread_id"],
+                                        "title": data["title"],
+                                        "no_of_reply": data.get("no_of_reply", 0),
+                                        "like_count": data.get("like_count", 0),
+                                        "replies": data["replies"][:5]
+                                    } for tid, data in filtered_thread_data.items()
+                                }
+                                prompt = prompt_builder.build_response(
+                                    intent=intent,
+                                    query=user_query,
+                                    selected_cat=selected_cat,
+                                    conversation_context=conversation_context,
+                                    metadata=metadata,
+                                    thread_data=simplified_thread_data,
+                                    filters=filters
+                                )
+                                payload["messages"][-1]["content"] = prompt
+                                logger.info(
+                                    json.dumps({
+                                        "event": "grok3_api_call",
+                                        "action": "重試回應生成（簡化提示詞）",
+                                        "query": user_query,
+                                        "prompt_length": len(prompt)
+                                    }, ensure_ascii=False)
+                                )
+                                await asyncio.sleep(2 + attempt * 2)
+                                continue
+                            # 回退：基於 metadata 生成簡化總結
+                            if metadata:
+                                fallback_prompt = prompt_builder.build_response(
+                                    intent="summarize",
+                                    query=user_query,
+                                    selected_cat=selected_cat,
+                                    conversation_context=conversation_context,
+                                    metadata=metadata,
+                                    thread_data={},
+                                    filters=filters
+                                )
+                                payload["messages"][-1]["content"] = fallback_prompt
+                                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as fallback_response:
+                                    if fallback_response.status == 200:
+                                        data = await fallback_response.json()
+                                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                                        if content:
+                                            response_content = content
+                                            yield content
+                                            logger.info(
+                                                json.dumps({
+                                                    "event": "grok3_api_call",
+                                                    "action": "回退回應生成成功",
+                                                    "query": user_query,
+                                                    "response_length": len(content)
+                                                }, ensure_ascii=False)
+                                            )
+                                            return
+                            response_content = "無法生成回應，請稍後重試或提供更具體的查詢。"
                             yield response_content
+                            logger.info(
+                                json.dumps({
+                                    "event": "grok3_api_call",
+                                    "action": "完成回應生成",
+                                    "query": user_query,
+                                    "status": "success",
+                                    "status_code": status_code,
+                                    "response_length": len(response_content)
+                                }, ensure_ascii=False)
+                            )
+                            return
                         logger.info(
                             json.dumps({
                                 "event": "grok3_api_call",
