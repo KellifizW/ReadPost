@@ -189,7 +189,7 @@ async def main():
                 cat_id=cat_id,
                 conversation_context=st.session_state.conversation_context
             )
-            logger.info(f"Analysis completed: intent={analysis.get('intent')}")
+            logger.info(f"Analysis completed: intents={[i['type'] for i in analysis.get('intents', [])]}")  # 修正日誌
 
             # 處理問題
             update_progress("正在處理查詢", 0.2)
@@ -216,12 +216,12 @@ async def main():
             with st.chat_message("assistant"):
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
-                logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
+                logger.info(f"Starting stream_grok3_response for query: {user_question}, intents: {[i['type'] for i in analysis.get('intents', [])]}")  # 修正日誌
                 async for chunk in stream_grok3_response(
                     user_query=user_question,
                     metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    processing=analysis.get("processing", "general"),
+                    processing=analysis,  # 修正：直接傳遞 analysis
                     selected_cat=selected_cat,
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
