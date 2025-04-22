@@ -12,7 +12,7 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
-from grok_processing import process_user_question  # 僅導入 process_user_question
+from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
@@ -32,20 +32,31 @@ nest_asyncio.apply()
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
+def validate_input(user_question):
+    """
+    驗證用戶輸入，確保長度、格式有效。
+    """
+    if not user_question:
+        return False, "輸入不能為空"
+    if len(user_question) < 5:
+        return False, "輸入過短，至少5個字"
+    if len(user_question) > 200:
+        return False, "輸入過長，最多200個字"
+    if not any(c.isalnum() for c in user_question):
+        return False, "輸入需包含字母或數字"
+    return True, ""
+
 async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
     """
     st.title("LIHKG 聊天介面")
-    st.write("輸入問題以查詢 LIHKG 論壇話題，例如‘列出吹水台熱門帖子’或‘吹水台帖子情緒如何？’")
 
     # 初始化 session_state
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "thread_cache" not in st.session_state:
         st.session_state.thread_cache = {}
-    if "response_cache" not in st.session_state:  # 新增 response_cache
-        st.session_state.response_cache = {}
     if "rate_limit_until" not in st.session_state:
         st.session_state.rate_limit_until = 0
     if "request_counter" not in st.session_state:
@@ -61,11 +72,11 @@ async def main():
 
     # 分類選擇
     cat_id_map = {
-        "吹水台": "1", "熱門台": "2", "時事台": "5", "上班台": "14",
-        "財經台": "15", "成人台": "29", "創意台": "31"
+        "吹水台": 1, "熱門台": 2, "時事台": 5, "上班台": 14,
+        "財經台": 15, "成人台": 29, "創意台": 31
     }
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
-    cat_id = cat_id_map[selected_cat]
+    cat_id = str(cat_id_map[selected_cat])
     st.write(f"當前討論區：{selected_cat}")
 
     # 記錄選單選擇
@@ -87,6 +98,14 @@ async def main():
     # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
     if user_question and not st.session_state.awaiting_response:
+        # 驗證輸入
+        is_valid, error_message = validate_input(user_question)
+        if not is_valid:
+            with st.chat_message("assistant"):
+                st.error(error_message)
+            st.session_state.chat_history.append({"question": user_question, "answer": error_message})
+            return
+        
         logger.info(f"User query: {user_question}, category: {selected_cat}, cat_id: {cat_id}")
         with st.chat_message("user"):
             st.markdown(user_question)
@@ -118,13 +137,22 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
-            # 重置聊天記錄（保留原邏輯）
+            # 重置聊天記錄
             if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
                 st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                 st.session_state.thread_cache = {}
-                st.session_state.response_cache = {}  # 重置 response_cache
                 st.session_state.conversation_context = []
                 st.session_state.last_user_query = user_question
+
+            # 分析問題
+            update_progress("正在分析問題意圖", 0.1)
+            analysis = await analyze_and_screen(
+                user_query=user_question,
+                cat_name=selected_cat,
+                cat_id=cat_id,
+                conversation_context=st.session_state.conversation_context
+            )
+            logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
             # 處理問題
             update_progress("正在處理查詢", 0.2)
@@ -132,8 +160,7 @@ async def main():
                 user_question=user_question,
                 selected_cat=selected_cat,
                 cat_id=cat_id,
-                post_limit=10,
-                reply_limit=100,
+                analysis=analysis,
                 request_counter=st.session_state.request_counter,
                 last_reset=st.session_state.last_reset,
                 rate_limit_until=st.session_state.rate_limit_until,
@@ -147,9 +174,28 @@ async def main():
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
 
             # 顯示回應
-            response = result.get("response", "無法生成回應，請稍後重試。")
+            response = ""
             with st.chat_message("assistant"):
-                st.markdown(response)
+                grok_container = st.empty()
+                update_progress("正在生成回應", 0.9)
+                logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
+                async for chunk in stream_grok3_response(
+                    user_query=user_question,
+                    metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
+                    thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
+                    processing=analysis.get("processing", "general"),
+                    selected_cat=selected_cat,
+                    conversation_context=st.session_state.conversation_context,
+                    needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
+                    reason=analysis.get("reason", ""),
+                    filters=analysis.get("filters", {})
+                ):
+                    response += chunk
+                    grok_container.markdown(response)
+                if not response:
+                    logger.warning(f"No response generated for query: {user_question}")
+                    response = "無法生成回應，請稍後重試。"
+                    grok_container.markdown(response)
 
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_question})
