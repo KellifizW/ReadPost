@@ -32,7 +32,7 @@ from collections import Counter
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 設置香港時區
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_KONG")
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
@@ -135,11 +135,23 @@ class PromptBuilder:
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
         )
         instructions = []
+        valid_intents = []
+        
+        # 處理 intents，轉換字符串或驗證字典
         for intent in intents:
+            if isinstance(intent, str):
+                logger.warning(f"String intent detected: {intent}, converting to dict")
+                intent = {
+                    "type": intent,
+                    "theme": "general",
+                    "weight": 1.0,
+                    "parameters": {}
+                }
             if not isinstance(intent, dict) or 'type' not in intent:
                 logger.warning(f"Invalid intent format: {intent}, skipping")
                 continue
             intent_type = intent.get("type", "general")
+            valid_intents.append(intent)
             logger.info(f"Processing intent: {intent_type}")
             component = self.config["response_components"].get(intent_type, self.config["response_components"]["general"])
             params = intent.get("parameters", {})
@@ -153,10 +165,19 @@ class PromptBuilder:
             except KeyError as e:
                 logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少配置")
+        
+        # 確保至少有一個指令
         if not instructions:
             logger.warning("No valid instructions generated, using default")
+            valid_intents.append({"type": "general", "theme": "general", "weight": 1.0, "parameters": {}})
             instructions.append("子任務 general（權重 1.0）：\n生成通用回應，總結查詢相關內容")
-        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + (i.get('type') if isinstance(i, dict) else 'general') + '\", \"result\": {...}}' for i in intents if isinstance(i, dict) and 'type' in i] or ['{\"type\": \"general\", \"result\": {...}}'])}]"
+        
+        # 修正最終輸出格式
+        output_format = "\n".join([
+            f"- 子任務 {i['type']}: JSON 格式，參考 {self.config['response_components'].get(i['type'], self.config['response_components']['general'])['instructions'].split('輸出 JSON：')[1]}"
+            for i in valid_intents
+        ])
+        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in valid_intents])}]\n{output_format}"
         return prompt
 
     def get_system_prompt(self, mode):
@@ -228,10 +249,36 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             continue
                         raise AppError("Invalid API response: missing choices", user_message="分析服務返回無效數據，請稍後重試。")
                     
-                    result = json.loads(data["choices"][0]["message"]["content"])
+                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        result = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
+                        result = {"intents": []}
                     
-                    if "intents" not in result:
+                    # 修正 intents 結構
+                    if "intents" not in result or not isinstance(result["intents"], list):
+                        logger.warning(f"Invalid intents format: {result.get('intents')}")
                         result["intents"] = [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
+                    
+                    # 將字符串 intents 轉換為字典
+                    valid_intents = []
+                    for intent in result["intents"]:
+                        if isinstance(intent, str):
+                            logger.warning(f"String intent detected: {intent}, converting to dict")
+                            valid_intents.append({
+                                "type": intent,
+                                "theme": "general",
+                                "weight": 1.0,
+                                "parameters": {}
+                            })
+                        elif isinstance(intent, dict) and "type" in intent:
+                            valid_intents.append(intent)
+                        else:
+                            logger.warning(f"Invalid intent: {intent}, skipping")
+                    result["intents"] = valid_intents or [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
+                    
+                    # 設置默認值
                     result.setdefault("theme_keywords", [])
                     result.setdefault("post_limit", 10)
                     result.setdefault("reply_limit", 50)
@@ -381,7 +428,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents = [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
     valid_intents = []
     for intent in intents:
-        if isinstance(intent, dict) and 'type' in intent:
+        if isinstance(intent, str):
+            logger.warning(f"String intent detected: {intent}, converting to dict")
+            valid_intents.append({
+                "type": intent,
+                "theme": "general",
+                "weight": 1.0,
+                "parameters": {}
+            })
+        elif isinstance(intent, dict) and "type" in intent:
             valid_intents.append(intent)
         else:
             logger.warning(f"Invalid intent: {intent}, skipping")
