@@ -750,8 +750,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         post_limit = min(analysis.get("post_limit", 5), 20)
         reply_limit = analysis.get("reply_limit", 100)
         filters = analysis.get("filters", {})
-        min_replies = filters.get("min_replies", 0)
-        min_likes = filters.get("min_likes", 0)
+        min_replies = filters.get("min_replies", 50)  # 預設值
+        min_likes = filters.get("min_likes", 10)     # 預設值
+        sort_method = filters.get("sort", "popular")
+        time_range = filters.get("time_range", "recent")
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
         
@@ -853,19 +855,26 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if not top_thread_ids and filtered_items:
             if progress_callback:
                 progress_callback("正在重新分析帖子選擇", 0.4)
-            prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id)
+            prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
             top_thread_ids = prioritization["top_thread_ids"]
             logger.info(f"Grok prioritized threads: {top_thread_ids}, reason: {prioritization['reason']}")
         
         # 若仍無 top_thread_ids，按得分排序
         if not top_thread_ids and filtered_items:
-            sorted_items = sorted(
-                filtered_items,
-                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                reverse=True
-            )
+            if sort_method == "popular":
+                sorted_items = sorted(
+                    filtered_items,
+                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                    reverse=True
+                )
+            else:
+                sorted_items = sorted(
+                    filtered_items,
+                    key=lambda x: x.get("last_reply_time", "0"),
+                    reverse=(time_range == "recent")
+                )
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
-            logger.info(f"Generated top_thread_ids based on popularity: {top_thread_ids}")
+            logger.info(f"Generated top_thread_ids based on {sort_method}: {top_thread_ids}")
         
         # 候選帖子抓取
         if progress_callback:
@@ -1037,10 +1046,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "error": str(e)
             }, ensure_ascii=False)
         )
+        # 回退：嘗試從緩存中恢復部分數據
+        fallback_thread_data = [
+            cache["data"] for cache in st.session_state.thread_cache.values()
+            if cache["data"].get("replies") and cache["data"]["thread_id"] in top_thread_ids
+        ]
         return {
             "selected_cat": selected_cat,
-            "thread_data": [],
-            "rate_limit_info": [{"message": f"Processing failed: {str(e)}"}],
+            "thread_data": fallback_thread_data,
+            "rate_limit_info": rate_limit_info + [{"message": f"Processing failed: {str(e)}"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
