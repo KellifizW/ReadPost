@@ -20,7 +20,7 @@ import logging
 import streamlit as st
 import os
 import hashlib
-import pytz  # 導入 pytz 套件
+import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 設置香港時區
@@ -52,6 +52,13 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
 
+# 定義全局錯誤類別
+class AppError(Exception):
+    def __init__(self, message, user_message=None):
+        self.message = message
+        self.user_message = user_message or message
+        super().__init__(self.message)
+
 class PromptBuilder:
     """
     提示詞生成器，從 prompts.json 載入模板並動態構建提示詞。
@@ -64,19 +71,16 @@ class PromptBuilder:
         logger.info(f"Attempting to load prompts.json from: {config_path}")
         
         if not os.path.exists(config_path):
-            logger.error(f"prompts.json not found at: {config_path}")
-            raise FileNotFoundError(f"prompts.json not found at: {config_path}")
+            raise AppError(f"prompts.json not found at: {config_path}")
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 content = f.read()
                 self.config = json.loads(content)
                 logger.info(f"Loaded prompts.json successfully")
         except json.JSONDecodeError as e:
-            logger.error(f"JSON parse error in prompts.json: {e}")
-            raise
+            raise AppError(f"JSON parse error in prompts.json: {e}")
         except Exception as e:
-            logger.error(f"Failed to load prompts.json: {str(e)}")
-            raise
+            raise AppError(f"Failed to load prompts.json: {str(e)}")
 
     def build_analyze(self, query, cat_name, cat_id, conversation_context=None, thread_titles=None, metadata=None, thread_data=None):
         config = self.config["analyze"]
@@ -97,8 +101,7 @@ class PromptBuilder:
     def build_prioritize(self, query, cat_name, cat_id, threads):
         config = self.config.get("prioritize", None)
         if not config:
-            logger.error("Prompt configuration for 'prioritize' not found in prompts.json")
-            raise ValueError("Prompt configuration for 'prioritize' not found")
+            raise AppError("Prompt configuration for 'prioritize' not found")
         context = config["context"].format(
             query=query,
             cat_name=cat_name,
@@ -150,7 +153,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    category_keywords = ["吹水台", "時事台", "娛樂台", "科技台"]
+    category_keywords = ["吹水台", "熱門台", "時事台", "娛樂台", "科技台"]
     theme_keywords = ["時事", "新聞", "熱話", "政治", "經濟", "社會", "國際", "娛樂", "科技", "on9", "搞亂", "無聊"]
     is_category_related = any(keyword in user_query for keyword in category_keywords)
     is_theme_related = any(keyword in user_query.lower() for keyword in theme_keywords)
@@ -169,23 +172,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
-        logger.error(f"Grok 3 API key missing: {str(e)}")
-        return {
-            "direct_response": True,
-            "intent": "general_query",
-            "theme": "",
-            "category_ids": [],
-            "data_type": "none",
-            "post_limit": 5,
-            "reply_limit": 0,
-            "filters": {},
-            "processing": "general",
-            "candidate_thread_ids": [],
-            "top_thread_ids": [],
-            "needs_advanced_analysis": False,
-            "reason": "Missing API key",
-            "theme_keywords": []
-        }
+        raise AppError(f"Grok 3 API key missing: {str(e)}", user_message="缺少 API 密鑰，請聯繫支持。")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
@@ -214,22 +201,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        return {
-                            "direct_response": False,
-                            "intent": "summarize_posts",
-                            "theme": "general",
-                            "category_ids": [cat_id],
-                            "data_type": "both",
-                            "post_limit": 5,
-                            "reply_limit": 50,
-                            "filters": {"min_replies": 20, "min_likes": 5},
-                            "processing": "summarize",
-                            "candidate_thread_ids": [],
-                            "top_thread_ids": [],
-                            "needs_advanced_analysis": False,
-                            "reason": f"API request failed with status {status_code}",
-                            "theme_keywords": []
-                        }
+                        raise AppError(
+                            f"API request failed with status {status_code}",
+                            user_message="無法連接到分析服務，請稍後重試。"
+                        )
                     
                     data = await response.json()
                     if not data.get("choices"):
@@ -237,22 +212,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        return {
-                            "direct_response": False,
-                            "intent": "summarize_posts",
-                            "theme": "general",
-                            "category_ids": [cat_id],
-                            "data_type": "both",
-                            "post_limit": 5,
-                            "reply_limit": 50,
-                            "filters": {"min_replies": 20, "min_likes": 5},
-                            "processing": "summarize",
-                            "candidate_thread_ids": [],
-                            "top_thread_ids": [],
-                            "needs_advanced_analysis": False,
-                            "reason": "Invalid API response: missing choices",
-                            "theme_keywords": []
-                        }
+                        raise AppError(
+                            "Invalid API response: missing choices",
+                            user_message="分析服務返回無效數據，請稍後重試。"
+                        )
                     
                     result = json.loads(data["choices"][0]["message"]["content"])
                     
@@ -303,22 +266,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            return {
-                "direct_response": False,
-                "intent": "summarize_posts",
-                "theme": "general",
-                "category_ids": [cat_id],
-                "data_type": "both",
-                "post_limit": 5,
-                "reply_limit": 50,
-                "filters": {"min_replies": 20, "min_likes": 5},
-                "processing": "summarize",
-                "candidate_thread_ids": [],
-                "top_thread_ids": [],
-                "needs_advanced_analysis": False,
-                "reason": f"Analysis failed after {max_retries} attempts: {str(e)}",
-                "theme_keywords": []
-            }
+            raise AppError(
+                f"Analysis failed after {max_retries} attempts: {str(e)}",
+                user_message="分析服務暫時不可用，請稍後重試。"
+            )
 
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     """
@@ -328,8 +279,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
-        logger.error(f"Grok 3 API key missing: {str(e)}")
-        return {"top_thread_ids": [], "reason": "Missing API key"}
+        raise AppError(f"Grok 3 API key missing: {str(e)}", user_message="缺少 API 密鑰，請聯繫支持。")
 
     prompt_builder = PromptBuilder()
     try:
@@ -340,8 +290,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
             threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
-        logger.error(f"Failed to build prioritize prompt: {str(e)}")
-        return {"top_thread_ids": [], "reason": f"Prompt building failed: {str(e)}"}
+        raise AppError(f"Failed to build prioritize prompt: {str(e)}", user_message="無法生成排序提示，請稍後重試。")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -361,7 +310,10 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        return {"top_thread_ids": [], "reason": f"API request failed with status {response.status}"}
+                        raise AppError(
+                            f"API request failed with status {response.status}",
+                            user_message="無法完成帖子排序，請稍後重試。"
+                        )
                     
                     data = await response.json()
                     if not data.get("choices"):
@@ -369,7 +321,10 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        return {"top_thread_ids": [], "reason": "Invalid API response: missing choices"}
+                        raise AppError(
+                            "Invalid API response: missing choices",
+                            user_message="排序服務返回無效數據，請稍後重試。"
+                        )
                     
                     content = data["choices"][0]["message"]["content"]
                     logger.info(f"Raw API response for prioritization: {content}")
@@ -377,21 +332,32 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         result = json.loads(content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result or "reason" not in result:
                             logger.warning(f"Invalid prioritization result format: {content}")
-                            return {"top_thread_ids": [], "reason": "Invalid result format: missing required keys"}
+                            raise AppError(
+                                "Invalid result format: missing required keys",
+                                user_message="排序結果格式錯誤，請稍後重試。"
+                            )
                         logger.info(f"Thread prioritization succeeded: {result}")
                         return result
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse prioritization result as JSON: {content}, error: {str(e)}")
                         if content.strip() == "prioritize":
-                            logger.error("API returned 'prioritize' string, indicating a prompt configuration issue")
-                            return {"top_thread_ids": [], "reason": "Prompt configuration error: API returned 'prioritize'"}
-                        return {"top_thread_ids": [], "reason": f"Failed to parse API response as JSON: {str(e)}"}
+                            raise AppError(
+                                "Prompt configuration error: API returned 'prioritize'",
+                                user_message="排序配置錯誤，請聯繫支持。"
+                            )
+                        raise AppError(
+                            f"Failed to parse API response as JSON: {str(e)}",
+                            user_message="無法解析排序結果，請稍後重試。"
+                        )
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            return {"top_thread_ids": [], "reason": f"Prioritization failed after {max_retries} attempts: {str(e)}"}
+            raise AppError(
+                f"Prioritization failed after {max_retries} attempts: {str(e)}",
+                user_message="排序服務暫時不可用，請稍後重試。"
+            )
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
@@ -536,8 +502,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             if attempt < 2:
                                 await asyncio.sleep(2 + attempt * 2)
                                 continue
-                            yield f"錯誤：API 請求失敗（狀態碼 {status_code}）。請稍後重試。"
-                            return
+                            raise AppError(
+                                f"API request failed with status {status_code}",
+                                user_message=f"API 請求失敗（狀態碼 {status_code}）。請稍後重試。"
+                            )
                         
                         async for line in response.content:
                             if line and not line.isspace():
@@ -551,7 +519,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         if content:
                                             if "###" in content and ("Content Moderation" in content or "Blocked" in content):
                                                 logger.warning(f"Content moderation detected: {content}")
-                                                raise ValueError("Content moderation detected")
+                                                raise AppError(
+                                                    "Content moderation detected",
+                                                    user_message="回應內容被過濾，請嘗試其他查詢。"
+                                                )
                                             response_content += content
                                             yield content
                                     except json.JSONDecodeError as e:
@@ -600,7 +571,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                             response_content = content
                                             yield content
                                             return
-                            response_content = "無法生成詳細總結，可能是數據不足。以下是吹水台的通用概述：吹水台討論涵蓋時事、娛樂等多主題，網民觀點多元。"
+                            response_content = "無法生成詳細總結，可能是數據不足。以下是討論區的通用概述：討論涵蓋時事、娛樂等多主題，網民觀點多元。"
                             yield response_content
                             return
                         logger.info(f"Response generation completed: length={len(response_content)}")
@@ -633,8 +604,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         payload["messages"][-1]["content"] = prompt
                         await asyncio.sleep(2 + attempt * 2)
                         continue
-                    yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試。"
-                    return
+                    raise AppError(
+                        f"Response generation failed: {str(e)}",
+                        user_message=f"生成回應失敗（{str(e)}）。請稍後重試。"
+                    )
         except Exception as e:
             logger.error(f"Response generation failed: {str(e)}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
@@ -662,27 +635,22 @@ def unix_to_readable(timestamp):
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
         return "1970-01-01 00:00:00"
 
-async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
+async def process_user_question(user_question, selected_cat, cat_id, order, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
     修復 'prioritize' 錯誤，強化錯誤處理。
     """
     try:
-        logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
+        logger.info(f"Processing user question: {user_question}, category: {selected_cat}, order: {order}")
         
         clean_cache()
         
         if rate_limit_until > time.time():
             logger.warning(f"Rate limit active until {rate_limit_until}")
-            return {
-                "selected_cat": selected_cat,
-                "thread_data": [],
-                "rate_limit_info": [{"message": "Rate limit active", "until": rate_limit_until}],
-                "request_counter": request_counter,
-                "last_reset": last_reset,
-                "rate_limit_until": rate_limit_until,
-                "analysis": analysis
-            }
+            raise AppError(
+                f"Rate limit active until {rate_limit_until}",
+                user_message=f"速率限制中，請在 {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} 後重試。"
+            )
         
         if progress_callback:
             progress_callback("正在抓取帖子列表", 0.1)
@@ -703,9 +671,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info = []
         initial_threads = []
         
-        for page in range(1, 6):
+        for page in range(1, 4):  # 抓取 3 頁
             result = await get_lihkg_topic_list(
                 cat_id=cat_id,
+                order=order,
                 start_page=page,
                 max_pages=1,
                 request_counter=request_counter,
@@ -721,12 +690,12 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
             initial_threads.extend(items)
             if not items:
-                logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}")
-            if len(initial_threads) >= 150:
-                initial_threads = initial_threads[:150]
+                logger.warning(f"No threads fetched for cat_id={cat_id}, order={order}, page={page}")
+            if len(initial_threads) >= 135:  # 最多 135 個帖子
+                initial_threads = initial_threads[:135]
                 break
             if progress_callback:
-                progress_callback(f"已抓取第 {page}/5 頁帖子", 0.1 + 0.2 * (page / 5))
+                progress_callback(f"已抓取第 {page}/3 頁帖子", 0.1 + 0.2 * (page / 3))
         
         if progress_callback:
             progress_callback("正在篩選帖子", 0.3)
@@ -792,7 +761,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     logger.info(f"Grok prioritized threads: {top_thread_ids}")
             
             if not top_thread_ids and filtered_items:
-                if sort_method == "popular":
+                if sort_method == "popular" or order == "hot":
                     sorted_items = sorted(
                         filtered_items,
                         key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -925,12 +894,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             cache["data"] for cache in st.session_state.thread_cache.values()
             if cache["data"].get("replies") and cache["data"]["thread_id"] in top_thread_ids
         ]
-        return {
-            "selected_cat": selected_cat,
-            "thread_data": fallback_thread_data,
-            "rate_limit_info": rate_limit_info + [{"message": f"Processing failed: {str(e)}"}],
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": rate_limit_until,
-            "analysis": analysis
-        }
+        raise AppError(
+            f"Processing failed: {str(e)}",
+            user_message=f"處理問題失敗：{str(e)}。請稍後重試或聯繫支持。"
+        )
