@@ -1,4 +1,3 @@
-```python
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
@@ -1300,4 +1299,3 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_until": rate_limit_until,
             "analysis": analysis
         }
-```
