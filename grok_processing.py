@@ -1,3 +1,4 @@
+```python
 """
 Grok 3 API 處理模組，負責動態推斷意圖並生成回應。
 使用單一通用提示詞，依賴 Grok 3 處理所有意圖，無需預定義。
@@ -31,17 +32,18 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
 
-# 通用提示詞
+# 通用提示詞（改進版）
 GENERAL_PROMPT = """
 你是LIHKG論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。根據用戶問題和提供的數據，執行以下任務：
 1. 理解問題的語義，推斷用戶意圖（例如列出帖子標題、總結話題、提取關鍵詞、分析情緒或其他）。
-2. 根據推斷的意圖，處理以下數據：
+2. 若問題與LIHKG數據無關（例如“你是誰？”），返回簡短的通用回應，設置 intent 為 "general_query"。
+3. 若問題與LIHKG相關，根據推斷的意圖，處理以下數據：
    - 帖子元數據：{metadata}
    - 回覆內容：{thread_data}
-3. 返回JSON格式：
+4. 始終返回以下JSON格式（即使是通用問題）：
 ```json
 {
-  "intent": {string} (推斷的意圖名稱，例如 "list_titles", "summarize_posts", "analyze_sentiment"),
+  "intent": {string} (推斷的意圖名稱，例如 "list_titles", "summarize_posts", "analyze_sentiment", "general_query"),
   "response": {string} (自然語言回應),
   "raw_result": {object} (意圖特定的結構化數據，可選)
 }
@@ -51,8 +53,11 @@ GENERAL_PROMPT = """
 - 回應應清晰、符合問題需求，字數根據任務適配（簡單任務200字，複雜任務400-600字）。
 - 對於分析任務（如情緒分析），提供具體證據，例如引用帖子標題或回覆內容。
 - 若數據不足，返回："在{cat_name}中未找到符合條件的帖子。"
-- 若無法推斷意圖，返回通用回應並設置 intent 為 "general_query"。
-- 確保JSON格式嚴格有效。
+- 若無法推斷意圖或問題無關LIHKG，返回通用回應並設置 intent 為 "general_query"。
+- 確保JSON格式嚴格有效，無多餘換行符或語法錯誤。
+- 示例：
+  - 問題：“你是誰？” -> {"intent": "general_query", "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？", "raw_result": {}}
+  - 問題：“吹水台帖子情緒如何？” -> {"intent": "analyze_sentiment", "response": "吹水台帖子偏正面，網友多討論搞笑話題...", "raw_result": {"sentiment": "正面"}}
 
 問題：{query}
 分類：{cat_name}（cat_id={cat_id})
@@ -99,14 +104,16 @@ def get_cached_response(user_query):
 async def retry_with_simplified_prompt(user_query, selected_cat, cat_id, conversation_context):
     """重試簡化提示詞"""
     prompt = f"""
-    你是LIHKG論壇助手，以繁體中文回答。簡化回答以下問題，200字以內：
+    你是LIHKG論壇助手，以繁體中文回答。簡化回答以下問題，200字以內，始終返回JSON格式：
     問題：{user_query}
     分類：{selected_cat}（cat_id={cat_id})
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    格式為JSON：
+    格式：
     ```json
     {{"intent": "general_query", "response": "...", "raw_result": {{}}}}
     ```
+    示例：
+    - 問題：“你是誰？” -> {{"intent": "general_query", "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？", "raw_result": {{}}}}
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -122,7 +129,7 @@ async def retry_with_simplified_prompt(user_query, selected_cat, cat_id, convers
     payload = {
         "model": "grok-3-beta",
         "messages": [
-            {"role": "system", "content": "你是由 xAI 創建的 Grok 3，以繁體中文回答。"},
+            {"role": "system", "content": "你是由 xAI 創建的 Grok 3，以繁體中文回答，始終返回JSON格式。"},
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
@@ -191,6 +198,24 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                 **result
             }
 
+        # 快捷處理通用查詢
+        if user_question.strip() in ["你是誰？", "你是誰?", "你是谁？", "你是谁?"]:
+            result = {
+                "intent": "general_query",
+                "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？",
+                "raw_result": {}
+            }
+            cache_response(user_question, result)
+            return {
+                "selected_cat": selected_cat,
+                "thread_data": [],
+                "rate_limit_info": [],
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                **result
+            }
+
         # 抓取帖子數據
         if progress_callback:
             progress_callback("正在抓取帖子列表", 0.2)
@@ -205,7 +230,7 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
         )
         request_counter = topic_result.get("request_counter", request_counter)
         last_reset = topic_result.get("last_reset", last_reset)
-        rate_limit_until = topic_result.get("rate_limit_until", request_counter)
+        rate_limit_until = topic_result.get("rate_limit_until", rate_limit_until)
         rate_limit_info = topic_result.get("rate_limit_info", [])
         initial_threads = topic_result.get("items", [])
 
@@ -357,7 +382,7 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
         payload = {
             "model": "grok-3-beta",
             "messages": [
-                {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。"},
+                {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答，始終返回JSON格式。"},
                 *conversation_context,
                 {"role": "user", "content": prompt}
             ],
@@ -384,12 +409,39 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                         }
                     
                     data = await response.json()
-                    result = json.loads(data["choices"][0]["message"]["content"])
+                    content = data["choices"][0]["message"]["content"].strip()
+                    
+                    # 檢查回應是否為有效 JSON
+                    try:
+                        result = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON response: {content}, error: {str(e)}")
+                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        cache_response(user_question, result)
+                        return {
+                            "selected_cat": selected_cat,
+                            "thread_data": thread_data,
+                            "rate_limit_info": rate_limit_info,
+                            "request_counter": request_counter,
+                            "last_reset": last_reset,
+                            "rate_limit_until": rate_limit_until,
+                            **result
+                        }
                     
                     # 驗證結果格式
                     if not isinstance(result, dict) or "intent" not in result or "response" not in result:
-                        logger.error("Invalid response format")
+                        logger.error(f"Invalid response format: {result}")
                         result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        cache_response(user_question, result)
+                        return {
+                            "selected_cat": selected_cat,
+                            "thread_data": thread_data,
+                            "rate_limit_info": rate_limit_info,
+                            "request_counter": request_counter,
+                            "last_reset": last_reset,
+                            "rate_limit_until": rate_limit_until,
+                            **result
+                        }
                     
                     # 標準化意圖名稱
                     intent_mapping = {
@@ -502,3 +554,4 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             "rate_limit_until": rate_limit_until,
             **result
         }
+```
