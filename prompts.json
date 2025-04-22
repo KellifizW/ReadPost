@@ -4,7 +4,7 @@
     "system": "你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣。輸出 JSON。",
     "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話歷史：{conversation_context}",
     "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
-    "instructions": """
+    "instructions": ""
     步驟：
     1. 分析問題意圖，動態分類：
        - list_titles：僅列出帖子標題（問題包含「列出」「標題」等詞）。
