@@ -7,6 +7,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 增強錯誤處理，支持回退回應。
 - 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，添加數據清理和回退排序。
 - 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
+- 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -120,6 +121,7 @@ class PromptBuilder:
         return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
 
     def build_response(self, intents, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
+        logger.info(f"Building response prompt with intents: {intents}")
         system = self.config["system"]["response"]
         context = self.config["analyze"]["context"].format(
             query=query,
@@ -134,15 +136,27 @@ class PromptBuilder:
         )
         instructions = []
         for intent in intents:
-            component = self.config["response_components"].get(intent["type"], self.config["response_components"]["general"])
+            if not isinstance(intent, dict) or 'type' not in intent:
+                logger.warning(f"Invalid intent format: {intent}, skipping")
+                continue
+            intent_type = intent.get("type", "general")
+            logger.info(f"Processing intent: {intent_type}")
+            component = self.config["response_components"].get(intent_type, self.config["response_components"]["general"])
             params = intent.get("parameters", {})
-            instruction = component["instructions"].format(
-                theme=intent.get("theme", "general"),
-                limit=intent.get("limit", 10),
-                parameters=json.dumps(params, ensure_ascii=False)
-            )
-            instructions.append(f"子任務 {intent['type']}（權重 {intent['weight']}）：\n{instruction}")
-        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in intents])}]"
+            try:
+                instruction = component["instructions"].format(
+                    theme=intent.get("theme", "general"),
+                    limit=intent.get("limit", 10),
+                    parameters=json.dumps(params, ensure_ascii=False)
+                )
+                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
+            except KeyError as e:
+                logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
+                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少配置")
+        if not instructions:
+            logger.warning("No valid instructions generated, using default")
+            instructions.append("子任務 general（權重 1.0）：\n生成通用回應，總結查詢相關內容")
+        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + (i.get('type') if isinstance(i, dict) else 'general') + '\", \"result\": {...}}' for i in intents if isinstance(i, dict) and 'type' in i] or ['{\"type\": \"general\", \"result\": {...}}'])}]"
         return prompt
 
     def get_system_prompt(self, mode):
@@ -347,7 +361,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if not isinstance(processing, dict):
         logger.warning(f"Invalid processing parameter: expected dict, got {type(processing)}, content: {processing}")
         try:
-            # 嘗試解析為 JSON
             if isinstance(processing, str):
                 processing = json.loads(processing)
             else:
@@ -361,6 +374,23 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}
             }
     
+    # 驗證 intents 結構
+    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
+    if not isinstance(intents, list):
+        logger.warning(f"Invalid intents format: expected list, got {type(intents)}, content: {intents}")
+        intents = [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
+    valid_intents = []
+    for intent in intents:
+        if isinstance(intent, dict) and 'type' in intent:
+            valid_intents.append(intent)
+        else:
+            logger.warning(f"Invalid intent: {intent}, skipping")
+    if not valid_intents:
+        logger.warning("No valid intents found, using default")
+        valid_intents = [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
+    intents = valid_intents
+    logger.info(f"Validated intents: {[i['type'] for i in intents]}")
+    
     conversation_context = conversation_context or []
     filters = filters or processing.get("filters", {"min_replies": 20, "min_likes": 5})
     prompt_builder = PromptBuilder()
@@ -371,8 +401,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         logger.error(f"Grok 3 API key missing: {str(e)}")
         yield "錯誤: 缺少 API 密鑰"
         return
-    
-    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
     
     max_replies_per_thread = 20
     simplified_metadata = [{"thread_id": item["thread_id"], "title": clean_text(item["title"])} for item in metadata]
@@ -459,7 +487,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     
                     missing_tasks = []
                     for intent in intents:
-                        intent_type = intent["type"]
+                        intent_type = intent.get("type", "general")
                         if not any(r["type"] == intent_type for r in response_json):
                             missing_tasks.append((intent_type, intent.get("limit", 10), intent.get("parameters", {})))
                     
