@@ -3,6 +3,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
 修復 'prioritize' 錯誤，強化 prioritize_threads_with_grok 的錯誤處理。
 修復 list_titles 意圖未正確生成標題列表問題，確保僅列出帖子標題。
+修復 stream_grok3_response 錯誤使用總結模板問題，限制 metadata 並強化提示詞。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板，確保 list_titles 僅列出標題。
@@ -362,7 +363,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
-    使用 Grok 3 API 生成流式回應，根據意圖動態選擇模板，修復 list_titles 僅列出標題。
+    使用 Grok 3 API 生成流式回應，根據意圖動態選擇模板，確保 list_titles 僅列出標題。
+    修復 list_titles 未正確使用 response.list 模板問題，限制 metadata 僅包含 thread_id 和 title。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 20, "min_likes": 5}
@@ -378,15 +380,20 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     # 明確設置 intent，確保與 analysis 一致
     intent = processing if isinstance(processing, str) else processing.get('intent', 'summarize')
     
-    # 當 intent 為 list_titles 時，僅使用 metadata，忽略 thread_data 的回覆
+    # 當 intent 為 list_titles 時，僅使用簡化 metadata（僅 thread_id 和 title），忽略其他字段
     if intent == "list_titles":
         thread_data = {}  # 清空 thread_data，避免傳遞回覆
-        logger.info(f"Intent set to list_titles, clearing thread_data to focus on metadata")
+        simplified_metadata = [
+            {"thread_id": item["thread_id"], "title": item["title"]}
+            for item in metadata
+        ]
+        metadata = simplified_metadata  # 替換原始 metadata
+        logger.info(f"Intent set to list_titles, using simplified metadata with only thread_id and title")
     
-    # 限制回覆數，防止提示詞過長
+    # 限制回覆數，防止提示詞過長（僅非 list_titles 意圖）
     max_replies_per_thread = 20
     filtered_thread_data = {}
-    if intent != "list_titles":  # 僅在非 list_titles 時處理回覆
+    if intent != "list_titles":
         for tid, data in thread_data.items():
             replies = data.get("replies", [])
             sorted_replies = sorted(
@@ -410,7 +417,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "fetched_pages": data.get("fetched_pages", [])
             }
     
-    # 若無回覆且有 metadata，回退到僅使用 metadata
+    # 若無回覆且有 metadata，回退到僅使用 metadata（僅非 list_titles 意圖）
     if not any(data["replies"] for data in filtered_thread_data.values()) and metadata and intent != "list_titles":
         logger.warning(f"Filtered thread data has no replies, using metadata for summary")
         filtered_thread_data = {
@@ -426,7 +433,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             } for tid, data in thread_data.items()
         }
     
-    # 構建提示詞，明確使用 intent
+    # 構建提示詞，明確使用 intent，並添加明確指令
     prompt = prompt_builder.build_response(
         intent=intent,
         query=user_query,
@@ -436,6 +443,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         thread_data=filtered_thread_data,
         filters=filters
     )
+    
+    # 為 list_titles 添加明確指令，確保僅生成標題列表
+    if intent == "list_titles":
+        prompt += "\n\n**明確指令**：僅列出帖子標題和 ID，格式必須為：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含任何總結、回覆數、點讚數或其他資訊，僅限最多10個帖子。"
+        logger.info("Added explicit instruction for list_titles to enforce title-only output")
     
     # 檢查提示詞長度
     prompt_length = len(prompt)
@@ -462,9 +474,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             thread_data=filtered_thread_data,
             filters=filters
         )
+        if intent == "list_titles":
+            prompt += "\n\n**明確指令**：僅列出帖子標題和 ID，格式必須為：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含任何總結、回覆數、點讚數或其他資訊，僅限最多10個帖子。"
         logger.info(f"Truncated prompt: original_length={prompt_length}, new_length={len(prompt)}")
     
-    # 若提示詞過短，簡化數據
+    # 若提示詞過短，簡化數據（僅非 list_titles 意圖）
     if prompt_length < 500 and intent in ["summarize", "sentiment"]:
         logger.warning(f"Prompt too short, retrying with simplified data")
         simplified_thread_data = {
@@ -562,6 +576,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     thread_data=simplified_thread_data,
                                     filters=filters
                                 )
+                                if intent == "list_titles":
+                                    prompt += "\n\n**明確指令**：僅列出帖子標題和 ID，格式必須為：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含任何總結、回覆數、點讚數或其他資訊，僅限最多10個帖子。"
                                 payload["messages"][-1]["content"] = prompt
                                 await asyncio.sleep(2 + attempt * 2)
                                 continue
@@ -614,6 +630,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             thread_data=filtered_thread_data,
                             filters=filters
                         )
+                        if intent == "list_titles":
+                            prompt += "\n\n**明確指令**：僅列出帖子標題和 ID，格式必須為：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含任何總結、回覆數、點讚數或其他資訊，僅限最多10個帖子。"
                         payload["messages"][-1]["content"] = prompt
                         await asyncio.sleep(2 + attempt * 2)
                         continue
