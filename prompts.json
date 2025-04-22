@@ -48,8 +48,8 @@
     - 問題："分析吹水台時事主題post" -> {"intent": "summarize_posts", "theme": "時事", "direct_response": false, "category_ids": [{cat_id}], "data_type": "both", "post_limit": 10, "reply_limit": 100, "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}, "processing": "summarize", "reason": "提及吹水台和時事主題", "theme_keywords": ["時事", "新聞", "政治"]}
     - 問題："吹水台有什麼熱門話題？" -> {"intent": "summarize_posts", "theme": "general", "direct_response": false, "category_ids": [{cat_id}], "data_type": "both", "post_limit": 10, "reply_limit": 100, "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}, "processing": "summarize", "reason": "要求分析吹水台熱門話題"}
     - 問題："你是誰？" -> {"intent": "introduce", "theme": "", "direct_response": true, "category_ids": [], "data_type": "none", "post_limit": 0, "reply_limit": 0, "filters": {}, "processing": "general", "reason": "要求自我介紹"}
-    - 問題："天氣如何？" -> {"intent": "general_query", "theme": "", "direct_response": true, "category_ids": [], "data_type": "none", "post_limit": 0, "reply_limit": 0, "filters": {}, 山"processing": "general", "reason": "問題與 LIHKG 無關"}
-    """、
+    - 問題："天氣如何？" -> {"intent": "general_query", "theme": "", "direct_response": true, "category_ids": [], "data_type": "none", "post_limit": 0, "reply_limit": 0, "filters": {}, "processing": "general", "reason": "問題與 LIHKG 無關"}
+    """,
   },
   "response": {
     "list": {
@@ -58,9 +58,9 @@
       "data": "帖子元數據：{metadata}\n篩選條件：{filters}",
       "instructions": """
       任務：
-     。 1. 列出帖子標題，格式為：
+      1. 列出帖子標題，格式為：
          - 帖子 ID: [thread_id] 標題: [title]
-      2。 若無符合條件的帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
+      2. 若無符合條件的帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
       3. 若無任何帖子，回答：「在 {selected_cat} 中目前無可用帖子。」
       輸出：標題列表或無帖子提示
       """
