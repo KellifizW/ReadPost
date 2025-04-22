@@ -6,6 +6,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
 - 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，添加數據清理和回退排序。
+- 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -53,7 +54,7 @@ logger.addHandler(stream_handler)
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 120  # 增加超時時間
+API_TIMEOUT = 120
 
 class AppError(Exception):
     def __init__(self, message, user_message=None):
@@ -66,12 +67,9 @@ def clean_text(text):
     if not isinstance(text, str):
         text = str(text)
     try:
-        # 移除控制字符和無效 Unicode
         text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', text)
-        # 轉義引號
         text = text.replace('"', '\\"').replace("'", "\\'")
-        # 限制長度
-        return text[:200]  # 限制標題長度為 200 字符
+        return text[:200]
     except Exception as e:
         logger.warning(f"Text cleaning failed: {str(e)}")
         return text
@@ -242,15 +240,14 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     except KeyError as e:
         raise AppError(f"Grok 3 API key missing: {str(e)}", user_message="缺少 API 密鑰，請聯繫支持。")
 
-    # 清理並限制 threads 數量
     cleaned_threads = [
         {
             "thread_id": t["thread_id"],
-            "title": clean_text(t["title"]),  # 清理標題
+            "title": clean_text(t["title"]),
             "no_of_reply": t.get("no_of_reply", 0),
             "like_count": t.get("like_count", 0)
         }
-        for t in threads[:50]  # 限制為 50 個帖子
+        for t in threads[:50]
     ]
     
     prompt_builder = PromptBuilder()
@@ -290,7 +287,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         raise AppError("Invalid API response: missing choices", user_message="排序服務返回無效數據，請稍後重試。")
                     
                     content = data["choices"][0]["message"]["content"]
-                    logger.debug(f"Raw API response: {content}")  # 記錄原始回應
+                    logger.debug(f"Raw API response: {content}")
                     
                     try:
                         result = json.loads(content)
@@ -299,7 +296,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        # 回退到本地排序
                         sorted_threads = sorted(
                             cleaned_threads,
                             key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -315,7 +311,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2)
                             continue
-                        # 回退到本地排序
                         sorted_threads = sorted(
                             cleaned_threads,
                             key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -333,7 +328,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            # 回退到本地排序
             sorted_threads = sorted(
                 cleaned_threads,
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -347,8 +341,28 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
             return result
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
+    logger.info(f"Starting stream_grok3_response for query: {user_query}, processing type: {type(processing)}")
+    
+    # 驗證 processing 參數
+    if not isinstance(processing, dict):
+        logger.warning(f"Invalid processing parameter: expected dict, got {type(processing)}, content: {processing}")
+        try:
+            # 嘗試解析為 JSON
+            if isinstance(processing, str):
+                processing = json.loads(processing)
+            else:
+                raise ValueError("Cannot parse processing")
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Failed to parse processing as JSON, using default intents")
+            processing = {
+                "intents": [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}],
+                "post_limit": 10,
+                "reply_limit": 50,
+                "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}
+            }
+    
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 20, "min_likes": 5}
+    filters = filters or processing.get("filters", {"min_replies": 20, "min_likes": 5})
     prompt_builder = PromptBuilder()
     
     try:
@@ -642,7 +656,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 st.session_state.thread_cache[thread_id] = {
                     "data": {
                         "thread_id": thread_id,
-                        "title": clean_text(item["title"]),  # 清理緩存標題
+                        "title": clean_text(item["title"]),
                         "no_of_reply": item.get("no_of_reply", 0),
                         "last_reply_time": item["last_reply_time"],
                         "like_count": item.get("like_count", 0),
