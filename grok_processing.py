@@ -1,13 +1,13 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 改進：
-- 支持多意圖查詢，動態分解子意圖。
-- 模組化提示詞，減少 prompts.json 依賴。
-- 添加後處理驗證，確保回應完整。
+- 支持多意圖查詢，動態分解子意圖（新增 extract_keywords、analyze_user_behavior、track_trends、contrast_analysis、recommend_posts）。
+- 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
+- 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
-- stream_grok3_response：生成流式回應，動態組合提示詞。
+- stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
 - process_user_question：處理用戶問題，抓取帖子。
 - clean_html：清理 HTML 標籤。
 """
@@ -24,6 +24,7 @@ import streamlit as st
 import os
 import hashlib
 import pytz
+from collections import Counter
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 設置香港時區
@@ -119,12 +120,15 @@ class PromptBuilder:
         instructions = []
         for intent in intents:
             component = self.config["response_components"].get(intent["type"], self.config["response_components"]["general"])
+            # 動態格式化參數
+            params = intent.get("parameters", {})
             instruction = component["instructions"].format(
                 theme=intent.get("theme", "general"),
-                limit=intent.get("limit", 10)
+                limit=intent.get("limit", 10),
+                parameters=json.dumps(params, ensure_ascii=False)
             )
             instructions.append(f"子任務 {intent['type']}（權重 {intent['weight']}）：\n{instruction}")
-        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}"
+        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in intents])}]"
         return prompt
 
     def get_system_prompt(self, mode):
@@ -200,7 +204,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     
                     # 確保 intents 是列表
                     if "intents" not in result:
-                        result["intents"] = [{"type": "summarize_posts", "theme": "general", "weight": 1.0}]
+                        result["intents"] = [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
                     result.setdefault("theme_keywords", [])
                     result.setdefault("post_limit", 10)
                     result.setdefault("reply_limit", 50)
@@ -286,7 +290,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     
     # 解析 intents
-    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0}])
+    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
     
     # 簡化 metadata 並限制回覆數
     max_replies_per_thread = 20
@@ -337,6 +341,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(f"Starting response generation for query: {user_query}, intents: {[i['type'] for i in intents]}")
     
     response_content = ""
+    response_json = []
     async with aiohttp.ClientSession() as session:
         for attempt in range(3):
             try:
@@ -364,28 +369,118 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     logger.warning(f"JSON decode error in stream chunk: {str(e)}")
                                     continue
                     
+                    # 嘗試解析 JSON 回應
+                    try:
+                        response_json = json.loads(response_content)
+                        if not isinstance(response_json, list):
+                            response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse response as JSON: {response_content}")
+                        response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
+                    
                     # 後處理驗證
                     missing_tasks = []
                     for intent in intents:
-                        if intent["type"] == "list_titles" and not re.search(r"帖子 ID: \d+ 標題:", response_content):
-                            missing_tasks.append(("list_titles", intent.get("limit", 10)))
-                        elif intent["type"] == "summarize_posts" and not re.search(r"主題：|內容：|引用：", response_content):
-                            missing_tasks.append(("summarize_posts", None))
+                        intent_type = intent["type"]
+                        if not any(r["type"] == intent_type for r in response_json):
+                            missing_tasks.append((intent_type, intent.get("limit", 10), intent.get("parameters", {})))
                     
                     if missing_tasks:
                         logger.warning(f"Missing tasks in response: {missing_tasks}")
-                        for task, limit in missing_tasks:
+                        for task, limit, params in missing_tasks:
+                            fallback = None
                             if task == "list_titles":
-                                titles = "\n代表性帖子：\n" + "\n".join(
+                                fallback = {
+                                    "type": "list_titles",
+                                    "result": [
+                                        {"thread_id": m["thread_id"], "title": m["title"]}
+                                        for m in simplified_metadata[:limit]
+                                    ]
+                                }
+                                yield "\n代表性帖子：\n" + "\n".join(
                                     f"- 帖子 ID: {m['thread_id']} 標題: {m['title']}"
-                                    for m in simplified_metadata[:limit]
+                                    for m in fallback["result"]
                                 )
-                                response_content += titles
-                                yield titles
                             elif task == "summarize_posts":
-                                fallback = f"\n\n無法生成詳細總結，可能是數據不足。以下是通用概述：{selected_cat}討論涵蓋時事、娛樂等多主題，網民觀點多元。"
-                                response_content += fallback
-                                yield fallback
+                                fallback = {
+                                    "type": "summarize_posts",
+                                    "result": {
+                                        "theme": intent.get("theme", "general"),
+                                        "content": f"無法生成詳細總結，可能是數據不足。以下是通用概述：{selected_cat}討論涵蓋多主題，網民觀點多元。",
+                                        "quotes": []
+                                    }
+                                }
+                                yield f"\n\n主題：{fallback['result']['theme']}\n內容：{fallback['result']['content']}"
+                            elif task == "extract_keywords":
+                                # 簡單關鍵詞提取回退
+                                words = " ".join(m["title"] for m in simplified_metadata).split()
+                                word_counts = Counter(words)
+                                top_words = word_counts.most_common(3)
+                                fallback = {
+                                    "type": "extract_keywords",
+                                    "result": [
+                                        {"keyword": word, "frequency": count, "context": f"出現在標題中"}
+                                        for word, count in top_words
+                                    ]
+                                }
+                                yield "\n關鍵詞：\n" + "\n".join(
+                                    f"- {r['keyword']}（出現次數：{r['frequency']}，上下文：{r['context']}）"
+                                    for r in fallback["result"]
+                                )
+                            elif task == "analyze_user_behavior":
+                                fallback = {
+                                    "type": "analyze_user_behavior",
+                                    "result": {
+                                        "frequency": 0,
+                                        "themes": ["未知"],
+                                        "sentiment": {"positive": 0.0, "negative": 0.0, "neutral": 1.0},
+                                        "summary": "無法分析用戶行為，數據不足。"
+                                    }
+                                }
+                                yield f"\n\n用戶行為分析：{fallback['result']['summary']}"
+                            elif task == "track_trends":
+                                fallback = {
+                                    "type": "track_trends",
+                                    "result": {
+                                        "theme": intent.get("theme", "general"),
+                                        "time_range": params.get("time_range", "unknown"),
+                                        "trend": [],
+                                        "summary": f"無法追踪{intent.get('theme', '話題')}趨勢，數據不足。"
+                                    }
+                                }
+                                yield f"\n\n趨勢分析：{fallback['result']['summary']}"
+                            elif task == "contrast_analysis":
+                                fallback = {
+                                    "type": "contrast_analysis",
+                                    "result": [
+                                        {
+                                            "category_id": selected_cat,
+                                            "theme": intent.get("theme", "general"),
+                                            "keywords": [],
+                                            "sentiment": {"positive": 0.0, "negative": 0.0, "neutral": 1.0},
+                                            "heat": 0
+                                        }
+                                    ]
+                                }
+                                yield f"\n\n對比分析：無法比較，數據不足。"
+                            elif task == "recommend_posts":
+                                fallback = {
+                                    "type": "recommend_posts",
+                                    "result": [
+                                        {
+                                            "thread_id": m["thread_id"],
+                                            "title": m["title"],
+                                            "description": "熱門帖子，可能與查詢相關"
+                                        }
+                                        for m in simplified_metadata[:limit]
+                                    ]
+                                }
+                                yield "\n推薦帖子：\n" + "\n".join(
+                                    f"- 帖子 ID: {r['thread_id']} 標題: {r['title']}（{r['description']}）"
+                                    for r in fallback["result"]
+                                )
+                            if fallback:
+                                response_json.append(fallback)
                     
                     logger.info(f"Response generation completed: length={len(response_content)}")
                     return
@@ -438,7 +533,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
         top_thread_ids = analysis.get("top_thread_ids", [])
         previous_thread_ids = previous_thread_ids or []
         
-        intents = analysis.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0}])
+        intents = analysis.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
         
         thread_data = []
         rate_limit_info = []
@@ -498,6 +593,15 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
         if any(intent["type"] == "fetch_dates" for intent in intents):
             if progress_callback:
                 progress_callback("正在處理日期相關資料", 0.4)
+            sorted_items = sorted(
+                filtered_items,
+                key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
+                reverse=True
+            )
+            top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+        elif any(intent["type"] == "track_trends" for intent in intents):
+            if progress_callback:
+                progress_callback("正在處理趨勢資料", 0.4)
             sorted_items = sorted(
                 filtered_items,
                 key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
