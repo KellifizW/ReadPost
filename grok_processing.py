@@ -1,6 +1,7 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
+修復 `'<` not supported between instances of 'int' and 'str'` 和 `'prioritize'` 錯誤。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板。
@@ -305,6 +306,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID。
+    修復 'prioritize' 錯誤，確保返回值始終為字典。
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -348,9 +350,17 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                             continue
                         return {"top_thread_ids": [], "reason": "Invalid API response: missing choices"}
                     
-                    result = json.loads(data["choices"][0]["message"]["content"])
-                    logger.info(f"Thread prioritization succeeded: {result}")
-                    return result
+                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        result = json.loads(content)
+                        if not isinstance(result, dict) or "top_thread_ids" not in result or "reason" not in result:
+                            logger.warning(f"Invalid prioritization result format: {content}")
+                            return {"top_thread_ids": [], "reason": "Invalid result format: missing required keys"}
+                        logger.info(f"Thread prioritization succeeded: {result}")
+                        return result
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse prioritization result as JSON: {content}, error: {str(e)}")
+                        return {"top_thread_ids": [], "reason": f"Failed to parse API response as JSON: {str(e)}"}
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
@@ -631,6 +641,7 @@ def unix_to_readable(timestamp):
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
+    修復 `'<` not supported between instances of 'int' and 'str'` 和 `'prioritize'` 錯誤。
     """
     try:
         logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
@@ -725,7 +736,11 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if progress_callback:
                 progress_callback("正在重新分析帖子選擇", 0.4)
             prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
-            top_thread_ids = prioritization["top_thread_ids"]
+            # 檢查 prioritization 的類型
+            if not isinstance(prioritization, dict):
+                logger.error(f"Invalid prioritization result: {prioritization}")
+                prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
+            top_thread_ids = prioritization.get("top_thread_ids", [])
             logger.info(f"Grok prioritized threads: {top_thread_ids}")
         
         if not top_thread_ids and filtered_items:
@@ -738,7 +753,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             else:
                 sorted_items = sorted(
                     filtered_items,
-                    key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),  # 統一為字符串格式
+                    key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
                     reverse=(time_range == "recent")
                 )
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
@@ -764,7 +779,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
             
-            content_result = await get_lihkg_topic_list(
+            content_result = await get_lihkg_thread_content(
                 thread_id=thread_id,
                 cat_id=cat_id,
                 request_counter=request_counter,
@@ -786,7 +801,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
                     "no_of_reply": item.get("no_of_reply", content_result.get("total_replies", 0)),
-                    "last_reply_time": item["last_reply_time"],  # 已經是字符串格式
+                    "last_reply_time": item["last_reply_time"],
                     "like_count": item.get("like_count", 0),
                     "dislike_count": item.get("dislike_count", 0),
                     "replies": [
