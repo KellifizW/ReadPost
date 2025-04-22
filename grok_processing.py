@@ -1,4 +1,3 @@
-```python
 """
 Grok 3 API 處理模組，負責動態推斷意圖並生成回應。
 使用單一通用提示詞，依賴 Grok 3 處理所有意圖，無需預定義。
@@ -554,4 +553,3 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             "rate_limit_until": rate_limit_until,
             **result
         }
-```
