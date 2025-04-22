@@ -44,9 +44,17 @@ class PromptBuilder:
     """
     提示詞生成器，從 prompts.json 載入模板並動態構建提示詞。
     """
-    def __init__(self, config_path="/app/prompts.json"):
+    def __init__(self, config_path=None):
+        if config_path is None:
+            # 假設 prompts.json 位於與 grok_processing.py 相同的目錄
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(base_dir, "prompts.json")
+        
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Attempting to load prompts.json from: {config_path}")
+        
         if not os.path.exists(config_path):
-            logger.error(f"prompts.json not found at: {os.path.abspath(config_path)}")
+            logger.error(f"prompts.json not found at: {config_path}")
             self.config = self.get_default_config()
             return
         try:
@@ -54,7 +62,7 @@ class PromptBuilder:
                 content = f.read()
                 self.config = json.loads(content)
                 file_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
-                logger.info(f"Loaded {config_path} with MD5 hash: {file_hash} from: {os.path.abspath(config_path)}")
+                logger.info(f"Loaded {config_path} with MD5 hash: {file_hash}")
                 if self.config.get("version") != "f726b665":
                     logger.warning(f"prompts.json version mismatch: expected f726b665, got {self.config.get('version')}")
         except json.JSONDecodeError as e:
