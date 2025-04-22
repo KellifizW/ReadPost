@@ -1,3 +1,4 @@
+```python
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
@@ -16,6 +17,8 @@ import random
 import time
 import logging
 import streamlit as st
+import os
+import hashlib
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 配置日誌記錄器
@@ -42,49 +45,127 @@ class PromptBuilder:
     """
     提示詞生成器，從 prompts.json 載入模板並動態構建提示詞。
     """
-    def __init__(self, config_path="prompts.json"):
+    def __init__(self, config_path="/app/prompts.json"):
+        if not os.path.exists(config_path):
+            logger.error(f"prompts.json not found at: {os.path.abspath(config_path)}")
+            self.config = self.get_default_config()
+            return
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                self.config = json.load(f)
+                content = f.read()
+                self.config = json.loads(content)
+                file_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+                logger.info(f"Loaded {config_path} with MD5 hash: {file_hash} from: {os.path.abspath(config_path)}")
+                if self.config.get("version") != "f726b665":
+                    logger.warning(f"prompts.json version mismatch: expected f726b665, got {self.config.get('version')}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error in {config_path}: line {e.lineno}, column {e.colno}, message: {e.msg}")
+            self.config = self.get_default_config()
         except Exception as e:
-            logger.error(f"Failed to load prompts.json: {str(e)}")
-            self.config = {
-                "analyze": {
-                    "system": "你是 LIHKG 論壇助手，分析用戶問題，識別意圖和主題，設置篩選條件，輸出 JSON。",
-                    "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話上下文：{conversation_context}",
-                    "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
+            logger.error(f"Failed to load {config_path}: {str(e)}")
+            self.config = self.get_default_config()
+
+    def get_default_config(self):
+        """
+        提供內置模板，支援所有意圖。
+        """
+        return {
+            "version": "f726b665",
+            "analyze": {
+                "system": "你是 LIHKG 論壇助手，分析用戶問題，識別意圖和主題，設置篩選條件，輸出 JSON。",
+                "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話上下文：{conversation_context}",
+                "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
+                "instructions": """
+                分析用戶問題，輸出 JSON：
+                {
+                    "direct_response": bool,
+                    "intent": str ("summarize_posts", "list_posts", "sentiment_analysis", "compare_categories", "general_query", "introduce", "find_themed"),
+                    "theme": str,
+                    "category_ids": array,
+                    "data_type": str ("titles", "replies", "both", "none"),
+                    "post_limit": int,
+                    "reply_limit": int,
+                    "filters": object,
+                    "processing": str,
+                    "candidate_thread_ids": array,
+                    "top_thread_ids": array,
+                    "needs_advanced_analysis": bool,
+                    "reason": str,
+                    "theme_keywords": array
+                }
+                - 若問題要求自我介紹，設置 intent: "introduce"。
+                - 若問題提及版塊或主題，設置 intent: "summarize_posts" 或 "find_themed"。
+                - 若問題模糊，設置 intent: "summarize_posts"，theme: "general"。
+                """
+            },
+            "response": {
+                "list": {
+                    "system": "你是 LIHKG 論壇的數據助手，以繁體中文回答，模擬論壇用戶的語氣。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n篩選條件：{filters}",
                     "instructions": """
-                    分析用戶問題，輸出 JSON：
-                    {
-                        "direct_response": bool,
-                        "intent": str ("summarize_posts", "list_posts", "sentiment_analysis", "general_query", "introduce"),
-                        "theme": str,
-                        "category_ids": array,
-                        "data_type": str ("titles", "replies", "both", "none"),
-                        "post_limit": int,
-                        "reply_limit": int,
-                        "filters": object (e.g., {"min_replies": int, "min_likes": int, "sort": str, "time_range": str}),
-                        "processing": str ("summarize", "list", "sentiment", "general"),
-                        "candidate_thread_ids": array,
-                        "top_thread_ids": array,
-                        "needs_advanced_analysis": bool,
-                        "reason": str,
-                        "theme_keywords": array
-                    }
-                    - 若問題提及版塊（如「吹水台」）或主題（如「時事」），設置 intent: "summarize_posts"，direct_response: false。
-                    - 若問題要求分析主題，設置 theme 和 theme_keywords，篩選條件放寬（min_replies=20, min_likes=5）。
-                    - 若問題明確要求自我介紹，設置 intent: "introduce"。
-                    - 若問題無法解析，設置 intent: "summarize_posts"，進入通用分析流程。
+                    列出帖子標題，格式為：
+                    - 帖子 ID: [thread_id] 標題: [title]
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
                     """
                 },
-                "response": {
-                    "list": {"system": "", "context": "", "data": "", "instructions": ""},
-                    "summarize": {"system": "", "context": "", "data": "", "instructions": ""},
-                    "sentiment": {"system": "", "context": "", "data": "", "instructions": ""},
-                    "introduce": {"system": "", "context": "", "data": "", "instructions": ""},
-                    "general": {"system": "", "context": "", "data": "", "instructions": ""}
+                "summarize": {
+                    "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+                    "instructions": """
+                    總結帖子內容，引用高關注回覆，字數400-600字。
+                    若無回覆，基於標題推測主題，生成簡化總結（200-300字）。
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    """
+                },
+                "sentiment": {
+                    "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+                    "instructions": """
+                    分析帖子情緒（正面、負面、中立），量化比例，字數300-500字。
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    """
+                },
+                "compare": {
+                    "system": "你是 LIHKG 論壇助手，比較多個版塊的話題。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+                    "instructions": """
+                    比較指定版塊的話題和趨勢，突出差異和共同點，字數400-600字。
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    """
+                },
+                "introduce": {
+                    "system": "你是 Grok 3，以繁體中文回答。",
+                    "context": "問題：{query}\n對話歷史：{conversation_context}",
+                    "data": "",
+                    "instructions": """
+                    回答：「我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。無論係想知吹水台熱話定係深入分析時事，我都可以幫到您！有咩問題，快啲問啦！」（50-100字）。
+                    """
+                },
+                "general": {
+                    "system": "你是 Grok 3，以繁體中文回答，模擬 LIHKG 論壇用戶的語氣。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n篩選條件：{filters}",
+                    "instructions": """
+                    若問題與 LIHKG 相關，生成簡化總結（200-300字）。
+                    若無關，提供上下文回應（200-400字）。
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    """
+                },
+                "themed": {
+                    "system": "你是 LIHKG 論壇助手，尋找特定主題的帖子。",
+                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
+                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
+                    "instructions": """
+                    根據主題詞（如「時事」「搞笑」），篩選相關帖子，總結內容，引用高關注回覆，字數400-600字。
+                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    """
                 }
             }
+        }
 
     def build_analyze(self, query, cat_name, cat_id, conversation_context=None, thread_titles=None, metadata=None, thread_data=None):
         config = self.config["analyze"]
@@ -249,7 +330,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         }
                     
                     data = await response.json()
-                    if "choices" not in data or not data["choices"]:
+                    if not data.get("choices"):
                         logger.warning(
                             json.dumps({
                                 "event": "grok3_api_call",
@@ -426,6 +507,13 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         return {"top_thread_ids": [], "reason": f"API request failed with status {response.status}"}
                     
                     data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"Thread prioritization failed: missing choices, attempt={attempt + 1}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return {"top_thread_ids": [], "reason": "Invalid API response: missing choices"}
+                    
                     result = json.loads(data["choices"][0]["message"]["content"])
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
@@ -523,12 +611,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     logger.debug(f"Selected intent: {intent}")
-    if user_query.lower() in ["你是誰？", "你是誰", "who are you?", "who are you"] or "你是誰" in user_query.lower():
-        intent = "introduce"
-    elif intent == "summarize_posts" and (metadata or thread_data):
-        intent = "summarize"
-    elif not metadata and not thread_data:
-        intent = "summarize"
     
     prompt = prompt_builder.build_response(
         intent=intent,
@@ -564,7 +646,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             thread_data=filtered_thread_data,
             filters=filters
         )
-        logger.info(f"Truncated prompt: {len(prompt)} characters")
+        logger.info(f"Truncated prompt: original_length={prompt_length}, new_length={len(prompt)}")
     
     if prompt_length < 500 and intent in ["summarize", "sentiment"]:
         logger.warning(
@@ -1218,3 +1300,4 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_until": rate_limit_until,
             "analysis": analysis
         }
+```
