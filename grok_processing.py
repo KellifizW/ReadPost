@@ -626,7 +626,7 @@ def unix_to_readable(timestamp):
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
-        return str(timestamp)  # 如果轉換失敗，返回原始值
+        return "1970-01-01 00:00:00"  # 預設值改為有效的時間字符串
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
@@ -680,6 +680,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_until = result.get("rate_limit_until", rate_limit_until)
             rate_limit_info.extend(result.get("rate_limit_info", []))
             items = result.get("items", [])
+            # 統一 last_reply_time 格式
+            for item in items:
+                item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
             initial_threads.extend(items)
             if not items:
                 logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}")
@@ -704,8 +707,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             if thread_id not in st.session_state.thread_cache:
-                # 轉換 last_reply_time
-                item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
                 st.session_state.thread_cache[thread_id] = {
                     "data": {
                         "thread_id": thread_id,
@@ -737,7 +738,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             else:
                 sorted_items = sorted(
                     filtered_items,
-                    key=lambda x: x.get("last_reply_time", "0"),
+                    key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),  # 統一為字符串格式
                     reverse=(time_range == "recent")
                 )
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
@@ -763,7 +764,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
             
-            content_result = await get_lihkg_thread_content(
+            content_result = await get_lihkg_topic_list(
                 thread_id=thread_id,
                 cat_id=cat_id,
                 request_counter=request_counter,
@@ -785,7 +786,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
                     "no_of_reply": item.get("no_of_reply", content_result.get("total_replies", 0)),
-                    "last_reply_time": unix_to_readable(item.get("last_reply_time", "0")),
+                    "last_reply_time": item["last_reply_time"],  # 已經是字符串格式
                     "like_count": item.get("like_count", 0),
                     "dislike_count": item.get("dislike_count", 0),
                     "replies": [
