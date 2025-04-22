@@ -49,8 +49,7 @@ class PromptBuilder:
         
         if not os.path.exists(config_path):
             logger.error(f"prompts.json not found at: {config_path}")
-            self.config = self.get_default_config()
-            return
+            raise FileNotFoundError(f"prompts.json not found at: {config_path}")
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -58,127 +57,10 @@ class PromptBuilder:
                 logger.info(f"Loaded prompts.json successfully")
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error in prompts.json: {e}")
-            self.config = self.get_default_config()
+            raise
         except Exception as e:
             logger.error(f"Failed to load prompts.json: {str(e)}")
-            self.config = self.get_default_config()
-
-    def get_default_config(self):
-        """
-        提供內置模板，支援所有意圖。
-        """
-        return {
-            "version": "f726b665",
-            "analyze": {
-                "system": "你是 LIHKG 論壇助手，分析用戶問題，識別意圖和主題，設置篩選條件，輸出 JSON。",
-                "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話上下文：{conversation_context}",
-                "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
-                "instructions": """
-                分析用戶問題，輸出 JSON：
-                {
-                    "direct_response": bool,
-                    "intent": str ("summarize_posts", "list_posts", "sentiment_analysis", "compare_categories", "general_query", "introduce", "find_themed"),
-                    "theme": str,
-                    "category_ids": array,
-                    "data_type": str ("titles", "replies", "both", "none"),
-                    "post_limit": int,
-                    "reply_limit": int,
-                    "filters": object,
-                    "processing": str,
-                    "candidate_thread_ids": array,
-                    "top_thread_ids": array,
-                    "needs_advanced_analysis": bool,
-                    "reason": str,
-                    "theme_keywords": array
-                }
-                - 若問題要求自我介紹，設置 intent: "introduce"。
-                - 若問題提及版塊或主題，設置 intent: "summarize_posts" 或 "find_themed"。
-                - 若問題模糊，設置 intent: "summarize_posts"，theme: "general"。
-                """
-            },
-            "response": {
-                "list": {
-                    "system": "你是 LIHKG 論壇的數據助手，以繁體中文回答，模擬論壇用戶的語氣。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n篩選條件：{filters}",
-                    "instructions": """
-                    列出帖子標題，格式為：
-                    - 帖子 ID: [thread_id] 標題: [title]
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
-                    """
-                },
-                "summarize": {
-                    "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
-                    "instructions": """
-                    任務：
-                    1. 分析每個帖子的主題和核心觀點，優先引用高關注回覆（按點讚數排序）。
-                    2. 若無回覆數據，基於帖子標題推測主題，生成簡化總結。
-                    3. 總結熱門話題的趨勢，突出用戶關注點和討論熱度原因。
-                    4. 若問題提及特定主題（如「時事」），聚焦相關帖子，突出主題相關的觀點和回覆。
-                    5. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
-                    6. 字數：400-600字（無回覆時200-300字）。
-                    輸出格式：
-                    以自然語言格式生成回應，包含以下內容：
-                    - 簡介：說明分析的版塊和主題（例如「{selected_cat} 最近的熱門話題有以下幾個：」）。
-                    - 帖子分析：逐一列出每個帖子（最多5個），格式如下：
-                      * **標題**：列出帖子標題（例如「有冇人諗住永遠都唔會生小朋友？」）。
-                      * **主題**：說明帖子主題（例如「主題：生活選擇與社會壓力」）。
-                      * **核心觀點**：引用高關注回覆並說明網民意見（例如「網民普遍對生育持負面態度，例如有高讚回覆提到：『未來不明朗 經濟差 仲可能打仗 緊係唔生』（點讚數：429）。」）。
-                      * **趨勢**：分析討論趨勢（例如「討論反映年輕一代對未來的悲觀情緒，聚焦經濟壓力和社會環境。」）。
-                    - 總結：總結整體趨勢（例如「**總體趨勢**：吹水台的熱門話題涵蓋生活選擇、消費趨勢等多個範疇，網民討論熱烈，情緒直白。」）。
-                    示例：
-                    {selected_cat} 最近的熱門話題有以下幾個：\n\n1. **有冇人諗住永遠都唔會生小朋友？**  \n主題：生活選擇與社會壓力  \n網民普遍對生育持負面態度，例如有高讚回覆提到：「未來不明朗 經濟差 仲可能打仗 緊係唔生」（點讚數：429）。討論反映年輕一代對未來的悲觀情緒，聚焦經濟壓力和社會環境。  \n\n2. **香港人唔好再齊上齊落啦**  \n主題：本地消費與北上趨勢  \n網民對香港高物價不滿，例如有回覆說：「做乜鳩成日叫人買嘢你俾錢呀？...上淘寶睇同一件貨平一倍 點支持得落呀」（點讚數：165）。討論中情緒兩極化，顯示本地消費問題的熱度。  \n\n**總體趨勢**：吹水台的熱門話題涵蓋生活選擇、消費趨勢等多個範疇，網民討論熱烈，情緒直白，反映了日常生活與社會問題的密切關聯。
-                    """
-                },
-                "sentiment": {
-                    "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
-                    "instructions": """
-                    分析帖子情緒（正面、負面、中立），量化比例，字數300-500字。
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
-                    """
-                },
-                "compare": {
-                    "system": "你是 LIHKG 論壇助手，比較多個版塊的話題。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
-                    "instructions": """
-                    比較指定版塊的話題和趨勢，突出差異和共同點，字數400-600字。
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
-                    """
-                },
-                "introduce": {
-                    "system": "你是 Grok 3，以繁體中文回答。",
-                    "context": "問題：{query}\n對話歷史：{conversation_context}",
-                    "data": "",
-                    "instructions": """
-                    回答：「我是 Grok 3，由 xAI 創建的智能助手，專為解答問題和分析 LIHKG 論壇數據設計。無論係想知吹水台熱話定係深入分析時事，我都可以幫到您！有咩問題，快啲問啦！」（50-100字）。
-                    """
-                },
-                "general": {
-                    "system": "你是 Grok 3，以繁體中文回答，模擬 LIHKG 論壇用戶的語氣。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n篩選條件：{filters}",
-                    "instructions": """
-                    若問題與 LIHKG 相關，生成簡化總結（200-300字）。
-                    若無關，提供上下文回應（200-400字）。
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
-                    """
-                },
-                "themed": {
-                    "system": "你是 LIHKG 論壇助手，尋找特定主題的帖子。",
-                    "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
-                    "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
-                    "instructions": """
-                    根據主題詞（如「時事」「搞笑」），篩選相關帖子，總結內容，引用高關注回覆，字數400-600字。
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
-                    """
-                }
-            }
-        }
+            raise
 
     def build_analyze(self, query, cat_name, cat_id, conversation_context=None, thread_titles=None, metadata=None, thread_data=None):
         config = self.config["analyze"]
@@ -192,6 +74,19 @@ class PromptBuilder:
             thread_titles=json.dumps(thread_titles or [], ensure_ascii=False),
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
+        )
+        prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        return prompt
+
+    def build_prioritize(self, query, cat_name, cat_id, threads):
+        config = self.config["prioritize"]
+        context = config["context"].format(
+            query=query,
+            cat_name=cat_name,
+            cat_id=cat_id
+        )
+        data = config["data"].format(
+            threads=json.dumps(threads, ensure_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
@@ -210,6 +105,9 @@ class PromptBuilder:
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
+
+    def get_system_prompt(self, mode):
+        return self.config["system"].get(mode, "")
 
 def clean_html(text):
     """
@@ -272,16 +170,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {
-            "role": "system",
-            "content": """
-            你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。
-            - 若問題提及版塊（如「吹水台」）或主題（如「時事」「新聞」「on9」），設置 intent: "summarize_posts"，direct_response: false，進入帖子分析流程。
-            - 若問題要求分析主題，設置 theme 和 theme_keywords，篩選條件放寬（min_replies=20, min_likes=5）。
-            - 若問題明確要求自我介紹，設置 intent: "introduce"。
-            - 若問題模糊或無法解析，設置 intent: "summarize_posts"，選擇版塊熱門帖子進行總結。
-            """
-        },
+        {"role": "system", "content": prompt_builder.get_system_prompt("analyze")},
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
@@ -422,24 +311,14 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         logger.error(f"Grok 3 API key missing: {str(e)}")
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
-    prompt = f"""
-    你是LIHKG論壇助手，根據用戶問題和帖子數據，選擇最相關的帖子並排序，輸出JSON：
-    {{
-        "top_thread_ids": {{array}},
-        "reason": {{string}}
-    }}
-    問題：{user_query}
-    分類：{cat_name}（cat_id={cat_id})
-    帖子：{json.dumps([{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
-    任務：
-    1. 根據問題語義，選擇與主題最相關的帖子（最多10個）。
-    2. 若問題包含「on9」「搞亂」「無聊」，優先選擇標題或內容含相關詞的帖子。
-    3. 若問題包含「時事」「新聞」「熱話」，優先選擇標題含政治、經濟、社會等詞的帖子。
-    4. 考慮標題內容、回覆數和點讚數，動態排序。
-    5. 說明選擇理由。
-    示例：
-    - 問題："on9帖子" -> {{"top_thread_ids": ["123", "456"], "reason": "標題或內容包含on9相關詞，點讚數高"}}
-    """
+    prompt_builder = PromptBuilder()
+    prompt = prompt_builder.build_prioritize(
+        query=user_query,
+        cat_name=cat_name,
+        cat_id=cat_id,
+        threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
+    )
+    
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
@@ -594,7 +473,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {"role": "system", "content": "你是由 xAI 創建的 Grok 3，代表 LIHKG 論壇的集體意見，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。"},
+        {"role": "system", "content": prompt_builder.get_system_prompt("response")},
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
