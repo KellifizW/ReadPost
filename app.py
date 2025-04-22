@@ -44,19 +44,38 @@ logger.addHandler(stream_handler)
 # 應用 asyncio 補丁
 nest_asyncio.apply()
 
+# 定義全局錯誤類別
+class AppError(Exception):
+    def __init__(self, message, user_message=None):
+        self.message = message
+        self.user_message = user_message or message
+        super().__init__(self.message)
+
 def validate_input(user_question):
     """
-    驗證用戶輸入，確保長度、格式有效。
+    驗證用戶輸入，確保長度有效。
     """
     if not user_question:
         return False, "輸入不能為空"
-    if len(user_question) < 5:
-        return False, "輸入過短，至少5個字"
     if len(user_question) > 200:
         return False, "輸入過長，最多200個字"
-    if not any(c.isalnum() for c in user_question):
-        return False, "輸入需包含字母或數字"
     return True, ""
+
+def suggest_queries():
+    """
+    顯示建議問題按鈕，引導用戶輸入。
+    """
+    suggestions = [
+        "吹水台最近的搞笑話題",
+        "熱門台的熱門新聞",
+        "分析時事台情緒",
+        "財經台最新帖子"
+    ]
+    st.markdown("**試試這些問題：**")
+    for suggestion in suggestions:
+        if st.button(suggestion):
+            return suggestion
+    return None
 
 async def main():
     """
@@ -84,21 +103,34 @@ async def main():
 
     # 分類選擇
     cat_id_map = {
-        "吹水台": 1, "熱門台": 2, "時事台": 5, "上班台": 14,
-        "財經台": 15, "成人台": 29, "創意台": 31
+        "吹水台": {"id": 1, "order": "now"},
+        "熱門台": {"id": 1, "order": "hot"},
+        "時事台": {"id": 5, "order": "now"},
+        "上班台": {"id": 14, "order": "now"},
+        "財經台": {"id": 15, "order": "now"},
+        "成人台": {"id": 29, "order": "now"},
+        "創意台": {"id": 31, "order": "now"}
     }
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
-    cat_id = str(cat_id_map[selected_cat])
-    st.write(f"當前討論區：{selected_cat}")
+    cat_id = str(cat_id_map[selected_cat]["id"])
+    order = cat_id_map[selected_cat]["order"]
+    st.write(f"當前討論區：{selected_cat}（排序：{'最新' if order == 'now' else '熱門'}）")
 
     # 記錄選單選擇
-    logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
+    logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}, order: {order}")
 
     # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
     st.markdown(f"- 請求計數: {st.session_state.request_counter}")
     st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
     st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
+
+    # 顯示建議問題
+    suggested_query = suggest_queries()
+    if suggested_query:
+        user_question = suggested_query
+    else:
+        user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
 
     # 顯示聊天記錄
     for chat in st.session_state.chat_history:
@@ -108,7 +140,6 @@ async def main():
             st.markdown(chat["answer"])
 
     # 用戶輸入
-    user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
     if user_question and not st.session_state.awaiting_response:
         # 驗證輸入
         is_valid, error_message = validate_input(user_question)
@@ -118,7 +149,7 @@ async def main():
             st.session_state.chat_history.append({"question": user_question, "answer": error_message})
             return
         
-        logger.info(f"User query: {user_question}, category: {selected_cat}, cat_id: {cat_id}")
+        logger.info(f"User query: {user_question}, category: {selected_cat}, cat_id: {cat_id}, order: {order}")
         with st.chat_message("user"):
             st.markdown(user_question)
         st.session_state.awaiting_response = True
@@ -139,15 +170,7 @@ async def main():
             if time.time() < st.session_state.rate_limit_until:
                 error_message = f"速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} 後重試。"
                 logger.warning(error_message)
-                with st.chat_message("assistant"):
-                    st.markdown(error_message)
-                st.session_state.chat_history.append({"question": user_question, "answer": error_message})
-                update_progress("處理失敗", 1.0)
-                time.sleep(0.5)
-                status_text.empty()
-                progress_bar.empty()
-                st.session_state.awaiting_response = False
-                return
+                raise AppError(error_message, user_message=error_message)
 
             # 重置聊天記錄
             if "last_user_query" not in st.session_state:
@@ -174,6 +197,7 @@ async def main():
                 user_question=user_question,
                 selected_cat=selected_cat,
                 cat_id=cat_id,
+                order=order,
                 analysis=analysis,
                 request_counter=st.session_state.request_counter,
                 last_reset=st.session_state.last_reset,
@@ -219,11 +243,20 @@ async def main():
             status_text.empty()
             progress_bar.empty()
 
-        except Exception as e:
-            error_message = f"處理失敗：{str(e)}"
-            logger.error(f"Error processing query: {user_question}, error: {str(e)}")
+        except AppError as e:
+            logger.error(f"Application error: {e.message}")
             with st.chat_message("assistant"):
-                st.markdown(error_message)
+                st.error(e.user_message)
+            st.session_state.chat_history.append({"question": user_question, "answer": e.user_message})
+            update_progress("處理失敗", 1.0)
+            time.sleep(0.5)
+            status_text.empty()
+            progress_bar.empty()
+        except Exception as e:
+            error_message = f"系統錯誤：{str(e)}。請稍後重試或聯繫支持。"
+            logger.error(f"Unexpected error: {str(e)}")
+            with st.chat_message("assistant"):
+                st.error(error_message)
             st.session_state.chat_history.append({"question": user_question, "answer": error_message})
             update_progress("處理失敗", 1.0)
             time.sleep(0.5)
