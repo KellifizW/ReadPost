@@ -1,7 +1,7 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
-修復 `'prioritize'` 錯誤，強化 `prioritize_threads_with_grok` 的錯誤處理。
+修復 'prioritize' 錯誤，強化 prioritize_threads_with_grok 的錯誤處理。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板。
@@ -20,12 +20,26 @@ import logging
 import streamlit as st
 import os
 import hashlib
+import pytz  # 導入 pytz 套件
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
+
+# 設置香港時區
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器（簡化版）
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
+
+# 自定義日誌格式器，將時間戳設為香港時區
+class HongKongFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        else:
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+
+formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
 
 # 控制台處理器：輸出到 stdout
 stream_handler = logging.StreamHandler()
@@ -309,7 +323,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID。
-    強化錯誤處理，確保始終返回字典格式，修復 `'prioritize'` 錯誤。
+    強化錯誤處理，確保始終返回字典格式，修復 'prioritize' 錯誤。
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -638,11 +652,11 @@ def clean_cache(max_age=3600):
 
 def unix_to_readable(timestamp):
     """
-    將 Unix 時間戳轉換為普通時間格式（YYYY-MM-DD HH:MM:SS）。
+    將 Unix 時間戳轉換為香港時區的普通時間格式（YYYY-MM-DD HH:MM:SS）。
     """
     try:
         timestamp = int(timestamp)
-        dt = datetime.datetime.fromtimestamp(timestamp)
+        dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
@@ -651,7 +665,7 @@ def unix_to_readable(timestamp):
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
-    修復 `'prioritize'` 錯誤，強化錯誤處理。
+    修復 'prioritize' 錯誤，強化錯誤處理。
     """
     try:
         logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
