@@ -8,6 +8,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，添加數據清理和回退排序。
 - 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
 - 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
+- 優化 prioritize_threads_with_grok 的 JSON 解析，處理不完整回應並減少警告。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -323,8 +324,9 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
-        "temperature": 0.7
+        "max_tokens": 500,  # 增加 max_tokens 以減少截斷
+        "temperature": 0.7,
+        "stop": ["}"]  # 確保回應在 JSON 閉合後停止
     }
     
     max_retries = 3
@@ -354,18 +356,49 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
-                            continue
-                        sorted_threads = sorted(
-                            cleaned_threads,
-                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                            reverse=True
-                        )
-                        result = {
-                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": "API 回應無效，回退到本地排序（基於回覆數和點讚數）"
-                        }
+                        # 嘗試修復不完整的 JSON
+                        if "top_thread_ids" in content:
+                            try:
+                                # 截取 top_thread_ids 和 reason（若存在）
+                                match = re.search(r'"top_thread_ids":\s*\[([\d,\s]*)\]', content)
+                                thread_ids = []
+                                if match:
+                                    thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
+                                reason = re.search(r'"reason":\s*"([^"]*)"', content)
+                                result = {
+                                    "top_thread_ids": thread_ids,
+                                    "reason": reason.group(1) if reason else "API 回應不完整，提取部分數據"
+                                }
+                                logger.info(f"Repaired partial JSON: {result}")
+                            except Exception as repair_e:
+                                logger.warning(f"JSON repair failed: {str(repair_e)}")
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(2)
+                                    continue
+                                # 回退到本地排序
+                                sorted_threads = sorted(
+                                    cleaned_threads,
+                                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                                    reverse=True
+                                )
+                                result = {
+                                    "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                                    "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                                }
+                        else:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2)
+                                continue
+                            # 回退到本地排序
+                            sorted_threads = sorted(
+                                cleaned_threads,
+                                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                                reverse=True
+                            )
+                            result = {
+                                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                                "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                            }
                     
                     if not isinstance(result, dict) or "top_thread_ids" not in result:
                         logger.warning(f"Invalid prioritization result format: {content}")
@@ -379,7 +412,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         )
                         result = {
                             "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": "API 回應格式錯誤，回退到本地排序（基於回覆數和點讚數）"
+                            "reason": f"API 回應格式錯誤，回退到本地排序（基於回覆數和點讚數）"
                         }
                     
                     logger.info(f"Thread prioritization succeeded: {result}")
