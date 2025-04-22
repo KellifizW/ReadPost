@@ -614,6 +614,19 @@ def clean_cache(max_age=3600):
     for key in expired_keys:
         del st.session_state.thread_cache[key]
 
+def unix_to_readable(timestamp):
+    """
+    將 Unix 時間戳轉換為普通時間格式（YYYY-MM-DD HH:MM:SS）。
+    """
+    try:
+        # 假設 timestamp 是字符串或整數
+        timestamp = int(timestamp)
+        dt = datetime.datetime.fromtimestamp(timestamp)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
+        return str(timestamp)  # 如果轉換失敗，返回原始值
+
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
@@ -690,12 +703,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             if thread_id not in st.session_state.thread_cache:
+                # 轉換 last_reply_time
+                item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
                 st.session_state.thread_cache[thread_id] = {
                     "data": {
                         "thread_id": thread_id,
                         "title": item["title"],
                         "no_of_reply": item.get("no_of_reply", 0),
-                        "last_reply_time": item.get("last_reply_time", 0),
+                        "last_reply_time": item["last_reply_time"],
                         "like_count": item.get("like_count", 0),
                         "dislike_count": item.get("dislike_count", 0),
                         "replies": [],
@@ -769,7 +784,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
                     "no_of_reply": item.get("no_of_reply", content_result.get("total_replies", 0)),
-                    "last_reply_time": item.get("last_reply_time", "0"),
+                    "last_reply_time": unix_to_readable(item.get("last_reply_time", "0")),
                     "like_count": item.get("like_count", 0),
                     "dislike_count": item.get("dislike_count", 0),
                     "replies": [
@@ -778,7 +793,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                             "msg": clean_html(reply.get("msg", "")),
                             "like_count": reply.get("like_count", 0),
                             "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": reply.get("reply_time", "0")
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         } for reply in content_result["replies"] if reply.get("msg")
                     ],
                     "fetched_pages": content_result.get("fetched_pages", [])
