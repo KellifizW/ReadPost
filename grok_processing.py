@@ -1,3 +1,4 @@
+```python
 """
 Grok 3 API 處理模組，負責動態推斷意圖並生成回應。
 使用單一通用提示詞，依賴 Grok 3 處理所有意圖，無需預定義。
@@ -5,6 +6,7 @@ Grok 3 API 處理模組，負責動態推斷意圖並生成回應。
 - process_user_question：抓取數據，調用 Grok 3，生成標準 JSON 回應。
 - truncate_data：截斷數據，控制提示詞長度。
 - cache_response / get_cached_response：快取回應，減少 API 調用。
+- pre_analyze_intent：本地預分析意圖，增強提示詞。
 """
 
 import json
@@ -12,6 +14,7 @@ import aiohttp
 import logging
 import time
 import streamlit as st
+import re
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content, get_category_name
 
 # 配置日誌記錄器
@@ -34,33 +37,39 @@ API_TIMEOUT = 90  # 秒
 # 通用提示詞（改進版）
 GENERAL_PROMPT = """
 你是LIHKG論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。根據用戶問題和提供的數據，執行以下任務：
-1. 理解問題的語義，推斷用戶意圖（例如列出帖子標題、總結話題、提取關鍵詞、分析情緒或其他）。
-2. 若問題與LIHKG數據無關（例如“你是誰？”），返回簡短的通用回應，設置 intent 為 "general_query"。
-3. 若問題與LIHKG相關，根據推斷的意圖，處理以下數據：
+1. 根據預推斷的意圖（{pre_intent}）和問題語義，確定最終意圖（例如列出帖子標題、總結話題、分析情緒、分析內容或其他）。
+2. 若問題與LIHKG數據無關（例如“你是誰？”、“你可以示範你的功能嗎？”），返回簡短的通用回應，設置 intent 為 "general_query"。
+3. 若問題與LIHKG相關，根據意圖處理以下數據：
    - 帖子元數據：{metadata}
    - 回覆內容：{thread_data}
 4. 始終返回以下JSON格式（即使是通用問題）：
 ```json
 {
-  "intent": {string} (推斷的意圖名稱，例如 "list_titles", "summarize_posts", "analyze_sentiment", "general_query"),
+  "intent": {string} (意圖名稱，例如 "list_titles", "summarize_posts", "analyze_sentiment", "analyze_content", "general_query"),
   "response": {string} (自然語言回應),
   "raw_result": {object} (意圖特定的結構化數據，可選)
 }
 ```
 要求：
-- 意圖名稱應簡潔且一致，例如用 'list_titles' 表示列出標題，'analyze_sentiment' 表示情緒分析。
+- 意圖名稱應簡潔且一致，例如 'list_titles' 表示列出標題，'analyze_sentiment' 表示情緒分析，'analyze_content' 表示內容分析。
 - 回應應清晰、符合問題需求，字數根據任務適配（簡單任務200字，複雜任務400-600字）。
-- 對於分析任務（如情緒分析），提供具體證據，例如引用帖子標題或回覆內容。
+- 對於分析任務（如情緒或內容分析），提供具體證據，例如引用帖子標題或回覆內容。
 - 若數據不足，返回："在{cat_name}中未找到符合條件的帖子。"
 - 若無法推斷意圖或問題無關LIHKG，返回通用回應並設置 intent 為 "general_query"。
-- 確保JSON格式嚴格有效，無多餘換行符或語法錯誤。
+- 確保JSON格式嚴格有效，無多餘換行符或語法錯誤。若無法生成有效JSON，返回預設JSON：
+  ```json
+  {"intent": "general_query", "response": "無法生成有效回應，請重試或 уточнити問題。", "raw_result": {}}
+  ```
 - 示例：
   - 問題：“你是誰？” -> {"intent": "general_query", "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？", "raw_result": {}}
+  - 問題：“你可以示範你的功能嗎？” -> {"intent": "general_query", "response": "我可以幫你查LIHKG論壇嘅熱門帖子、總結話題或者分析情緒！試下問：吹水台有咩熱門話題？", "raw_result": {}}
+  - 問題：“分析熱門post” -> {"intent": "analyze_content", "response": "熱門帖子主要討論搞笑話題和日常生活，例如‘[標題]’，內容偏輕鬆。", "raw_result": {"keywords": ["搞笑", "生活"]}}
   - 問題：“吹水台帖子情緒如何？” -> {"intent": "analyze_sentiment", "response": "吹水台帖子偏正面，網友多討論搞笑話題...", "raw_result": {"sentiment": "正面"}}
 
 問題：{query}
 分類：{cat_name}（cat_id={cat_id})
 對話歷史：{conversation_context}
+預推斷意圖：{pre_intent}
 """
 
 def truncate_data(metadata, thread_data, max_replies_per_thread=20):
@@ -100,19 +109,39 @@ def get_cached_response(user_query):
         return cached["result"]
     return None
 
-async def retry_with_simplified_prompt(user_query, selected_cat, cat_id, conversation_context):
+def pre_analyze_intent(query):
+    """本地預分析意圖，根據關鍵詞返回預推斷意圖"""
+    query = query.lower()
+    if re.search(r"你是誰|你是谁", query):
+        return "general_query"
+    if re.search(r"示範|示范|功能", query):
+        return "general_query"
+    if re.search(r"列出|列表|標題|帖子列表", query):
+        return "list_titles"
+    if re.search(r"總結|總结|摘要", query):
+        return "summarize_posts"
+    if re.search(r"情緒|情緒|情感|sentiment", query):
+        return "analyze_sentiment"
+    if re.search(r"分析.*(post|帖子|內容)", query):
+        return "analyze_content"
+    return "general_query"
+
+async def retry_with_simplified_prompt(user_query, selected_cat, cat_id, conversation_context, pre_intent):
     """重試簡化提示詞"""
     prompt = f"""
     你是LIHKG論壇助手，以繁體中文回答。簡化回答以下問題，200字以內，始終返回JSON格式：
     問題：{user_query}
     分類：{selected_cat}（cat_id={cat_id})
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    預推斷意圖：{pre_intent}
     格式：
     ```json
-    {{"intent": "general_query", "response": "...", "raw_result": {{}}}}
+    {{"intent": "{pre_intent}", "response": "...", "raw_result": {{}}}}
     ```
     示例：
     - 問題：“你是誰？” -> {{"intent": "general_query", "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？", "raw_result": {{}}}}
+    - 問題：“你可以示範你的功能嗎？” -> {{"intent": "general_query", "response": "我可以幫你查LIHKG論壇嘅熱門帖子、總結話題或者分析情緒！試下問：吹水台有咩熱門話題？", "raw_result": {{}}}}
+    - 問題：“分析熱門post” -> {{"intent": "analyze_content", "response": "請 уточнити，例如‘分析熱門帖子的情緒’或‘總結熱門帖子內容’", "raw_result": {{}}}}
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -146,7 +175,7 @@ async def retry_with_simplified_prompt(user_query, selected_cat, cat_id, convers
     except Exception as e:
         logger.error(f"Retry failed: {str(e)}")
         return {
-            "intent": "general_query",
+            "intent": pre_intent,
             "response": "無法處理查詢，請稍後重試。",
             "raw_result": {}
         }
@@ -198,10 +227,20 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             }
 
         # 快捷處理通用查詢
-        if user_question.strip() in ["你是誰？", "你是誰?", "你是谁？", "你是谁?"]:
+        general_queries = [
+            "你是誰？", "你是誰?", "你是谁？", "你是谁?",
+            "你可以示範你的功能嗎？", "你可以示範你的功能吗？",
+            "你可以示范你的功能嗎？", "你可以示范你的功能吗？"
+        ]
+        if user_question.strip() in general_queries:
+            response = (
+                "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？"
+                if "你是誰" in user_question
+                else "我可以幫你查LIHKG論壇嘅熱門帖子、總結話題或者分析情緒！試下問：吹水台有咩熱門話題？"
+            )
             result = {
                 "intent": "general_query",
-                "response": "我係Grok，幫你查LIHKG論壇嘅AI助手！有咩想知？",
+                "response": response,
                 "raw_result": {}
             }
             cache_response(user_question, result)
@@ -214,6 +253,10 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                 "rate_limit_until": rate_limit_until,
                 **result
             }
+
+        # 本地預分析意圖
+        pre_intent = pre_analyze_intent(user_question)
+        logger.info(f"Pre-analyzed intent for query '{user_question}': {pre_intent}")
 
         # 抓取帖子數據
         if progress_callback:
@@ -337,7 +380,8 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             cat_id=cat_id,
             conversation_context=json.dumps(conversation_context, ensure_ascii=False),
             metadata=json.dumps(metadata, ensure_ascii=False),
-            thread_data=json.dumps(thread_data, ensure_ascii=False)
+            thread_data=json.dumps(thread_data, ensure_ascii=False),
+            pre_intent=pre_intent
         )
         
         # 檢查提示詞長度
@@ -350,7 +394,8 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                 cat_id=cat_id,
                 conversation_context=json.dumps(conversation_context, ensure_ascii=False),
                 metadata=json.dumps(metadata, ensure_ascii=False),
-                thread_data=json.dumps(thread_data, ensure_ascii=False)
+                thread_data=json.dumps(thread_data, ensure_ascii=False),
+                pre_intent=pre_intent
             )
         
         if progress_callback:
@@ -395,7 +440,7 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                     status_code = response.status
                     if status_code != 200:
                         logger.error(f"API request failed with status {status_code}")
-                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context, pre_intent)
                         cache_response(user_question, result)
                         return {
                             "selected_cat": selected_cat,
@@ -409,13 +454,20 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                     
                     data = await response.json()
                     content = data["choices"][0]["message"]["content"].strip()
+                    logger.info(f"Raw API response: {content[:500]}... (length: {len(content)})")  # 記錄截斷的原始回應
                     
                     # 檢查回應是否為有效 JSON
                     try:
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON response: {content}, error: {str(e)}")
-                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        logger.error(f"Invalid JSON response: {content[:500]}..., error: {str(e)}")
+                        # 後處理：嘗試提取文字並包裝為 JSON
+                        fallback_response = content[:200] if content else "無法解析回應內容。"
+                        result = {
+                            "intent": pre_intent,
+                            "response": f"回應格式錯誤，已提取部分內容：{fallback_response}",
+                            "raw_result": {}
+                        }
                         cache_response(user_question, result)
                         return {
                             "selected_cat": selected_cat,
@@ -430,7 +482,7 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                     # 驗證結果格式
                     if not isinstance(result, dict) or "intent" not in result or "response" not in result:
                         logger.error(f"Invalid response format: {result}")
-                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context, pre_intent)
                         cache_response(user_question, result)
                         return {
                             "selected_cat": selected_cat,
@@ -447,14 +499,15 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
                         "sentiment_analysis": "analyze_sentiment",
                         "emotion_analysis": "analyze_sentiment",
                         "show_titles": "list_titles",
-                        "summary": "summarize_posts"
+                        "summary": "summarize_posts",
+                        "content_analysis": "analyze_content"
                     }
                     result["intent"] = intent_mapping.get(result["intent"], result["intent"])
                     
                     # 檢查回應質量
                     if len(result["response"]) < 50:
                         logger.warning(f"Response too short for query: {user_question}")
-                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                        result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context, pre_intent)
                     
                     logger.info(
                         json.dumps({
@@ -478,7 +531,7 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             
             except (json.JSONDecodeError, ValueError, KeyError) as e:
                 logger.error(f"Grok 3 response error: {str(e)}")
-                result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context)
+                result = await retry_with_simplified_prompt(user_question, selected_cat, cat_id, conversation_context, pre_intent)
                 cache_response(user_question, result)
                 return {
                     "selected_cat": selected_cat,
@@ -553,3 +606,4 @@ async def process_user_question(user_question, selected_cat, cat_id, post_limit,
             "rate_limit_until": rate_limit_until,
             **result
         }
+```
