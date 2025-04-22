@@ -1,4 +1,5 @@
 {
+  "version": "f726b665",
   "analyze": {
     "system": "你是 LIHKG 論壇的集體意見代表，根據用戶問題和提供的數據，以繁體中文回覆，模擬論壇用戶的語氣。輸出 JSON。",
     "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話歷史：{conversation_context}",
