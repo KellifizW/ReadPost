@@ -1,7 +1,7 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
-修復 `'<` not supported between instances of 'int' and 'str'` 和 `'prioritize'` 錯誤。
+修復 `'prioritize'` 錯誤，根據 `fetch_dates` 意圖跳過不必要的 `prioritize_threads_with_grok` 流程。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板。
@@ -630,18 +630,17 @@ def unix_to_readable(timestamp):
     將 Unix 時間戳轉換為普通時間格式（YYYY-MM-DD HH:MM:SS）。
     """
     try:
-        # 假設 timestamp 是字符串或整數
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
-        return "1970-01-01 00:00:00"  # 預設值改為有效的時間字符串
+        return "1970-01-01 00:00:00"
 
 async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子。
-    修復 `'<` not supported between instances of 'int' and 'str'` 和 `'prioritize'` 錯誤。
+    修復 `'prioritize'` 錯誤，根據 `fetch_dates` 意圖跳過 `prioritize_threads_with_grok` 流程。
     """
     try:
         logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
@@ -673,6 +672,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
         
+        intent = analysis.get("intent", "summarize_posts")
+        
         thread_data = []
         rate_limit_info = []
         initial_threads = []
@@ -691,7 +692,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             rate_limit_until = result.get("rate_limit_until", rate_limit_until)
             rate_limit_info.extend(result.get("rate_limit_info", []))
             items = result.get("items", [])
-            # 統一 last_reply_time 格式
             for item in items:
                 item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
             initial_threads.extend(items)
@@ -732,32 +732,45 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
-        if not top_thread_ids and filtered_items:
+        # 根據 intent 處理 fetch_dates 意圖，跳過不必要的排序
+        if intent == "fetch_dates":
             if progress_callback:
-                progress_callback("正在重新分析帖子選擇", 0.4)
-            prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
-            # 檢查 prioritization 的類型
-            if not isinstance(prioritization, dict):
-                logger.error(f"Invalid prioritization result: {prioritization}")
-                prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
-            top_thread_ids = prioritization.get("top_thread_ids", [])
-            logger.info(f"Grok prioritized threads: {top_thread_ids}")
-        
-        if not top_thread_ids and filtered_items:
-            if sort_method == "popular":
-                sorted_items = sorted(
-                    filtered_items,
-                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                    reverse=True
-                )
-            else:
-                sorted_items = sorted(
-                    filtered_items,
-                    key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
-                    reverse=(time_range == "recent")
-                )
+                progress_callback("正在處理日期相關資料", 0.4)
+            # 直接使用 filtered_items，按時間排序
+            sorted_items = sorted(
+                filtered_items,
+                key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
+                reverse=True
+            )
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
-            logger.info(f"Generated top_thread_ids: {top_thread_ids}")
+            logger.info(f"Fetch dates mode, selected threads: {top_thread_ids}")
+        else:
+            # 其他意圖（如 summarize_posts）才執行優先排序
+            if not top_thread_ids and filtered_items:
+                if progress_callback:
+                    progress_callback("正在重新分析帖子選擇", 0.4)
+                prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
+                if not isinstance(prioritization, dict):
+                    logger.error(f"Invalid prioritization result: {prioritization}")
+                    prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
+                top_thread_ids = prioritization.get("top_thread_ids", [])
+                logger.info(f"Grok prioritized threads: {top_thread_ids}")
+            
+            if not top_thread_ids and filtered_items:
+                if sort_method == "popular":
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                        reverse=True
+                    )
+                else:
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
+                        reverse=(time_range == "recent")
+                    )
+                top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+                logger.info(f"Generated top_thread_ids: {top_thread_ids}")
         
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
