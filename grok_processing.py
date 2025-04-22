@@ -46,7 +46,6 @@ class PromptBuilder:
     """
     def __init__(self, config_path=None):
         if config_path is None:
-            # 假設 prompts.json 位於與 grok_processing.py 相同的目錄
             base_dir = os.path.dirname(os.path.abspath(__file__))
             config_path = os.path.join(base_dir, "prompts.json")
         
@@ -121,9 +120,24 @@ class PromptBuilder:
                     "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
                     "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
                     "instructions": """
-                    總結帖子內容，引用高關注回覆，字數400-600字。
-                    若無回覆，基於標題推測主題，生成簡化總結（200-300字）。
-                    若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子。」
+                    任務：
+                    1. 分析每個帖子的主題和核心觀點，優先引用高關注回覆（按點讚數排序）。
+                    2. 若無回覆數據，基於帖子標題推測主題，生成簡化總結。
+                    3. 總結熱門話題的趨勢，突出用戶關注點和討論熱度原因。
+                    4. 若問題提及特定主題（如「時事」），聚焦相關帖子，突出主題相關的觀點和回覆。
+                    5. 若無帖子，回答：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。」
+                    6. 字數：400-600字（無回覆時200-300字）。
+                    輸出格式：
+                    以自然語言格式生成回應，包含以下內容：
+                    - 簡介：說明分析的版塊和主題（例如「{selected_cat} 最近的熱門話題有以下幾個：」）。
+                    - 帖子分析：逐一列出每個帖子（最多5個），格式如下：
+                      * **標題**：列出帖子標題（例如「有冇人諗住永遠都唔會生小朋友？」）。
+                      * **主題**：說明帖子主題（例如「主題：生活選擇與社會壓力」）。
+                      * **核心觀點**：引用高關注回覆並說明網民意見（例如「網民普遍對生育持負面態度，例如有高讚回覆提到：『未來不明朗 經濟差 仲可能打仗 緊係唔生』（點讚數：429）。」）。
+                      * **趨勢**：分析討論趨勢（例如「討論反映年輕一代對未來的悲觀情緒，聚焦經濟壓力和社會環境。」）。
+                    - 總結：總結整體趨勢（例如「**總體趨勢**：吹水台的熱門話題涵蓋生活選擇、消費趨勢等多個範疇，網民討論熱烈，情緒直白。」）。
+                    示例：
+                    {selected_cat} 最近的熱門話題有以下幾個：\n\n1. **有冇人諗住永遠都唔會生小朋友？**  \n主題：生活選擇與社會壓力  \n網民普遍對生育持負面態度，例如有高讚回覆提到：「未來不明朗 經濟差 仲可能打仗 緊係唔生」（點讚數：429）。討論反映年輕一代對未來的悲觀情緒，聚焦經濟壓力和社會環境。  \n\n2. **香港人唔好再齊上齊落啦**  \n主題：本地消費與北上趨勢  \n網民對香港高物價不滿，例如有回覆說：「做乜鳩成日叫人買嘢你俾錢呀？...上淘寶睇同一件貨平一倍 點支持得落呀」（點讚數：165）。討論中情緒兩極化，顯示本地消費問題的熱度。  \n\n**總體趨勢**：吹水台的熱門話題涵蓋生活選擇、消費趨勢等多個範疇，網民討論熱烈，情緒直白，反映了日常生活與社會問題的密切關聯。
                     """
                 },
                 "sentiment": {
@@ -229,11 +243,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    # 檢查是否包含版塊或主題相關關鍵詞
     category_keywords = ["吹水台", "時事台", "娛樂台", "科技台"]
     theme_keywords = ["時事", "新聞", "熱話", "政治", "經濟", "社會", "國際", "娛樂", "科技"]
     is_category_related = any(keyword in user_query for keyword in category_keywords)
     is_theme_related = any(keyword in user_query for keyword in theme_keywords)
+    is_popular_query = "熱門" in user_query
     
     prompt = prompt_builder.build_analyze(
         query=user_query,
@@ -372,7 +386,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     result = json.loads(data["choices"][0]["message"]["content"])
                     logger.debug(f"Raw intent analysis response: {result}")
                     
-                    # 放寬意圖識別：若提及版塊或主題，強制進入分析流程
                     if is_category_related or is_theme_related:
                         result["direct_response"] = False
                         result["intent"] = "summarize_posts"
@@ -383,6 +396,19 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         result["post_limit"] = 10
                         result["reply_limit"] = 50
                         result["category_ids"] = [cat_id]
+                        result["data_type"] = "both"
+                        result["processing"] = "summarize"
+                    
+                    if is_popular_query:
+                        result["filters"] = {
+                            "min_replies": 5,
+                            "min_likes": 2,
+                            "sort": "popular"
+                        }
+                        result["post_limit"] = 10
+                        result["reply_limit"] = 50
+                        result["intent"] = "summarize_posts"
+                        result["theme"] = "general"
                         result["data_type"] = "both"
                         result["processing"] = "summarize"
                     
@@ -546,7 +572,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 動態調整回覆數量
     max_replies_per_thread = 20
     filtered_thread_data = {}
     for tid, data in thread_data.items():
@@ -949,7 +974,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }, ensure_ascii=False)
         )
         
-        # 清理緩存
         clean_cache()
         
         if rate_limit_until > time.time():
@@ -981,7 +1005,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info = []
         initial_threads = []
         
-        # 抓取帖子列表
         for page in range(1, 6):
             result = await get_lihkg_topic_list(
                 cat_id=cat_id,
@@ -1016,7 +1039,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if progress_callback:
             progress_callback("正在篩選帖子", 0.3)
         
-        # 篩選帖子
         filtered_items = []
         for item in initial_threads:
             thread_id = str(item["thread_id"])
@@ -1034,7 +1056,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             if not reasons:
                 filtered_items.append(item)
             else:
-                logger.info(
+                logger.debug(  # 改為 debug 級別
                     json.dumps({
                         "event": "thread_filtering",
                         "thread_id": thread_id,
@@ -1053,7 +1075,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }, ensure_ascii=False)
         )
         
-        # 若 filtered_items 為空，放寬篩選條件
         if not filtered_items and initial_threads:
             logger.warning("No filtered items, relaxing filters")
             min_replies = 10
@@ -1071,7 +1092,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 }, ensure_ascii=False)
             )
         
-        # 更新緩存
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             if thread_id not in st.session_state.thread_cache:
@@ -1089,7 +1109,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     "timestamp": time.time()
                 }
         
-        # 若無 top_thread_ids，嘗試用 Grok 3 排序
         if not top_thread_ids and filtered_items:
             if progress_callback:
                 progress_callback("正在重新分析帖子選擇", 0.4)
@@ -1097,7 +1116,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             top_thread_ids = prioritization["top_thread_ids"]
             logger.info(f"Grok prioritized threads: {top_thread_ids}, reason: {prioritization['reason']}")
         
-        # 若仍無 top_thread_ids，按得分排序
         if not top_thread_ids and filtered_items:
             if sort_method == "popular":
                 sorted_items = sorted(
@@ -1114,7 +1132,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
             logger.info(f"Generated top_thread_ids based on {sort_method}: {top_thread_ids}")
         
-        # 候選帖子抓取
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
         
@@ -1132,7 +1149,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             }, ensure_ascii=False)
         )
         
-        # 抓取帖子內容
         for idx, item in enumerate(candidate_threads):
             thread_id = str(item["thread_id"])
             cache_key = thread_id
@@ -1191,7 +1207,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 }
                 thread_data.append(thread_info)
                 
-                # 更新緩存
                 st.session_state.thread_cache[cache_key] = {
                     "data": thread_info,
                     "timestamp": time.time()
@@ -1215,7 +1230,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     }, ensure_ascii=False)
                 )
         
-        # 進階分析（如果需要）
         if analysis.get("needs_advanced_analysis", False) and thread_data:
             if progress_callback:
                 progress_callback("正在進行進階分析", 0.8)
@@ -1252,7 +1266,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             ]
             analysis.update(advanced_analysis)
         
-        # 若無 thread_data，從緩存恢復
         if not thread_data and st.session_state.thread_cache:
             logger.warning("No thread data, attempting cache recovery")
             thread_data = [
@@ -1261,7 +1274,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             ][:post_limit]
             logger.info(f"Recovered {len(thread_data)} threads from cache")
         
-        # 最終結果
         if progress_callback:
             progress_callback("完成數據處理", 0.9)
         
@@ -1293,7 +1305,6 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "error": str(e)
             }, ensure_ascii=False)
         )
-        # 回退：嘗試從緩存中恢復部分數據
         fallback_thread_data = [
             cache["data"] for cache in st.session_state.thread_cache.values()
             if cache["data"].get("replies") and cache["data"]["thread_id"] in top_thread_ids
