@@ -336,8 +336,17 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     simplified_metadata = [{"thread_id": item["thread_id"], "title": item["title"]} for item in metadata]
     filtered_thread_data = {}
     for tid, data in thread_data.items():
+        # 過濾有效回應：msg 存在且為非空字符串
+        valid_replies = [
+            r for r in data.get("replies", [])
+            if r.get("msg") and isinstance(r.get("msg"), str) and r.get("msg").strip()
+        ]
+        invalid_replies = len(data.get("replies", [])) - len(valid_replies)
+        if invalid_replies > 0:
+            logger.warning(f"Filtered {invalid_replies} invalid replies for thread_id={tid} (missing or empty msg)")
+        
         replies = sorted(
-            [r for r in data.get("replies", []) if r.get("msg")],
+            valid_replies,
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
