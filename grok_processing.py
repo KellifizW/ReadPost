@@ -8,6 +8,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 增強 clean_html 處理圖片網址和無效內容，過濾無效回應。
 - 強化 stream_grok3_response 和 process_user_question 的數據驗證，防止 KeyError: 'msg'。
 - 修正 process_user_question 中的拼寫錯誤（progress_quote -> progress_callback）。
+- 強化 msg 字段檢查，處理非字符串和嵌套結構，記錄詳細無效回應。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -138,7 +139,7 @@ class PromptBuilder:
 
 def clean_html(text):
     if not isinstance(text, str):
-        text = str(text)
+        text = str(text) if text is not None else ""
     try:
         # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
@@ -354,10 +355,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         valid_replies = []
         invalid_replies = []
         for r in data.get("replies", []):
-            if not isinstance(r, dict) or "msg" not in r or not isinstance(r["msg"], str) or not r["msg"].strip():
+            if not isinstance(r, dict):
+                logger.debug(f"Invalid reply structure for thread_id={tid}: {r}")
                 invalid_replies.append(r)
                 continue
-            cleaned_msg = clean_html(r["msg"])
+            msg = r.get("msg")
+            if msg is None or not isinstance(msg, str) or not msg.strip():
+                logger.debug(f"Invalid msg for thread_id={tid}: {msg}")
+                invalid_replies.append(r)
+                continue
+            cleaned_msg = clean_html(msg)
             if cleaned_msg:
                 valid_replies.append({
                     "post_id": r.get("post_id"),
@@ -367,6 +374,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "reply_time": r.get("reply_time", "")
                 })
             else:
+                logger.debug(f"Cleaned msg is invalid for thread_id={tid}: {msg}")
                 invalid_replies.append(r)
         
         if invalid_replies:
@@ -392,6 +400,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "replies": replies,
             "fetched_pages": data.get("fetched_pages", [])
         }
+        logger.debug(f"Valid replies for thread_id={tid}: {len(replies)}")
     
     # 檢查是否有有效數據
     if not filtered_thread_data:
@@ -722,17 +731,35 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             
             if cache_data and cache_data.get("replies"):
                 # 驗證緩存數據的回應結構
-                valid_cache_replies = [
-                    r for r in cache_data["replies"]
-                    if isinstance(r, dict) and "msg" in r and isinstance(r["msg"], str) and r["msg"].strip()
-                ]
+                valid_cache_replies = []
+                invalid_cache_replies = []
+                for r in cache_data["replies"]:
+                    if not isinstance(r, dict) or "msg" not in r or not isinstance(r["msg"], str) or not r["msg"].strip():
+                        invalid_cache_replies.append(r)
+                        continue
+                    cleaned_msg = clean_html(r["msg"])
+                    if cleaned_msg:
+                        valid_cache_replies.append({
+                            "post_id": r.get("post_id"),
+                            "msg": cleaned_msg,
+                            "like_count": r.get("like_count", 0),
+                            "dislike_count": r.get("dislike_count", 0),
+                            "reply_time": r.get("reply_time", "")
+                        })
+                    else:
+                        invalid_cache_replies.append(r)
+                
+                if invalid_cache_replies:
+                    logger.warning(f"Filtered {len(invalid_cache_replies)} invalid cache replies for thread_id={thread_id}")
+                    logger.debug(f"Invalid cache replies sample: {invalid_cache_replies[:3]}")
+                
                 if valid_cache_replies:
                     cache_data["replies"] = valid_cache_replies
                     thread_data.append(cache_data)
                     logger.debug(f"Using valid cache data for thread_id={thread_id}, replies={len(valid_cache_replies)}")
                     continue
                 else:
-                    logger.warning(f"Invalid cache data for thread_id={thread_id}, fetching fresh data")
+                    logger.warning(f"No valid cache replies for thread_id={thread_id}, fetching fresh data")
             
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
@@ -755,10 +782,16 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 valid_replies = []
                 invalid_replies = []
                 for reply in content_result["replies"]:
-                    if not isinstance(reply, dict) or "msg" not in reply:
+                    if not isinstance(reply, dict):
+                        logger.debug(f"Invalid reply structure for thread_id={thread_id}: {reply}")
                         invalid_replies.append(reply)
                         continue
-                    cleaned_msg = clean_html(reply.get("msg", ""))
+                    msg = reply.get("msg")
+                    if msg is None or not isinstance(msg, str):
+                        logger.debug(f"Invalid msg for thread_id={thread_id}: {msg}")
+                        invalid_replies.append(reply)
+                        continue
+                    cleaned_msg = clean_html(msg)
                     if cleaned_msg:
                         valid_replies.append({
                             "post_id": reply.get("post_id"),
@@ -768,6 +801,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         })
                     else:
+                        logger.debug(f"Cleaned msg is invalid for thread_id={thread_id}: {msg}")
                         invalid_replies.append(reply)
                 
                 if invalid_replies:
