@@ -1,50 +1,63 @@
 {
   "version": "f726b665",
-  "system_prompts": {
-    "analyze": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
-    "response": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
-    "prioritize": "你是 LIHKG 論壇的帖子排序助手，以繁體中文回答，專注於根據問題語義排序帖子。"
-  },
   "intents": {
-    "list_titles": {
-      "system": "你是 LIHKG 論壇的數據助手，以繁體中文回答，模擬論壇用戶的語氣。",
-      "templates": {
-        "simple": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：列出帖子標題，格式為：帖子 ID: [thread_id] 標題: [title]。",
-        "detailed": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：列出帖子標題，包含回覆數和點讚數，格式為：帖子 ID: [thread_id] 標題: [title]（回覆數：[no_of_reply]，點讚數：[like_count]）。"
-      },
-      "instructions": "列出最多10個帖子標題，若無數據則返回提示。"
+    "generic": {
+      "system": "你是 LIHKG 論壇助手，以繁體中文回答，模擬論壇用戶語氣。",
+      "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id}）\n對話歷史：{conversation_context}",
+      "data": "元數據：{metadata}\n內容：{thread_data}\n篩選：{filters}",
+      "instructions_template": "任務：{task}\n數據需求：{data_requirements}\n篩選條件：{filters}\n輸出格式：{output_format}\n數據處理：{data_processing}\n若無數據，返回：{no_data_response}"
     },
-    "summarize_posts": {
-      "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
-      "templates": {
-        "simple": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：簡要總結熱門帖子主題，每個帖子約50字。",
-        "detailed": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：詳細總結帖子內容，引用高讚回覆，分析討論趨勢，每個帖子約100-150字，總結整體趨勢。"
+    "specific_intents": {
+      "summarize_posts": {
+        "task": "總結帖子內容，引用高關注回覆",
+        "data_requirements": ["titles", "replies"],
+        "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"},
+        "output_format": "{\"intro\": \"string\", \"analysis\": [{\"title\": \"string\", \"theme\": \"string\", \"views\": \"string\", \"trend\": \"string\"}], \"summary\": \"string\"}",
+        "data_processing": "使用元數據和回覆內容，優先高讚回覆，字數 400-600",
+        "no_data_response": "在 {cat_name} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。",
+        "fallback": {"source": "cache", "max_items": 5, "message": "使用緩存數據總結。"}
       },
-      "instructions": "總結最多5個帖子，若無數據則返回提示，字數400-600字（無回覆時200-300字）。"
+      "list_titles": {
+        "task": "列出帖子標題",
+        "data_requirements": ["titles"],
+        "filters": {"min_replies": 10, "min_likes": 2, "sort": "recent"},
+        "output_format": "{\"titles\": [{\"thread_id\": \"string\", \"title\": \"string\"}]}",
+        "data_processing": "僅使用元數據，列出最多 10 個標題",
+        "no_data_response": "在 {cat_name} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。",
+        "fallback": {"source": "cache", "max_items": 5, "message": "使用緩存數據列出標題。"}
+      },
+      "analyze_sentiment": {
+        "task": "分析帖子情緒分佈",
+        "data_requirements": ["titles", "replies"],
+        "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"},
+        "output_format": "{\"sentiments\": {\"positive\": \"number\", \"negative\": \"number\", \"neutral\": \"number\"}, \"reasons\": \"string\"}",
+        "data_processing": "分析高關注回覆，量化情緒比例，字數 300-500",
+        "no_data_response": "在 {cat_name} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。",
+        "fallback": {"source": "cache", "max_items": 5, "message": "使用緩存數據分析情緒。"}
+      },
+      "fetch_dates": {
+        "task": "提取帖子和回覆的日期資料",
+        "data_requirements": ["titles", "replies"],
+        "filters": {"min_replies": 20, "min_likes": 5, "sort": "recent"},
+        "output_format": "{\"dates\": [{\"title\": \"string\", \"last_reply_time\": \"string\", \"top_reply_time\": \"string\"}], \"summary\": \"string\"}",
+        "data_processing": "提取 last_reply_time 和 reply_time，按時間排序，字數 200-400",
+        "no_data_response": "在 {cat_name} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。",
+        "fallback": {"source": "cache", "max_items": 5, "message": "使用緩存數據提取日期。"}
+      },
+      "general_query": {
+        "task": "回答通用問題",
+        "data_requirements": ["none"],
+        "filters": {},
+        "output_format": "{\"response\": \"string\"}",
+        "data_processing": "無需抓取數據，直接回答，字數 200-400",
+        "no_data_response": "問題與 LIHKG 無關，直接回答。",
+        "fallback": {"source": "none", "message": "無需數據，直接回答。"}
+      }
     },
-    "analyze_sentiment": {
-      "system": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
-      "templates": {
-        "simple": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：簡要分析帖子情緒分佈（正面、負面、中立），量化比例。",
-        "detailed": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：詳細分析帖子情緒，量化比例，引用高讚回覆，說明原因。"
-      },
-      "instructions": "分析情緒分佈，字數300-500字，若無數據則返回提示。"
-    },
-    "fetch_dates": {
-      "system": "你是 LIHKG 論壇的數據助手，以繁體中文回答，模擬論壇用戶的語氣。",
-      "templates": {
-        "simple": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：列出帖子最後回覆時間，格式為：標題：[title]，最後回覆時間：[last_reply_time]。",
-        "detailed": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：列出帖子和熱門回覆的日期資料，格式為：標題：[title]，最後回覆時間：[last_reply_time]，熱門回覆時間：[reply_time]。"
-      },
-      "instructions": "列出最多5個帖子的日期資料，字數200-400字，若無數據則返回提示。"
-    },
-    "trend_prediction": {
-      "system": "你是 LIHKG 論壇助手，預測討論區趨勢。",
-      "templates": {
-        "simple": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：基於回覆數預測熱門話題，列出前5個帖子。",
-        "detailed": "問題：{query}\n分類：{cat_name}\n數據：{data}\n任務：基於回覆數和時間預測趨勢，分析話題熱度原因，引用數據。"
-      },
-      "instructions": "預測趨勢，字數300-500字，若無數據則返回提示。"
+    "error_templates": {
+      "api_failure": "API 請求失敗，請稍後重試。",
+      "no_data": "在 {cat_name} 中未找到符合條件的帖子，請試試其他分類。",
+      "intent_failure": "無法理解問題：「{query}」。請提供更具體的查詢，如「吹水台的時事討論」。"
     }
   }
 }
