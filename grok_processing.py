@@ -68,6 +68,20 @@ class PromptBuilder:
 
     def build_dynamic_prompt(self, intent, query, cat_name, cat_id, metadata, thread_data, filters, conversation_context):
         intent_config = self.config["intents"]["specific_intents"].get(intent, self.config["intents"]["generic"])
+        logger.info(f"Building prompt for intent: {intent}, config keys: {list(intent_config.keys())}")
+        
+        # 確保必要鍵存在，否則提供默認值
+        defaults = {
+            "task": "回答通用問題或提供功能說明",
+            "data_requirements": ["none"],
+            "filters": {},
+            "output_format": "{\"response\": \"string\"}",
+            "data_processing": "無需抓取數據，直接回答",
+            "no_data_response": "問題與 LIHKG 數據無關或無數據，直接回答。"
+        }
+        for key, default in defaults.items():
+            intent_config.setdefault(key, default)
+        
         prompt = f"{intent_config['system']}\n"
         prompt += intent_config["context"].format(
             query=query, cat_name=cat_name, cat_id=cat_id,
@@ -95,7 +109,7 @@ class PromptBuilder:
             query=query, cat_name=cat_name, cat_id=cat_id,
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
-        prompt += "任務：分析問題意圖，確定最適合的處理方式。\n"
+        prompt += "任務：分析問題意圖，選擇最適合的意圖（summarize_posts, list_titles, analyze_sentiment, fetch_dates, general_query）。\n"
         prompt += "輸出格式：{\"intent\": \"string\", \"data_requirements\": [\"string\"], \"filters\": {\"min_replies\": number, \"min_likes\": number, \"sort\": \"string\"}, \"post_limit\": number, \"reply_limit\": number, \"task\": \"string\", \"output_format\": \"string\", \"theme\": \"string\", \"theme_keywords\": [\"string\"]}"
         return prompt
 
@@ -172,13 +186,18 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                         logger.warning(f"Intent analysis failed: missing choices, attempt={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    result.setdefault("intent", "summarize_posts")
-                    result.setdefault("data_requirements", ["titles", "replies"])
-                    result.setdefault("filters", {"min_replies": 20, "min_likes": 5})
+                    # 驗證意圖是否在 specific_intents 中
+                    specific_intents = prompt_builder.config["intents"]["specific_intents"].keys()
+                    if result.get("intent") not in specific_intents:
+                        result["intent"] = "general_query"
+                        result["data_requirements"] = ["none"]
+                        result["filters"] = {}
+                        result["post_limit"] = 0
+                        result["reply_limit"] = 0
+                        result["task"] = "回答通用問題"
+                        result["output_format"] = "{\"response\": \"string\"}"
                     result.setdefault("post_limit", 5)
                     result.setdefault("reply_limit", 50)
-                    result.setdefault("task", "總結帖子內容")
-                    result.setdefault("output_format", "{\"intro\": \"string\", \"analysis\": [], \"summary\": \"string\"}")
                     result.setdefault("theme", "general")
                     result.setdefault("theme_keywords", [])
                     logger.info(f"Intent analysis completed: intent={result['intent']}")
@@ -188,14 +207,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
     return {
-        "intent": "summarize_posts",
-        "data_requirements": ["titles", "replies"],
-        "filters": {"min_replies": 20, "min_likes": 5},
-        "post_limit": 5,
-        "reply_limit": 50,
-        "task": "總結帖子內容",
-        "output_format": "{\"intro\": \"string\", \"analysis\": [], \"summary\": \"string\"}",
-        "theme": "general",
+        "intent": "general_query",
+        "data_requirements": ["none"],
+        "filters": {},
+        "post_limit": 0,
+        "reply_limit": 0,
+        "task": "回答通用問題",
+        "output_format": "{\"response\": \"string\"}",
+        "theme": "",
         "theme_keywords": []
     }
 
@@ -334,8 +353,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 "analysis": analysis
             }
         
-        intent = analysis.get("intent", "summarize_posts")
-        data_requirements = analysis.get("data_requirements", ["titles", "replies"])
+        intent = analysis.get("intent", "general_query")
+        data_requirements = analysis.get("data_requirements", ["none"])
         filters = analysis.get("filters", {"min_replies": 20, "min_likes": 5})
         post_limit = min(analysis.get("post_limit", 5), 20)
         reply_limit = analysis.get("reply_limit", 50)
