@@ -193,9 +193,6 @@ async def get_lihkg_topic_list(cat_id, order="now", start_page=1, max_pages=3, r
     }
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=600, fetch_last_pages=0, specific_pages=None, start_page=1):
-    """
-    抓取指定帖子的回覆內容。
-    """
     replies = []
     fetched_pages = []
     thread_title = None
@@ -231,13 +228,24 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
         total_pages = response_data.get("total_page", 1)
         
         page_replies = response_data.get("item_data", [])
+        valid_replies = []
+        invalid_replies = []
         for reply in page_replies:
             reply["like_count"] = int(reply.get("like_count", "0"))
             reply["dislike_count"] = int(reply.get("dislike_count", "0"))
             reply["reply_time"] = reply.get("reply_time", "0")
-        replies.extend(page_replies[:max_replies])
+            if reply.get("msg") and isinstance(reply.get("msg"), str) and reply.get("msg").strip():
+                valid_replies.append(reply)
+            else:
+                invalid_replies.append(reply)
+        
+        if invalid_replies:
+            logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={thread_id}, page=1 (missing or empty msg)")
+            logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
+        
+        replies.extend(valid_replies[:max_replies])
         fetched_pages.append(1)
-        logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(page_replies)}, total_stored={len(replies)}")
+        logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(valid_replies)}, total_stored={len(replies)}")
     else:
         logger.error(f"No data fetched for thread_id={thread_id}, page=1")
         return {
@@ -246,7 +254,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
             "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
         }
     
-    # 確定後續頁面
+    # 後續頁面抓取
     pages_to_fetch = []
     if specific_pages:
         pages_to_fetch = [p for p in specific_pages if 1 <= p <= total_pages and p not in fetched_pages]
@@ -263,7 +271,6 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     
     pages_to_fetch = sorted(set(pages_to_fetch))
     
-    # 抓取後續頁面
     for page in pages_to_fetch:
         if len(replies) >= max_replies:
             logger.info(f"Stopped fetching: thread_id={thread_id}, replies={len(replies)} reached max {max_replies}")
@@ -276,15 +283,26 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
         
         if data and data.get("response"):
             page_replies = data["response"].get("item_data", [])
+            valid_replies = []
+            invalid_replies = []
             for reply in page_replies:
                 reply["like_count"] = int(reply.get("like_count", "0"))
                 reply["dislike_count"] = int(reply.get("dislike_count", "0"))
                 reply["reply_time"] = reply.get("reply_time", "0")
+                if reply.get("msg") and isinstance(reply.get("msg"), str) and reply.get("msg").strip():
+                    valid_replies.append(reply)
+                else:
+                    invalid_replies.append(reply)
+            
+            if invalid_replies:
+                logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={thread_id}, page={page} (missing or empty msg)")
+                logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
+            
             remaining_slots = max_replies - len(replies)
-            page_replies = page_replies[:remaining_slots]
-            replies.extend(page_replies)
+            valid_replies = valid_replies[:remaining_slots]
+            replies.extend(valid_replies)
             fetched_pages.append(page)
-            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
+            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(valid_replies)}")
         await asyncio.sleep(1)
     
     return {
