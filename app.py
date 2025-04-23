@@ -1,5 +1,5 @@
 """
-Streamlit 聊天介面模組，提供 LIHKGAt 數據查詢和顯示功能。
+Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
 僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
@@ -32,14 +32,14 @@ class HongKongFormatter(logging.Formatter):
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
 
-# 防止重複添加處理器
-if not logger.handlers:
-    file_handler = logging.FileHandler("app.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    stream_handler = logging.StreamHandler()  # 修正：使用 StreamHandler
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+# 清空默認處理器並添加新處理器
+logger.handlers.clear()
+file_handler = logging.FileHandler("app.log")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # 應用 asyncio 補丁
 nest_asyncio.apply()
@@ -65,12 +65,7 @@ def suggest_queries():
     """
     顯示建議問題按鈕，引導用戶輸入。
     """
-    suggestions = [
-        "吹水台最近的搞笑話題",
-        "熱門台的熱門新聞",
-        "分析時事台情緒",
-        "財經台最新帖子"
-    ]
+    suggestions = [        "吹水台最近的搞笑話題",        "熱門台的熱門新聞",        "分析時事台情緒",        "財經台最新帖子"    ]
     st.markdown("**試試這些問題：**")
     for suggestion in suggestions:
         if st.button(suggestion):
@@ -189,7 +184,7 @@ async def main():
                 cat_id=cat_id,
                 conversation_context=st.session_state.conversation_context
             )
-            logger.info(f"Analysis completed: intents={[i['type'] for i in analysis.get('intents', [])]}")
+            logger.info(f"Analysis completed: intents={[i['type'] for i in analysis.get('intents', [])]}")  # 修正日誌
 
             # 處理問題
             update_progress("正在處理查詢", 0.2)
@@ -216,12 +211,12 @@ async def main():
             with st.chat_message("assistant"):
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
-                logger.info(f"Starting stream_grok3_response for query: {user_question}, intents: {[i['type'] for i in analysis.get('intents', [])]}")
+                logger.info(f"Starting stream_grok3_response for query: {user_question}, intents: {[i['type'] for i in analysis.get('intents', [])]}")  # 修正日誌
                 async for chunk in stream_grok3_response(
                     user_query=user_question,
                     metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    processing=analysis,
+                    processing=analysis,  # 修正：直接傳遞 analysis
                     selected_cat=selected_cat,
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
