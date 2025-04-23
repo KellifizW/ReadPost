@@ -342,29 +342,27 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,
-        "temperature": 0.7,
-        "stream": True,
-        "stop": ["}"]
+        "max_tokens": 1000,  # 增加以容納完整回應
+        "temperature": 0.3,  # 降低變異
+        "stop": ["}"],  # 確保 JSON 閉合
+        "stream": True  # 保持流式傳輸
     }
     
-    max_retries = 4
+    max_retries = 3
     for attempt in range(max_retries):
         try:
-            start_time = time.time()
-            response_content = ""
-            chunk_count = 0
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    response_time = time.time() - start_time
-                    logger.debug(f"Prioritize API response status: {response.status}, time: {response_time:.2f}s, headers: {response.headers}")
                     if response.status != 200:
                         logger.warning(f"Thread prioritization failed: status={response.status}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2 + attempt)
+                            await asyncio.sleep(2)
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法完成帖子排序，請稍後重試。")
                     
+                    logger.debug(f"Prioritize API response status: {response.status}, headers: {response.headers}")
+                    content = ""
+                    chunk_count = 0
                     async for line in response.content:
                         if line and not line.isspace():
                             line_str = line.decode('utf-8').strip()
@@ -373,34 +371,75 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                             if line_str.startswith("data: "):
                                 try:
                                     chunk = json.loads(line_str[6:])
-                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        response_content += content
+                                    chunk_content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if chunk_content:
+                                        content += chunk_content
                                         chunk_count += 1
-                                        logger.debug(f"Prioritize stream chunk {chunk_count} (length: {len(content)}): {content[:100]}...")
+                                        logger.debug(f"Prioritize stream chunk {chunk_count} (length: {len(chunk_content)}): {chunk_content}")
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in prioritize stream chunk: {str(e)}")
+                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}, line: {line_str}")
                                     continue
                     
-                    logger.debug(f"Prioritize response content (length: {len(response_content)}, chunks: {chunk_count}): {response_content[:500]}...")
-                    logger.debug(f"Response hex: {response_content.encode().hex()[:1000]}...")
+                    logger.debug(f"Prioritize response content (length: {len(content)}, chunks: {chunk_count}): {content}")
+                    logger.debug(f"Response hex: {content.encode('utf-8').hex()}")
+                    
                     try:
-                        result = json.loads(response_content)
-                        if not isinstance(result, dict) or "top_thread_ids" not in result or not isinstance(result["top_thread_ids"], list):
-                            raise ValueError("Invalid JSON structure: missing or invalid top_thread_ids")
-                        if "reason" not in result or not isinstance(result["reason"], str):
-                            result["reason"] = "未提供排序原因"
-                        logger.debug(f"Parsed JSON result: {result}")
-                    except (json.JSONDecodeError, ValueError) as e:
-                        logger.warning(f"Invalid prioritize response: {str(e)}, content (length: {len(response_content)}): {response_content[:500]}...")
-                        error_pos = getattr(e, 'pos', 0)
-                        context_start = max(0, error_pos - 50)
-                        context_end = min(len(response_content), error_pos + 50)
-                        logger.debug(f"Error context (char {error_pos}): {response_content[context_start:context_end]}")
+                        result = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid prioritize response: {str(e)}, content (length: {len(content)}): {content}")
+                        logger.debug(f"Error context (char {e.pos}): {content[max(0, e.pos-20):e.pos+20]}")
+                        # 嘗試修復不完整 JSON
+                        if "top_thread_ids" in content:
+                            try:
+                                # 提取 top_thread_ids
+                                match = re.search(r'"top_thread_ids":\s*\[([\d,\s]*)\]', content)
+                                thread_ids = []
+                                if match:
+                                    thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
+                                # 提取 reason
+                                reason_match = re.search(r'"reason":\s*"([^"]*)"', content)
+                                reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
+                                result = {
+                                    "top_thread_ids": thread_ids,
+                                    "reason": reason
+                                }
+                                logger.info(f"Repaired partial JSON: {result}")
+                            except Exception as repair_e:
+                                logger.warning(f"JSON repair failed: {str(repair_e)}, attempt={attempt + 1}")
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(2)
+                                    continue
+                                # 回退到本地排序
+                                sorted_threads = sorted(
+                                    cleaned_threads,
+                                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                                    reverse=True
+                                )
+                                result = {
+                                    "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                                    "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                                }
+                        else:
+                            logger.warning(f"No top_thread_ids found in content, attempt={attempt + 1}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2)
+                                continue
+                            # 回退到本地排序
+                            sorted_threads = sorted(
+                                cleaned_threads,
+                                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                                reverse=True
+                            )
+                            result = {
+                                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                                "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                            }
+                    
+                    if not isinstance(result, dict) or "top_thread_ids" not in result:
+                        logger.warning(f"Invalid prioritization result format: {content}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2 + attempt)
+                            await asyncio.sleep(2)
                             continue
-                        # 回退到本地排序
                         sorted_threads = sorted(
                             cleaned_threads,
                             key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -408,18 +447,16 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         )
                         result = {
                             "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                            "reason": f"API 回應格式錯誤，回退到本地排序（基於回覆數和點讚數）"
                         }
-                        logger.info(f"Fallback to local sorting: {result}")
                     
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 + attempt)
+                await asyncio.sleep(2)
                 continue
-            # 回退到本地排序
             sorted_threads = sorted(
                 cleaned_threads,
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
