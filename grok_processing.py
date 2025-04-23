@@ -5,6 +5,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
+- 修復 'msg' 相關警告，強化回覆數據驗證。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -112,7 +113,7 @@ class PromptBuilder:
             cat_id="",
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
-        data = self.config["analyze"]["data"].format(
+        data = config["data"].format(
             thread_titles=json.dumps([item["title"] for item in metadata] if metadata else [], ensure_ascii=False),
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
@@ -135,16 +136,17 @@ class PromptBuilder:
         return self.config["system"].get(mode, "")
 
 def clean_html(text):
-    if not isinstance(text, str):
-        text = str(text)
+    if not isinstance(text, str) or not text:
+        logger.warning(f"Invalid input for clean_html: {text}")
+        return ""
     try:
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     except Exception as e:
-        logger.error(f"HTML cleaning failed: {str(e)}")
-        return text
+        logger.error(f"HTML cleaning failed for text '{text}': {str(e)}")
+        return ""
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     conversation_context = conversation_context or []
@@ -298,7 +300,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filtered_thread_data = {}
     for tid, data in thread_data.items():
         replies = sorted(
-            [r for r in data.get("replies", []) if r.get("msg")],
+            [r for r in data.get("replies", []) if r.get("msg") and isinstance(r.get("msg"), str) and r.get("msg").strip()],
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
@@ -656,6 +658,15 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             rate_limit_info.extend(content_result.get("rate_limit_info", []))
             
             if content_result.get("replies"):
+                # 嚴格過濾無效回覆
+                valid_replies = [
+                    reply for reply in content_result["replies"]
+                    if reply.get("msg") and isinstance(reply.get("msg"), str) and reply.get("msg").strip()
+                ]
+                if not valid_replies:
+                    logger.warning(f"No valid replies for thread {thread_id}, skipping")
+                    continue
+                
                 thread_info = {
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
@@ -670,7 +681,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                             "like_count": reply.get("like_count", 0),
                             "dislike_count": reply.get("dislike_count", 0),
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                        } for reply in content_result["replies"] if reply.get("msg")
+                        } for reply in valid_replies
                     ],
                     "fetched_pages": content_result.get("fetched_pages", [])
                 }
