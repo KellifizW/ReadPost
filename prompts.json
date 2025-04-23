@@ -1,8 +1,8 @@
 {
-  "version": "f726b665_extended_v3",
+  "version": "f726b665_extended",
   "system": {
     "analyze": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
-    "response": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。",
+    "response": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
     "prioritize": "你是 LIHKG 論壇的帖子排序助手，以繁體中文回答，專注於根據問題語義排序帖子。"
   },
   "analyze": {
@@ -15,38 +15,38 @@
     "system": "你是 LIHKG 論壇的帖子排序助手，以繁體中文回答，專注於根據問題語義排序帖子。",
     "context": "用戶問題：{query}\n分類：{cat_name}（cat_id={cat_id}）",
     "data": "帖子列表：{threads}",
-    "instructions": "任務：\n1. 根據問題語義，選擇與問題最相關的帖子。\n2. 排序依據：\n   - 標題與問題的語義相關性。\n   - 回覆數（no_of_reply）和點讚數（like_count）。\n3. 返回最多10個帖子ID（數字陣列）。\n4. 提供排序原因。\n5. 輸出必須為純 JSON 字符串，無換行、縮進或多餘字符，僅包含 'top_thread_ids' 和 'reason'。\n輸出格式：\n{\"top_thread_ids\": [thread_id1, thread_id2, ...], \"reason\": \"string\"}\n示例：\n{\"top_thread_ids\": [123, 456, 789], \"reason\": \"根據問題語義和帖子熱度排序\"}"
+    "instructions": "任務：\n1. 根據問題語義，選擇與問題最相關的帖子。\n2. 排序依據：\n   - 標題與問題的語義相關性。\n   - 回覆數（no_of_reply）和點讚數（like_count）。\n3. 返回最多10個帖子ID（數字陣列）。\n4. 提供排序原因。\n輸出格式：\n{\n  \"top_thread_ids\": [thread_id1, thread_id2, ...],\n  \"reason\": \"排序原因\"\n}"
   },
   "response_components": {
     "summarize_posts": {
-      "instructions": "分析帖子內容，聚焦主題 '{theme}'，引用高關注回覆，生成總結：\n- 主題：{theme}\n- 內容：[...]\n- 引用：[...]（點讚數最高回覆，格式：『{msg}』（點讚數：{like_count}，時間：{reply_time}））\n字數：400-600字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"summarize_posts\", \"result\": {\"theme\": \"{theme}\", \"content\": \"string\", \"quotes\": [{\"msg\": \"string\", \"like_count\": integer, \"reply_time\": \"string\"}]}}"
+      "instructions": "分析帖子內容，聚焦主題 '{theme}'，引用高關注回覆，生成總結：\n- 主題：{theme}\n- 內容：[...]\n- 引用：[...]（點讚數最高回覆，格式：『{msg}』（點讚數：{like_count}，時間：{reply_time}））\n字數：400-600字。\n輸出 JSON：{\"type\": \"summarize_posts\", \"result\": {\"theme\": \"{theme}\", \"content\": \"string\", \"quotes\": [{\"msg\": \"string\", \"like_count\": integer, \"reply_time\": \"string\"}]}}"
     },
     "list_titles": {
-      "instructions": "列出最多 {limit} 個帖子標題，格式：\n- 帖子 ID: {thread_id} 標題: {title}\n不包含總結或其他資訊。\n輸出 JSON：{\"type\": \"list_titles\", \"result\": [{\"thread_id\": \"string\", \"title\": \"string\"}]}"
+      "instructions": "列出最多 {limit} 個帖子標題，格式：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含總結或其他資訊。\n輸出 JSON：{\"type\": \"list_titles\", \"result\": [{\"thread_id\": \"string\", \"title\": \"string\"}]}"
     },
     "analyze_sentiment": {
-      "instructions": "分析帖子情緒（正面、負面、中立），量化比例（例如：正面30%、負面50%、中立20%），說明原因。字數：300-500字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"analyze_sentiment\", \"result\": {\"positive\": float, \"negative\": float, \"neutral\": float, \"reason\": \"string\"}}"
+      "instructions": "分析帖子情緒（正面、負面、中立），量化比例（例如：正面30%、負面50%、中立20%），說明原因。字數：300-500字。\n輸出 JSON：{\"type\": \"analyze_sentiment\", \"result\": {\"positive\": float, \"negative\": float, \"neutral\": float, \"reason\": \"string\"}}"
     },
     "fetch_dates": {
-      "instructions": "提取帖子日期資料，按時間排序（新到舊），格式：\n- 標題：{title}\n- 最後回覆時間：{last_reply_time}\n- 熱門回覆時間：{reply_time}（若有）。字數：200-400字。\n輸出 JSON：{\"type\": \"fetch_dates\", \"result\": [{\"title\": \"string\", \"last_reply_time\": \"string\", \"top_reply_time\": \"string\"}]}"
+      "instructions": "提取帖子日期資料，按時間排序（新到舊），格式：\n- 標題：[title]\n- 最後回覆時間：[last_reply_time]\n- 熱門回覆時間：[reply_time]（若有）。字數：200-400字。\n輸出 JSON：{\"type\": \"fetch_dates\", \"result\": [{\"title\": \"string\", \"last_reply_time\": \"string\", \"top_reply_time\": \"string\"}]}"
     },
     "extract_keywords": {
-      "instructions": "從帖子標題和回覆中提取前10個高頻或高關注關鍵詞，包含詞頻和代表性上下文。字數：200-300字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"extract_keywords\", \"result\": [{\"keyword\": \"string\", \"frequency\": integer, \"context\": \"string\"}]}"
+      "instructions": "從帖子標題和回覆中提取前10個高頻或高關注關鍵詞，包含詞頻和代表性上下文。字數：200-300字。\n輸出 JSON：{\"type\": \"extract_keywords\", \"result\": [{\"keyword\": \"string\", \"frequency\": integer, \"context\": \"string\"}]}"
     },
     "analyze_user_behavior": {
-      "instructions": "分析用戶行為，統計發帖/回覆頻率、主題偏好和情緒傾向（正面、負面、中立）。字數：300-500字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"analyze_user_behavior\", \"result\": {\"frequency\": integer, \"themes\": [\"string\"], \"sentiment\": {\"positive\": float, \"negative\": float, \"neutral\": float}, \"summary\": \"string\"}}"
+      "instructions": "分析用戶行為，統計發帖/回覆頻率、主題偏好和情緒傾向（正面、負面、中立）。字數：300-500字。\n輸出 JSON：{\"type\": \"analyze_user_behavior\", \"result\": {\"frequency\": integer, \"themes\": [\"string\"], \"sentiment\": {\"positive\": float, \"negative\": float, \"neutral\": float}, \"summary\": \"string\"}}"
     },
     "track_trends": {
-      "instructions": "追踪主題 '{theme}' 在時間範圍 {parameters.time_range} 內的討論熱度（帖子數、回覆數、點讚數），生成趨勢報告。字數：300-500字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"track_trends\", \"result\": {\"theme\": \"{theme}\", \"time_range\": \"string\", \"trend\": [{\"period\": \"string\", \"post_count\": integer, \"reply_count\": integer, \"like_count\": integer}], \"summary\": \"string\"}}"
+      "instructions": "追踪主題 '{theme}' 在時間範圍 {parameters.time_range} 內的討論熱度（帖子數、回覆數、點讚數），生成趨勢報告。字數：300-500字。\n輸出 JSON：{\"type\": \"track_trends\", \"result\": {\"theme\": \"{theme}\", \"time_range\": \"string\", \"trend\": [{\"period\": \"string\", \"post_count\": integer, \"reply_count\": integer, \"like_count\": integer}], \"summary\": \"string\"}}"
     },
     "contrast_analysis": {
-      "instructions": "比較多個版塊（{parameters.category_ids}）或主題（{theme}）的討論特徵（關鍵詞、情緒、熱度）。字數：400-600字。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"contrast_analysis\", \"result\": [{\"category_id\": \"string\", \"theme\": \"string\", \"keywords\": [\"string\"], \"sentiment\": {\"positive\": float, \"negative\": float, \"neutral\": float}, \"heat\": integer}]}"
+      "instructions": "比較多個版塊（{parameters.category_ids}）或主題（{theme}）的討論特徵（關鍵詞、情緒、熱度）。字數：400-600字。\n輸出 JSON：{\"type\": \"contrast_analysis\", \"result\": [{\"category_id\": \"string\", \"theme\": \"string\", \"keywords\": [\"string\"], \"sentiment\": {\"positive\": float, \"negative\": float, \"neutral\": float}, \"heat\": integer}]}"
     },
     "recommend_posts": {
       "instructions": "根據問題語義，推薦最多 {limit} 個高熱度相關帖子，包含標題和簡短描述。字數：200-400字。\n輸出 JSON：{\"type\": \"recommend_posts\", \"result\": [{\"thread_id\": \"string\", \"title\": \"string\", \"description\": \"string\"}]}"
     },
     "general": {
-      "instructions": "根據問題生成通用回應，若無帖子數據，推測熱門話題，字數：200-400字。若問題模糊，提示更具體查詢。\n僅處理包含有效 'msg' 字段（非空字符串）的回應，忽略無效數據。\n輸出 JSON：{\"type\": \"general\", \"result\": {\"summary\": \"string\", \"suggestion\": \"string\"}}"
+      "instructions": "根據問題生成通用回應，若無帖子數據，推測熱門話題，字數：200-400字。若問題模糊，提示更具體查詢。\n輸出 JSON：{\"type\": \"general\", \"result\": {\"summary\": \"string\", \"suggestion\": \"string\"}}"
     }
   }
 }
