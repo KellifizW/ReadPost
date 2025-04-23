@@ -9,6 +9,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
 - 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
 - 優化 prioritize_threads_with_grok 的 JSON 解析，處理不完整回應並減少警告。
+- 臨時修補 build_response，處理 prompts.json 中無效鍵格式化錯誤。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -157,11 +158,13 @@ class PromptBuilder:
             component = self.config["response_components"].get(intent_type, self.config["response_components"]["general"])
             params = intent.get("parameters", {})
             try:
-                instruction = component["instructions"].format(
-                    theme=intent.get("theme", "general"),
-                    limit=intent.get("limit", 10),
-                    parameters=json.dumps(params, ensure_ascii=False)
-                )
+                # 僅使用已定義的鍵進行格式化
+                format_params = {
+                    "theme": intent.get("theme", "general"),
+                    "limit": intent.get("limit", 10),
+                    "parameters": json.dumps(params, ensure_ascii=False)
+                }
+                instruction = component["instructions"].format(**format_params)
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
             except KeyError as e:
                 logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
@@ -324,9 +327,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,  # 增加 max_tokens 以減少截斷
-        "temperature": 0.7,
-        "stop": ["}"]  # 確保回應在 JSON 閉合後停止
+        "max_tokens": 600,  # 增加以容納長 reason
+        "temperature": 0.],\n        "stop": ["}"]  # 確保 JSON 閉合
     }
     
     max_retries = 3
@@ -356,18 +358,20 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
-                        # 嘗試修復不完整的 JSON
+                        # 嘗試修復不完整 JSON
                         if "top_thread_ids" in content:
                             try:
-                                # 截取 top_thread_ids 和 reason（若存在）
+                                # 提取 top_thread_ids
                                 match = re.search(r'"top_thread_ids":\s*\[([\d,\s]*)\]', content)
                                 thread_ids = []
                                 if match:
                                     thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                                reason = re.search(r'"reason":\s*"([^"]*)"', content)
+                                # 提取 reason（若存在）
+                                reason_match = re.search(r'"reason":\s*"([^"]*)"', content)
+                                reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
                                 result = {
                                     "top_thread_ids": thread_ids,
-                                    "reason": reason.group(1) if reason else "API 回應不完整，提取部分數據"
+                                    "reason": reason
                                 }
                                 logger.info(f"Repaired partial JSON: {result}")
                             except Exception as repair_e:
