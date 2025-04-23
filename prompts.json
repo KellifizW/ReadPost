@@ -1,5 +1,5 @@
 {
-  "version": "f726b665_extended_v2",
+  "version": "f726b665_extended",
   "system": {
     "analyze": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
     "response": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答。根據問題語義和提供數據直接回應，無需提及身份或語氣。",
@@ -19,7 +19,7 @@
   },
   "response_components": {
     "summarize_posts": {
-      "instructions": "分析帖子內容，聚焦主題 '{theme}'，引用高關注回覆，生成總結：\n- 主題：{theme}\n- 內容：總結帖子內容，聚焦主題，400-600字\n- 引用：選擇點讚數最高的回覆，格式為文本引用\n輸出 JSON：{\"type\": \"summarize_posts\", \"result\": {\"theme\": \"{theme}\", \"content\": \"string\", \"quotes\": [{\"msg\": \"string\", \"like_count\": integer, \"reply_time\": \"string\"}]}}"
+      "instructions": "分析帖子內容，聚焦主題 '{theme}'，引用高關注回覆，生成總結：\n- 主題：{theme}\n- 內容：[...]\n- 引用：[...]（點讚數最高回覆，格式：『{msg}』（點讚數：{like_count}，時間：{reply_time}））\n字數：400-600字。\n輸出 JSON：{\"type\": \"summarize_posts\", \"result\": {\"theme\": \"{theme}\", \"content\": \"string\", \"quotes\": [{\"msg\": \"string\", \"like_count\": integer, \"reply_time\": \"string\"}]}}"
     },
     "list_titles": {
       "instructions": "列出最多 {limit} 個帖子標題，格式：\n- 帖子 ID: [thread_id] 標題: [title]\n不包含總結或其他資訊。\n輸出 JSON：{\"type\": \"list_titles\", \"result\": [{\"thread_id\": \"string\", \"title\": \"string\"}]}"
