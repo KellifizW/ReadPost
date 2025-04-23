@@ -1,21 +1,15 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 改進：
-- 支持多意圖查詢，動態分解子意圖（list_titles、summarize_posts、extract_keywords 等）。
-- 模組化提示詞，減少 prompts.json 依賴，支援動態參數。
+- 支持多意圖查詢，動態分解子意圖（新增 extract_keywords、analyze_user_behavior、track_trends、contrast_analysis、recommend_posts）。
+- 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
-- 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，移除截斷風險。
-- 使用流式 API 確保完整數據接收。
-- 減小 max_tokens，簡化提示詞，降低響應長度。
-- 添加詳細調試日誌，記錄響應塊、JSON 驗證和 API 元數據。
-- 修正 build_response 的 KeyError，確保指令格式化正確。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
 - process_user_question：處理用戶問題，抓取帖子。
 - clean_html：清理 HTML 標籤。
-- clean_text：清理文本中的無效字符。
 """
 
 import aiohttp
@@ -34,11 +28,11 @@ from collections import Counter
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 設置香港時區
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_KONG")
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
@@ -50,32 +44,20 @@ class HongKongFormatter(logging.Formatter):
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
 stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.DEBUG)
+stream_handler.setLevel(logging.INFO)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 180
+API_TIMEOUT = 90
 
 class AppError(Exception):
     def __init__(self, message, user_message=None):
         self.message = message
         self.user_message = user_message or message
         super().__init__(self.message)
-
-def clean_text(text):
-    """清理文本，移除無效字符並限制長度"""
-    if not isinstance(text, str):
-        text = str(text)
-    try:
-        text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', text)
-        text = text.replace('"', '\\"').replace("'", "\\'")
-        return text[:200]
-    except Exception as e:
-        logger.warning(f"Text cleaning failed: {str(e)}")
-        return text
 
 class PromptBuilder:
     def __init__(self, config_path=None):
@@ -123,7 +105,6 @@ class PromptBuilder:
         return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
 
     def build_response(self, intents, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
-        logger.info(f"Building response prompt with intents: {intents}")
         system = self.config["system"]["response"]
         context = self.config["analyze"]["context"].format(
             query=query,
@@ -137,59 +118,17 @@ class PromptBuilder:
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
         )
         instructions = []
-        valid_intents = []
-        
         for intent in intents:
-            if isinstance(intent, str):
-                logger.warning(f"String intent detected: {intent}, converting to dict")
-                intent = {
-                    "type": intent,
-                    "theme": "general",
-                    "weight": 1.0,
-                    "parameters": {}
-                }
-            if not isinstance(intent, dict) or 'type' not in intent:
-                logger.warning(f"Invalid intent format: {intent}, skipping")
-                continue
-            intent_type = intent.get("type", "general")
-            valid_intents.append(intent)
-            logger.info(f"Processing intent: {intent_type}")
-            component = self.config["response_components"].get(intent_type, self.config["response_components"]["general"])
+            component = self.config["response_components"].get(intent["type"], self.config["response_components"]["general"])
+            # 動態格式化參數
             params = intent.get("parameters", {})
-            try:
-                format_params = {
-                    "theme": intent.get("theme", "general"),
-                    "limit": intent.get("limit", 10),
-                    "parameters": json.dumps(params, ensure_ascii=False),
-                    "msg": "{msg}",
-                    "like_count": "{like_count}",
-                    "reply_time": "{reply_time}",
-                    "thread_id": "{thread_id}",
-                    "title": "{title}",
-                    "description": "{description}",
-                    "type": intent_type
-                }
-                logger.debug(f"Format params for intent {intent_type}: {format_params}")
-                instruction_template = component["instructions"]
-                logger.debug(f"Instruction template for {intent_type}: {instruction_template}")
-                instruction = instruction_template.format(**format_params)
-                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
-                logger.debug(f"Generated instruction for {intent_type}: {instruction}")
-            except KeyError as e:
-                logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
-                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少鍵 {e}，使用通用指令")
-        
-        if not instructions:
-            logger.warning("No valid instructions generated, using default")
-            valid_intents.append({"type": "general", "theme": "general", "weight": 1.0, "parameters": {}})
-            instructions.append("子任務 general（權重 1.0）：\n生成通用回應，總結查詢相關內容")
-        
-        output_format = "\n".join([
-            f"- 子任務 {i['type']}: JSON 格式，參考 {self.config['response_components'].get(i['type'], self.config['response_components']['general'])['instructions'].split('輸出 JSON：')[1]}"
-            for i in valid_intents
-        ])
-        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in valid_intents])}]\n{output_format}"
-        logger.debug(f"Final prompt: {prompt[:500]}...")
+            instruction = component["instructions"].format(
+                theme=intent.get("theme", "general"),
+                limit=intent.get("limit", 10),
+                parameters=json.dumps(params, ensure_ascii=False)
+            )
+            instructions.append(f"子任務 {intent['type']}（權重 {intent['weight']}）：\n{instruction}")
+        prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in intents])}]"
         return prompt
 
     def get_system_prompt(self, mode):
@@ -236,68 +175,36 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "model": "grok-3-beta",
         "messages": messages,
         "max_tokens": 400,
-        "temperature": 0.7,
-        "stream": True
+        "temperature": 0.7
     }
     
     logger.info(f"Starting intent analysis for query: {user_query}")
     
-    max_retries = 4
+    max_retries = 3
     for attempt in range(max_retries):
         try:
-            response_content = ""
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status != 200:
                         logger.warning(f"Intent analysis failed: status={response.status}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2 + attempt)
+                            await asyncio.sleep(2)
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法連接到分析服務，請稍後重試。")
                     
-                    async for line in response.content:
-                        if line and not line.isspace():
-                            line_str = line.decode('utf-8').strip()
-                            if line_str == "data: [DONE]":
-                                break
-                            if line_str.startswith("data: "):
-                                try:
-                                    chunk = json.loads(line_str[6:])
-                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        response_content += content
-                                        logger.debug(f"Analyze stream chunk: {content[:100]}...")
-                                except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in analyze stream chunk: {str(e)}")
-                                    continue
+                    data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"Intent analysis failed: missing choices, attempt={attempt + 1}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        raise AppError("Invalid API response: missing choices", user_message="分析服務返回無效數據，請稍後重試。")
                     
-                    logger.debug(f"Analyze response content (length: {len(response_content)}): {response_content[:500]}...")
-                    try:
-                        result = json.loads(response_content)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in analyze response: {str(e)}, content: {response_content[:500]}...")
-                        result = {"intents": []}
+                    result = json.loads(data["choices"][0]["message"]["content"])
                     
-                    if "intents" not in result or not isinstance(result["intents"], list):
-                        logger.warning(f"Invalid intents format: {result.get('intents')}")
+                    # 確保 intents 是列表
+                    if "intents" not in result:
                         result["intents"] = [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
-                    
-                    valid_intents = []
-                    for intent in result["intents"]:
-                        if isinstance(intent, str):
-                            logger.warning(f"String intent detected: {intent}, converting to dict")
-                            valid_intents.append({
-                                "type": intent,
-                                "theme": "general",
-                                "weight": 1.0,
-                                "parameters": {}
-                            })
-                        elif isinstance(intent, dict) and "type" in intent:
-                            valid_intents.append(intent)
-                        else:
-                            logger.warning(f"Invalid intent: {intent}, skipping")
-                    result["intents"] = valid_intents or [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
-                    
                     result.setdefault("theme_keywords", [])
                     result.setdefault("post_limit", 10)
                     result.setdefault("reply_limit", 50)
@@ -307,10 +214,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     result.setdefault("reason", "Default analysis")
                     logger.info(f"Intent analysis completed: intents={[i['type'] for i in result['intents']]}")
                     return result
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
             logger.warning(f"Intent analysis error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 + attempt)
+                await asyncio.sleep(2)
                 continue
             raise AppError(f"Analysis failed after {max_retries} attempts: {str(e)}", user_message="分析服務暫時不可用，請稍後重試。")
 
@@ -320,32 +227,20 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     except KeyError as e:
         raise AppError(f"Grok 3 API key missing: {str(e)}", user_message="缺少 API 密鑰，請聯繫支持。")
 
-    cleaned_threads = [
-        {
-            "thread_id": t["thread_id"],
-            "title": clean_text(t["title"]),
-            "no_of_reply": t.get("no_of_reply", 0),
-            "like_count": t.get("like_count", 0)
-        }
-        for t in threads[:50]
-    ]
-    
     prompt_builder = PromptBuilder()
     prompt = prompt_builder.build_prioritize(
         query=user_query,
         cat_name=cat_name,
         cat_id=cat_id,
-        threads=cleaned_threads
+        threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
     )
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1000,  # 增加以容納完整回應
-        "temperature": 0.3,  # 降低變異
-        "stop": ["}"],  # 確保 JSON 閉合
-        "stream": True  # 保持流式傳輸
+        "max_tokens": 300,
+        "temperature": 0.7
     }
     
     max_retries = 3
@@ -360,96 +255,53 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法完成帖子排序，請稍後重試。")
                     
-                    logger.debug(f"Prioritize API response status: {response.status}, headers: {response.headers}")
-                    content = ""
-                    chunk_count = 0
-                    async for line in response.content:
-                        if line and not line.isspace():
-                            line_str = line.decode('utf-8').strip()
-                            if line_str == "data: [DONE]":
-                                break
-                            if line_str.startswith("data: "):
-                                try:
-                                    chunk = json.loads(line_str[6:])
-                                    chunk_content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if chunk_content:
-                                        content += chunk_content
-                                        chunk_count += 1
-                                        logger.debug(f"Prioritize stream chunk {chunk_count} (length: {len(chunk_content)}): {chunk_content}")
-                                except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}, line: {line_str}")
-                                    continue
+                    content = await response.text()
+                    logger.debug(f"Raw prioritize response: {content}")
                     
-                    logger.debug(f"Prioritize response content (length: {len(content)}, chunks: {chunk_count}): {content}")
-                    logger.debug(f"Response hex: {content.encode('utf-8').hex()}")
-                    
+                    # 清理和修復 JSON
+                    content = content.strip()
+                    if content and not content.endswith('}'):
+                        content += '}'
                     try:
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid prioritize response: {str(e)}, content (length: {len(content)}): {content}")
-                        logger.debug(f"Error context (char {e.pos}): {content[max(0, e.pos-20):e.pos+20]}")
-                        # 嘗試修復不完整 JSON
-                        if "top_thread_ids" in content:
+                        logger.warning(f"JSON parse error: {str(e)}, content: {content}")
+                        # 嘗試提取部分 JSON
+                        match = re.search(r'\{"top_thread_ids":\s*\[[\d,\s]*\](?:,\s*"reason":\s*".*?")?\s*(?:\})?', content)
+                        if match:
+                            partial_content = match.group(0)
+                            if not partial_content.endswith('}'):
+                                partial_content += '}'
                             try:
-                                # 提取 top_thread_ids
-                                match = re.search(r'"top_thread_ids":\s*\[([\d,\s]*)\]', content)
-                                thread_ids = []
-                                if match:
-                                    thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                                # 提取 reason
-                                reason_match = re.search(r'"reason":\s*"([^"]*)"', content)
-                                reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
-                                result = {
-                                    "top_thread_ids": thread_ids,
-                                    "reason": reason
-                                }
-                                logger.info(f"Repaired partial JSON: {result}")
-                            except Exception as repair_e:
-                                logger.warning(f"JSON repair failed: {str(repair_e)}, attempt={attempt + 1}")
-                                if attempt < max_retries - 1:
-                                    await asyncio.sleep(2)
-                                    continue
-                                # 回退到本地排序
+                                result = json.loads(partial_content)
+                                result.setdefault("reason", "Partial JSON extracted")
+                            except json.JSONDecodeError:
+                                logger.warning(f"Failed to parse partial JSON: {partial_content}")
+                                # 回退到簡單排序
                                 sorted_threads = sorted(
-                                    cleaned_threads,
+                                    threads,
                                     key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                                     reverse=True
                                 )
                                 result = {
                                     "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                    "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                                    "reason": "Fallback sorting due to invalid JSON"
                                 }
                         else:
-                            logger.warning(f"No top_thread_ids found in content, attempt={attempt + 1}")
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(2)
-                                continue
-                            # 回退到本地排序
+                            # 無有效 JSON，回退
                             sorted_threads = sorted(
-                                cleaned_threads,
+                                threads,
                                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                                 reverse=True
                             )
                             result = {
                                 "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                                "reason": "Fallback sorting due to invalid JSON"
                             }
                     
                     if not isinstance(result, dict) or "top_thread_ids" not in result:
-                        logger.warning(f"Invalid prioritization result format: {content}, attempt={attempt + 1}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
-                            continue
-                        sorted_threads = sorted(
-                            cleaned_threads,
-                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                            reverse=True
-                        )
-                        result = {
-                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": f"API 回應格式錯誤，回退到本地排序（基於回覆數和點讚數）"
-                        }
-                    
+                        logger.warning(f"Invalid prioritization result format: {content}")
+                        raise AppError("Invalid result format: missing required keys", user_message="排序結果格式錯誤，請稍後重試。")
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
         except Exception as e:
@@ -457,63 +309,11 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            sorted_threads = sorted(
-                cleaned_threads,
-                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                reverse=True
-            )
-            result = {
-                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                "reason": f"API 失敗（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
-            }
-            logger.info(f"Thread prioritization failed, using fallback: {result}")
-            return result
+            raise AppError(f"Prioritization failed after {max_retries} attempts: {str(e)}", user_message="排序服務暫時不可用，請稍後重試。")
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
-    logger.info(f"Starting stream_grok3_response for query: {user_query}, processing type: {type(processing)}")
-    
-    if not isinstance(processing, dict):
-        logger.warning(f"Invalid processing parameter: expected dict, got {type(processing)}, content: {processing}")
-        try:
-            if isinstance(processing, str):
-                processing = json.loads(processing)
-            else:
-                raise ValueError("Cannot parse processing")
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to parse processing as JSON, using default intents")
-            processing = {
-                "intents": [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}],
-                "post_limit": 10,
-                "reply_limit": 50,
-                "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}
-            }
-    
-    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
-    if not isinstance(intents, list):
-        logger.warning(f"Invalid intents format: expected list, got {type(intents)}, content: {intents}")
-        intents = [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
-    valid_intents = []
-    for intent in intents:
-        if isinstance(intent, str):
-            logger.warning(f"String intent detected: {intent}, converting to dict")
-            valid_intents.append({
-                "type": intent,
-                "theme": "general",
-                "weight": 1.0,
-                "parameters": {}
-            })
-        elif isinstance(intent, dict) and "type" in intent:
-            valid_intents.append(intent)
-        else:
-            logger.warning(f"Invalid intent: {intent}, skipping")
-    if not valid_intents:
-        logger.warning("No valid intents found, using default")
-        valid_intents = [{"type": "recommend_posts" if "推薦" in user_query else "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
-    intents = valid_intents
-    logger.info(f"Validated intents: {[i['type'] for i in intents]}")
-    
     conversation_context = conversation_context or []
-    filters = filters or processing.get("filters", {"min_replies": 20, "min_likes": 5})
+    filters = filters or {"min_replies": 20, "min_likes": 5}
     prompt_builder = PromptBuilder()
     
     try:
@@ -523,8 +323,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
+    # 解析 intents
+    intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
+    
+    # 簡化 metadata 並限制回覆數
     max_replies_per_thread = 20
-    simplified_metadata = [{"thread_id": item["thread_id"], "title": clean_text(item["title"])} for item in metadata]
+    simplified_metadata = [{"thread_id": item["thread_id"], "title": item["title"]} for item in metadata]
     filtered_thread_data = {}
     for tid, data in thread_data.items():
         replies = sorted(
@@ -534,7 +338,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         )[:max_replies_per_thread]
         filtered_thread_data[tid] = {
             "thread_id": data["thread_id"],
-            "title": clean_text(data["title"]),
+            "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
             "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
@@ -543,6 +347,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "fetched_pages": data.get("fetched_pages", [])
         }
     
+    # 構建提示詞
     prompt = prompt_builder.build_response(
         intents=intents,
         query=user_query,
@@ -571,7 +376,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     response_content = ""
     response_json = []
-    chunk_count = 0
     async with aiohttp.ClientSession() as session:
         for attempt in range(3):
             try:
@@ -594,25 +398,24 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:
                                         response_content += content
-                                        chunk_count += 1
-                                        logger.debug(f"Response stream chunk {chunk_count} (length: {len(content)}): {content[:100]}...")
                                         yield content
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in response stream chunk: {str(e)}")
+                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
                                     continue
                     
-                    logger.debug(f"Response content (length: {len(response_content)}, chunks: {chunk_count}): {response_content[:500]}...")
+                    # 嘗試解析 JSON 回應
                     try:
                         response_json = json.loads(response_content)
                         if not isinstance(response_json, list):
                             response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
                     except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse response as JSON: {response_content[:500]}...")
+                        logger.warning(f"Failed to parse response as JSON: {response_content}")
                         response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
                     
+                    # 後處理驗證
                     missing_tasks = []
                     for intent in intents:
-                        intent_type = intent.get("type", "general")
+                        intent_type = intent["type"]
                         if not any(r["type"] == intent_type for r in response_json):
                             missing_tasks.append((intent_type, intent.get("limit", 10), intent.get("parameters", {})))
                     
@@ -643,6 +446,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 }
                                 yield f"\n\n主題：{fallback['result']['theme']}\n內容：{fallback['result']['content']}"
                             elif task == "extract_keywords":
+                                # 簡單關鍵詞提取回退
                                 words = " ".join(m["title"] for m in simplified_metadata).split()
                                 word_counts = Counter(words)
                                 top_words = word_counts.most_common(3)
@@ -712,7 +516,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             if fallback:
                                 response_json.append(fallback)
                     
-                    logger.info(f"Response generation completed: length={len(response_content)}, chunks={chunk_count}")
+                    logger.info(f"Response generation completed: length={len(response_content)}")
                     return
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(f"Response generation error: {str(e)}, attempt={attempt + 1}")
@@ -809,7 +613,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 st.session_state.thread_cache[thread_id] = {
                     "data": {
                         "thread_id": thread_id,
-                        "title": clean_text(item["title"]),
+                        "title": item["title"],
                         "no_of_reply": item.get("no_of_reply", 0),
                         "last_reply_time": item["last_reply_time"],
                         "like_count": item.get("like_count", 0),
@@ -888,7 +692,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             if content_result.get("replies"):
                 thread_info = {
                     "thread_id": thread_id,
-                    "title": clean_text(content_result.get("title", item["title"])),
+                    "title": content_result.get("title", item["title"]),
                     "no_of_reply": item.get("no_of_reply", content_result.get("total_replies", 0)),
                     "last_reply_time": item["last_reply_time"],
                     "like_count": item.get("like_count", 0),
