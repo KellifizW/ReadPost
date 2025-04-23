@@ -4,7 +4,6 @@ LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 主要函數：
 - get_lihkg_topic_list：抓取指定分類的帖子標題。
 - get_lihkg_thread_content：抓取指定帖子的回覆內容。
-- get_lihkg_thread_content_batch：批量抓取多個帖子的回覆內容。
 - get_category_name：返回分類名稱。
 """
 
@@ -292,35 +291,4 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
         "replies": replies, "title": thread_title, "total_replies": total_replies,
         "total_pages": total_pages, "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
         "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
-    }
-
-async def get_lihkg_thread_content_batch(thread_ids, cat_id, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=600):
-    """
-    批量抓取多個帖子的回覆內容。
-    """
-    tasks = [
-        get_lihkg_thread_content(
-            thread_id=thread_id,
-            cat_id=cat_id,
-            request_counter=request_counter,
-            last_reset=last_reset,
-            rate_limit_until=rate_limit_until,
-            max_replies=max_replies
-        ) for thread_id in thread_ids
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    valid_results = [result for result in results if not isinstance(result, Exception)]
-    request_counter = max([result.get("request_counter", request_counter) for result in valid_results], default=request_counter)
-    last_reset = max([result.get("last_reset", last_reset) for result in valid_results], default=last_reset)
-    rate_limit_until = max([result.get("rate_limit_until", rate_limit_until) for result in valid_results], default=rate_limit_until)
-    rate_limit_info = []
-    for result in valid_results:
-        rate_limit_info.extend(result.get("rate_limit_info", []))
-    
-    return {
-        "results": valid_results,
-        "request_counter": request_counter,
-        "last_reset": last_reset,
-        "rate_limit_until": rate_limit_until,
-        "rate_limit_info": rate_limit_info
     }
