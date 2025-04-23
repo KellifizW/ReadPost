@@ -5,11 +5,12 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
+- 增強 clean_html 處理圖片網址和無效內容，過濾無效回應。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
 - process_user_question：處理用戶問題，抓取帖子。
-- clean_html：清理 HTML 標籤。
+- clean_html：清理 HTML 標籤，過濾圖片網址和無效內容。
 """
 
 import aiohttp
@@ -138,13 +139,24 @@ def clean_html(text):
     if not isinstance(text, str):
         text = str(text)
     try:
+        # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
+        # 移除多餘空白
         text = re.sub(r'\s+', ' ', text).strip()
+        # 檢查是否為空或僅包含網址
+        if not text:
+            logger.debug(f"Cleaned text is empty: {text}")
+            return None
+        # 檢查是否為純網址（http(s):// 開頭）
+        url_pattern = r'^(https?://[^\s]+)$'
+        if re.match(url_pattern, text):
+            logger.debug(f"Cleaned text is a URL: {text}")
+            return None
         return text
     except Exception as e:
         logger.error(f"HTML cleaning failed: {str(e)}")
-        return text
+        return None
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     conversation_context = conversation_context or []
@@ -328,7 +340,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 解析 intents
+    # 解析 intents13
     intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
     
     # 簡化 metadata 並限制回覆數
@@ -336,14 +348,20 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     simplified_metadata = [{"thread_id": item["thread_id"], "title": item["title"]} for item in metadata]
     filtered_thread_data = {}
     for tid, data in thread_data.items():
-        # 過濾有效回應：msg 存在且為非空字符串
-        valid_replies = [
-            r for r in data.get("replies", [])
-            if r.get("msg") and isinstance(r.get("msg"), str) and r.get("msg").strip()
-        ]
-        invalid_replies = len(data.get("replies", [])) - len(valid_replies)
-        if invalid_replies > 0:
-            logger.warning(f"Filtered {invalid_replies} invalid replies for thread_id={tid} (missing or empty msg)")
+        # 過濾有效回應：msg 存在且為有效文本
+        valid_replies = []
+        invalid_replies = []
+        for r in data.get("replies", []):
+            cleaned_msg = clean_html(r.get("msg", ""))
+            if cleaned_msg:
+                r["msg"] = cleaned_msg  # 更新清理後的 msg
+                valid_replies.append(r)
+            else:
+                invalid_replies.append(r)
+        
+        if invalid_replies:
+            logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={tid} (empty or URL-only msg)")
+            logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
         
         replies = sorted(
             valid_replies,
@@ -704,6 +722,25 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             rate_limit_info.extend(content_result.get("rate_limit_info", []))
             
             if content_result.get("replies"):
+                valid_replies = []
+                invalid_replies = []
+                for reply in content_result["replies"]:
+                    cleaned_msg = clean_html(reply.get("msg", ""))
+                    if cleaned_msg:
+                        valid_replies.append({
+                            "post_id": reply.get("post_id"),
+                            "msg": cleaned_msg,
+                            "like_count": reply.get("like_count", 0),
+                            "dislike_count": reply.get("dislike_count", 0),
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                        })
+                    else:
+                        invalid_replies.append(reply)
+                
+                if invalid_replies:
+                    logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={thread_id} (empty or URL-only msg)")
+                    logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
+                
                 thread_info = {
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
@@ -711,15 +748,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                     "last_reply_time": item["last_reply_time"],
                     "like_count": item.get("like_count", 0),
                     "dislike_count": item.get("dislike_count", 0),
-                    "replies": [
-                        {
-                            "post_id": reply.get("post_id"),
-                            "msg": clean_html(reply.get("msg", "")),
-                            "like_count": reply.get("like_count", 0),
-                            "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                        } for reply in content_result["replies"] if reply.get("msg")
-                    ],
+                    "replies": valid_replies,
                     "fetched_pages": content_result.get("fetched_pages", [])
                 }
                 thread_data.append(thread_info)
