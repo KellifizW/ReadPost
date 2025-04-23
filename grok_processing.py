@@ -7,6 +7,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 增強錯誤處理，支持回退回應。
 - 增強 clean_html 處理圖片網址和無效內容，過濾無效回應。
 - 強化 stream_grok3_response 和 process_user_question 的數據驗證，防止 KeyError: 'msg'。
+- 修正 process_user_question 中的拼寫錯誤（progress_quote -> progress_callback）。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -695,7 +696,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
         else:
             if not top_thread_ids and filtered_items:
-                if progress_quote:
+                if progress_callback:
                     progress_callback("正在重新分析帖子選擇", 0.4)
                 prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
                 top_thread_ids = prioritization.get("top_thread_ids", [])
