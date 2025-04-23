@@ -328,7 +328,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 600,  # 增加以容納長 reason
-        "temperature": 0.7,\n        "stop": ["}"]  # 確保 JSON 閉合
+        "temperature": 0.7,
+        "stop": ["}"]  # 確保 JSON 閉合
     }
     
     max_retries = 3
