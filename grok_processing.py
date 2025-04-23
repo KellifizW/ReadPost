@@ -5,15 +5,11 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
-- 增強 clean_html 處理圖片網址和無效內容，過濾無效回應。
-- 強化 stream_grok3_response 和 process_user_question 的數據驗證，防止 KeyError: 'msg'。
-- 修正 process_user_question 中的拼寫錯誤（progress_quote -> progress_callback）。
-- 強化 msg 字段檢查，處理非字符串和嵌套結構，記錄詳細無效回應。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
 - process_user_question：處理用戶問題，抓取帖子。
-- clean_html：清理 HTML 標籤，過濾圖片網址和無效內容。
+- clean_html：清理 HTML 標籤。
 """
 
 import aiohttp
@@ -124,6 +120,7 @@ class PromptBuilder:
         instructions = []
         for intent in intents:
             component = self.config["response_components"].get(intent["type"], self.config["response_components"]["general"])
+            # 動態格式化參數
             params = intent.get("parameters", {})
             instruction = component["instructions"].format(
                 theme=intent.get("theme", "general"),
@@ -139,26 +136,15 @@ class PromptBuilder:
 
 def clean_html(text):
     if not isinstance(text, str):
-        text = str(text) if text is not None else ""
+        text = str(text)
     try:
-        # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
-        # 移除多餘空白
         text = re.sub(r'\s+', ' ', text).strip()
-        # 檢查是否為空或僅包含網址
-        if not text:
-            logger.debug(f"Cleaned text is empty: {text}")
-            return None
-        # 檢查是否為純網址（http(s):// 開頭）
-        url_pattern = r'^(https?://[^\s]+)$'
-        if re.match(url_pattern, text):
-            logger.debug(f"Cleaned text is a URL: {text}")
-            return None
         return text
     except Exception as e:
         logger.error(f"HTML cleaning failed: {str(e)}")
-        return None
+        return text
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     conversation_context = conversation_context or []
@@ -278,49 +264,10 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         raise AppError("Invalid API response: missing choices", user_message="排序服務返回無效數據，請稍後重試。")
                     
                     content = data["choices"][0]["message"]["content"]
-                    logger.debug(f"Raw prioritize content: {content}")
-                    
-                    # 清理 content（移除換行、縮進）
-                    content = content.strip()
-                    content = re.sub(r'\s+', ' ', content)
-                    
-                    # 嘗試解析 content 為 JSON
-                    try:
-                        result = json.loads(content)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"JSON parse error in content: {str(e)}, content: {content}")
-                        # 嘗試修復 JSON
-                        if content and not content.endswith('}'):
-                            content += '}'
-                        try:
-                            result = json.loads(content)
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to repair JSON: {content}")
-                            # 回退到簡單排序
-                            sorted_threads = sorted(
-                                threads,
-                                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                                reverse=True
-                            )
-                            result = {
-                                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                "reason": "Fallback sorting due to invalid JSON"
-                            }
-                    
-                    # 驗證結果格式
+                    result = json.loads(content)
                     if not isinstance(result, dict) or "top_thread_ids" not in result:
-                        logger.warning(f"Invalid prioritization result format: {result}")
-                        # 回退到簡單排序
-                        sorted_threads = sorted(
-                            threads,
-                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                            reverse=True
-                        )
-                        result = {
-                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": "Fallback sorting due to invalid format"
-                        }
-                    
+                        logger.warning(f"Invalid prioritization result format: {content}")
+                        raise AppError("Invalid result format: missing required keys", user_message="排序結果格式錯誤，請稍後重試。")
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
         except Exception as e:
@@ -349,44 +296,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_replies_per_thread = 20
     simplified_metadata = [{"thread_id": item["thread_id"], "title": item["title"]} for item in metadata]
     filtered_thread_data = {}
-    
     for tid, data in thread_data.items():
-        # 驗證 replies 結構
-        valid_replies = []
-        invalid_replies = []
-        for r in data.get("replies", []):
-            if not isinstance(r, dict):
-                logger.debug(f"Invalid reply structure for thread_id={tid}: {r}")
-                invalid_replies.append(r)
-                continue
-            msg = r.get("msg")
-            if msg is None or not isinstance(msg, str) or not msg.strip():
-                logger.debug(f"Invalid msg for thread_id={tid}: {msg}")
-                invalid_replies.append(r)
-                continue
-            cleaned_msg = clean_html(msg)
-            if cleaned_msg:
-                valid_replies.append({
-                    "post_id": r.get("post_id"),
-                    "msg": cleaned_msg,
-                    "like_count": r.get("like_count", 0),
-                    "dislike_count": r.get("dislike_count", 0),
-                    "reply_time": r.get("reply_time", "")
-                })
-            else:
-                logger.debug(f"Cleaned msg is invalid for thread_id={tid}: {msg}")
-                invalid_replies.append(r)
-        
-        if invalid_replies:
-            logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={tid} (missing, empty, or URL-only msg)")
-            logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
-        
-        if not valid_replies:
-            logger.warning(f"No valid replies for thread_id={tid}, skipping")
-            continue
-        
         replies = sorted(
-            valid_replies,
+            [r for r in data.get("replies", []) if r.get("msg")],
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
@@ -394,19 +306,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "thread_id": data["thread_id"],
             "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
-            "last_reply_time": data.get("last_reply_time", ""),
+            "last_reply_time": data.get("last_reply_time", 0),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
             "replies": replies,
             "fetched_pages": data.get("fetched_pages", [])
         }
-        logger.debug(f"Valid replies for thread_id={tid}: {len(replies)}")
-    
-    # 檢查是否有有效數據
-    if not filtered_thread_data:
-        logger.warning("No valid thread data after filtering, returning fallback response")
-        yield "錯誤：無有效帖子數據，請稍後重試或檢查查詢。"
-        return
     
     # 構建提示詞
     prompt = prompt_builder.build_response(
@@ -730,36 +635,8 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
             
             if cache_data and cache_data.get("replies"):
-                # 驗證緩存數據的回應結構
-                valid_cache_replies = []
-                invalid_cache_replies = []
-                for r in cache_data["replies"]:
-                    if not isinstance(r, dict) or "msg" not in r or not isinstance(r["msg"], str) or not r["msg"].strip():
-                        invalid_cache_replies.append(r)
-                        continue
-                    cleaned_msg = clean_html(r["msg"])
-                    if cleaned_msg:
-                        valid_cache_replies.append({
-                            "post_id": r.get("post_id"),
-                            "msg": cleaned_msg,
-                            "like_count": r.get("like_count", 0),
-                            "dislike_count": r.get("dislike_count", 0),
-                            "reply_time": r.get("reply_time", "")
-                        })
-                    else:
-                        invalid_cache_replies.append(r)
-                
-                if invalid_cache_replies:
-                    logger.warning(f"Filtered {len(invalid_cache_replies)} invalid cache replies for thread_id={thread_id}")
-                    logger.debug(f"Invalid cache replies sample: {invalid_cache_replies[:3]}")
-                
-                if valid_cache_replies:
-                    cache_data["replies"] = valid_cache_replies
-                    thread_data.append(cache_data)
-                    logger.debug(f"Using valid cache data for thread_id={thread_id}, replies={len(valid_cache_replies)}")
-                    continue
-                else:
-                    logger.warning(f"No valid cache replies for thread_id={thread_id}, fetching fresh data")
+                thread_data.append(cache_data)
+                continue
             
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
@@ -779,39 +656,6 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             rate_limit_info.extend(content_result.get("rate_limit_info", []))
             
             if content_result.get("replies"):
-                valid_replies = []
-                invalid_replies = []
-                for reply in content_result["replies"]:
-                    if not isinstance(reply, dict):
-                        logger.debug(f"Invalid reply structure for thread_id={thread_id}: {reply}")
-                        invalid_replies.append(reply)
-                        continue
-                    msg = reply.get("msg")
-                    if msg is None or not isinstance(msg, str):
-                        logger.debug(f"Invalid msg for thread_id={thread_id}: {msg}")
-                        invalid_replies.append(reply)
-                        continue
-                    cleaned_msg = clean_html(msg)
-                    if cleaned_msg:
-                        valid_replies.append({
-                            "post_id": reply.get("post_id"),
-                            "msg": cleaned_msg,
-                            "like_count": reply.get("like_count", 0),
-                            "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                        })
-                    else:
-                        logger.debug(f"Cleaned msg is invalid for thread_id={thread_id}: {msg}")
-                        invalid_replies.append(reply)
-                
-                if invalid_replies:
-                    logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={thread_id} (empty or URL-only msg)")
-                    logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
-                
-                if not valid_replies:
-                    logger.warning(f"No valid replies for thread_id={thread_id}, skipping")
-                    continue
-                
                 thread_info = {
                     "thread_id": thread_id,
                     "title": content_result.get("title", item["title"]),
@@ -819,7 +663,15 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                     "last_reply_time": item["last_reply_time"],
                     "like_count": item.get("like_count", 0),
                     "dislike_count": item.get("dislike_count", 0),
-                    "replies": valid_replies,
+                    "replies": [
+                        {
+                            "post_id": reply.get("post_id"),
+                            "msg": clean_html(reply.get("msg", "")),
+                            "like_count": reply.get("like_count", 0),
+                            "dislike_count": reply.get("dislike_count", 0),
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                        } for reply in content_result["replies"] if reply.get("msg")
+                    ],
                     "fetched_pages": content_result.get("fetched_pages", [])
                 }
                 thread_data.append(thread_info)
@@ -846,18 +698,6 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 if str(item["thread_id"]) in map(str, advanced_analysis.get("top_thread_ids", []))
             ]
             analysis.update(advanced_analysis)
-        
-        if not thread_data:
-            logger.warning("No valid thread data collected, returning empty result")
-            return {
-                "selected_cat": selected_cat,
-                "thread_data": [],
-                "rate_limit_info": rate_limit_info,
-                "request_counter": request_counter,
-                "last_reset": last_reset,
-                "rate_limit_until": rate_limit_until,
-                "analysis": analysis
-            }
         
         return {
             "selected_cat": selected_cat,
