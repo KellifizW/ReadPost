@@ -1,15 +1,15 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 改進：
-- 支持多意圖查詢，動態分解子意圖（新增 extract_keywords、analyze_user_behavior、track_trends、contrast_analysis、recommend_posts）。
-- 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
+- 支持多意圖查詢，動態分解子意圖（list_titles、summarize_posts、extract_keywords 等）。
+- 模組化提示詞，減少 prompts.json 依賴，支援動態參數。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
 - 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，移除截斷風險。
-- 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
-- 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
-- 使用流式 API 處理響應，確保完整數據接收。
-- 添加詳細調試日誌，記錄響應塊和驗證過程。
+- 使用流式 API 確保完整數據接收。
+- 減小 max_tokens，簡化提示詞，降低響應長度。
+- 添加詳細調試日誌，記錄響應塊、JSON 驗證和 API 元數據。
+- 修正 build_response 的 KeyError，確保指令格式化正確。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -57,7 +57,7 @@ logger.addHandler(stream_handler)
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 180  # 增加超時時間
+API_TIMEOUT = 180
 
 class AppError(Exception):
     def __init__(self, message, user_message=None):
@@ -170,7 +170,7 @@ class PromptBuilder:
                     "type": intent_type
                 }
                 logger.debug(f"Format params for intent {intent_type}: {format_params}")
-                instruction_template = component["instructions"].replace('{"type"}', '{type}')
+                instruction_template = component["instructions"]
                 logger.debug(f"Instruction template for {intent_type}: {instruction_template}")
                 instruction = instruction_template.format(**format_params)
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
@@ -237,7 +237,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "messages": messages,
         "max_tokens": 400,
         "temperature": 0.7,
-        "stream": True  # 使用流式 API
+        "stream": True
     }
     
     logger.info(f"Starting intent analysis for query: {user_query}")
@@ -266,16 +266,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:
                                         response_content += content
-                                        logger.debug(f"Received stream chunk: {content[:100]}...")
+                                        logger.debug(f"Analyze stream chunk: {content[:100]}...")
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
+                                    logger.warning(f"JSON decode error in analyze stream chunk: {str(e)}")
                                     continue
                     
-                    logger.debug(f"Full response content (length: {len(response_content)}): {response_content[:500]}...")
+                    logger.debug(f"Analyze response content (length: {len(response_content)}): {response_content[:500]}...")
                     try:
                         result = json.loads(response_content)
                     except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in response: {str(e)}, content: {response_content[:500]}...")
+                        logger.warning(f"Invalid JSON in analyze response: {str(e)}, content: {response_content[:500]}...")
                         result = {"intents": []}
                     
                     if "intents" not in result or not isinstance(result["intents"], list):
@@ -342,10 +342,10 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,  # 減小 max_tokens
+        "max_tokens": 200,
         "temperature": 0.7,
-        "stream": True,  # 使用流式 API
-        "stop": ["}"]  # 明確停止序列
+        "stream": True,
+        "stop": ["}"]
     }
     
     max_retries = 4
@@ -353,10 +353,11 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         try:
             start_time = time.time()
             response_content = ""
+            chunk_count = 0
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     response_time = time.time() - start_time
-                    logger.debug(f"API response status: {response.status}, time: {response_time:.2f}s, headers: {response.headers}")
+                    logger.debug(f"Prioritize API response status: {response.status}, time: {response_time:.2f}s, headers: {response.headers}")
                     if response.status != 200:
                         logger.warning(f"Thread prioritization failed: status={response.status}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
@@ -375,19 +376,27 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:
                                         response_content += content
-                                        logger.debug(f"Received stream chunk (length: {len(content)}): {content[:100]}...")
+                                        chunk_count += 1
+                                        logger.debug(f"Prioritize stream chunk {chunk_count} (length: {len(content)}): {content[:100]}...")
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
+                                    logger.warning(f"JSON decode error in prioritize stream chunk: {str(e)}")
                                     continue
                     
-                    logger.debug(f"Full response content (length: {len(response_content)}): {response_content[:500]}...")
+                    logger.debug(f"Prioritize response content (length: {len(response_content)}, chunks: {chunk_count}): {response_content[:500]}...")
+                    logger.debug(f"Response hex: {response_content.encode().hex()[:1000]}...")
                     try:
                         result = json.loads(response_content)
-                        if not isinstance(result, dict) or "top_thread_ids" not in result:
-                            raise ValueError("Invalid JSON structure: missing top_thread_ids")
+                        if not isinstance(result, dict) or "top_thread_ids" not in result or not isinstance(result["top_thread_ids"], list):
+                            raise ValueError("Invalid JSON structure: missing or invalid top_thread_ids")
+                        if "reason" not in result or not isinstance(result["reason"], str):
+                            result["reason"] = "未提供排序原因"
                         logger.debug(f"Parsed JSON result: {result}")
                     except (json.JSONDecodeError, ValueError) as e:
-                        logger.warning(f"Invalid response: {str(e)}, content (length: {len(response_content)}): {response_content[:500]}...")
+                        logger.warning(f"Invalid prioritize response: {str(e)}, content (length: {len(response_content)}): {response_content[:500]}...")
+                        error_pos = getattr(e, 'pos', 0)
+                        context_start = max(0, error_pos - 50)
+                        context_end = min(len(response_content), error_pos + 50)
+                        logger.debug(f"Error context (char {error_pos}): {response_content[context_start:context_end]}")
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 + attempt)
                             continue
@@ -525,6 +534,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     response_content = ""
     response_json = []
+    chunk_count = 0
     async with aiohttp.ClientSession() as session:
         for attempt in range(3):
             try:
@@ -547,17 +557,20 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:
                                         response_content += content
+                                        chunk_count += 1
+                                        logger.debug(f"Response stream chunk {chunk_count} (length: {len(content)}): {content[:100]}...")
                                         yield content
                                 except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
+                                    logger.warning(f"JSON decode error in response stream chunk: {str(e)}")
                                     continue
                     
+                    logger.debug(f"Response content (length: {len(response_content)}, chunks: {chunk_count}): {response_content[:500]}...")
                     try:
                         response_json = json.loads(response_content)
                         if not isinstance(response_json, list):
                             response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
                     except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse response as JSON: {response_content}")
+                        logger.warning(f"Failed to parse response as JSON: {response_content[:500]}...")
                         response_json = [{"type": "general", "result": {"summary": response_content, "suggestion": "請提供更具體查詢"}}]
                     
                     missing_tasks = []
@@ -662,7 +675,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             if fallback:
                                 response_json.append(fallback)
                     
-                    logger.info(f"Response generation completed: length={len(response_content)}")
+                    logger.info(f"Response generation completed: length={len(response_content)}, chunks={chunk_count}")
                     return
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(f"Response generation error: {str(e)}, attempt={attempt + 1}")
