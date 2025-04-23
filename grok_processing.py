@@ -74,7 +74,7 @@ class IntentRegistry:
                 "reply_limit": 100
             },
             "analyze_sentiment": {
-                "system_prompt": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模擬論壇用戶的語氣。",
+                "system_prompt": "你是 LIHKG 論壇的集體意見代表，以繁體中文回答，模仿論壇用戶的語氣。",
                 "handler": self.analyze_sentiment,
                 "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"},
                 "data_type": "both",
@@ -189,14 +189,29 @@ class PromptBuilder:
         system_prompt = intent_config.get("system", "")
         template_str = intent_config.get("templates", {}).get(complexity, intent_config.get("templates", {}).get("simple", ""))
         
-        # 根據複雜度調整數據量
-        if complexity == "simple" and isinstance(data, dict):
-            data = {k: {kk: vv[:5] if isinstance(vv, list) else vv for kk, vv in v.items()} for k, v in data.items()}
-        elif complexity == "detailed" and isinstance(data, dict):
-            data = {k: {kk: vv[:20] if isinstance(vv, list) else vv for kk, vv in v.items()} for k, v in data.items()}
+        # 根據數據類型和複雜度調整數據量
+        if isinstance(data, list):
+            # 處理列表數據（如 thread_titles 或 metadata）
+            if complexity == "simple":
+                adjusted_data = data[:5]
+            elif complexity == "detailed":
+                adjusted_data = data[:20]
+            else:
+                adjusted_data = data[:10]
+        elif isinstance(data, dict):
+            # 處理字典數據（如 thread_data）
+            if complexity == "simple":
+                adjusted_data = {k: {kk: vv[:5] if isinstance(vv, list) else vv for kk, vv in v.items()} for k, v in data.items()}
+            elif complexity == "detailed":
+                adjusted_data = {k: {kk: vv[:20] if isinstance(vv, list) else vv for kk, vv in v.items()} for k, v in data.items()}
+            else:
+                adjusted_data = data
+        else:
+            # 其他類型數據，直接使用
+            adjusted_data = data
         
         template = Template(template_str)
-        return f"{system_prompt}\n{template.substitute(query=query, cat_name=cat_name, data=json.dumps(data, ensure_ascii=False))}\n{intent_config.get('instructions', '')}"
+        return f"{system_prompt}\n{template.substitute(query=query, cat_name=cat_name, data=json.dumps(adjusted_data, ensure_ascii=False))}\n{intent_config.get('instructions', '')}"
 
 def clean_html(text: str) -> str:
     """
@@ -816,7 +831,7 @@ async def process_user_question(user_question: str, selected_cat: str, cat_id: s
         if progress_callback:
             progress_callback("正在進行進階分析", 0.8)
         advanced_analysis = await analyze_and_screen(
-            user_query=user_query,
+            user_query=user_question,
             cat_name=selected_cat,
             cat_id=cat_id,
             thread_titles=[item["title"] for item in thread_data],
