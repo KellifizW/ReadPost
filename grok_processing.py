@@ -23,13 +23,10 @@ import pytz
 from collections import Counter
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
-# 設置香港時區
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
-
-# 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# 自定義日誌格式器，將時間戳設為香港時區
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
@@ -39,9 +36,13 @@ class HongKongFormatter(logging.Formatter):
             return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
+
+# 防止重複添加處理器
 if not logger.handlers:
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.INFO)
+    file_handler = logging.FileHandler("app.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    stream_handler = logging.StreamHandler()  # 修正：使用 StreamHandler
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
