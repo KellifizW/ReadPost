@@ -5,7 +5,13 @@
       "system": "你是 LIHKG 論壇助手，以繁體中文回答，模擬論壇用戶語氣。",
       "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id}）\n對話歷史：{conversation_context}",
       "data": "元數據：{metadata}\n內容：{thread_data}\n篩選：{filters}",
-      "instructions_template": "任務：{task}\n數據需求：{data_requirements}\n篩選條件：{filters}\n輸出格式：{output_format}\n數據處理：{data_processing}\n若無數據，返回：{no_data_response}"
+      "instructions_template": "任務：{task}\n數據需求：{data_requirements}\n篩選條件：{filters}\n輸出格式：{output_format}\n數據處理：{data_processing}\n若無數據，返回：{no_data_response}",
+      "task": "回答通用問題或提供功能說明",
+      "data_requirements": ["none"],
+      "filters": {},
+      "output_format": "{\"response\": \"string\"}",
+      "data_processing": "無需抓取數據，直接回答，字數 200-400",
+      "no_data_response": "問題與 LIHKG 數據無關或無數據，直接回答。"
     },
     "specific_intents": {
       "summarize_posts": {
