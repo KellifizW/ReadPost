@@ -1,21 +1,11 @@
 """
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 改進：
-- 支持多意圖查詢，動態分解子意圖（新增 extract_keywords、analyze_user_behavior、track_trends、contrast_analysis、recommend_posts）。
-- 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
+- 支持多意圖查詢，動態分解子意圖。
+- 模組化提示詞，減少 prompts.json 依賴。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
-- 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，添加數據清理和回退排序。
-- 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
-- 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
-- 優化 prioritize_threads_with_grok 的 JSON 解析，處理不完整回應並減少警告。
-- 臨時修補 build_response，處理 prompts.json 中無效鍵格式化錯誤。
-主要函數：
-- analyze_and_screen：分析問題，識別多意圖。
-- stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
-- process_user_question：處理用戶問題，抓取帖子。
-- clean_html：清理 HTML 標籤。
-- clean_text：清理文本中的無效字符。
+- 優化 JSON 解析，處理不完整回應。
 """
 
 import aiohttp
@@ -42,17 +32,18 @@ logger.setLevel(logging.INFO)
 
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
-        dt = datetime.datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
+        dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
         if datefmt:
             return dt.strftime(datefmt)
         else:
             return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
-stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.INFO)
-stream_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
+if not logger.handlers:
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -71,6 +62,7 @@ def clean_text(text):
         text = str(text)
     try:
         text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', text)
+        text = text.encode('utf-8', errors='ignore').decode('utf-8')
         text = text.replace('"', '\\"').replace("'", "\\'")
         return text[:200]
     except Exception as e:
@@ -164,7 +156,7 @@ class PromptBuilder:
                     "limit": intent.get("limit", 10),
                     "parameters": json.dumps(params, ensure_ascii=False)
                 }
-                instruction = component["instructions"].format(**format_params)
+                instruction = component["instructions"].format(**{k: v for k, v in format_params.items() if k in component["instructions"]})
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
             except KeyError as e:
                 logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
@@ -178,7 +170,7 @@ class PromptBuilder:
         
         # 修正最終輸出格式
         output_format = "\n".join([
-            f"- 子任務 {i['type']}: JSON 格式，參考 {self.config['response_components'].get(i['type'], self.config['response_components']['general'])['instructions'].split('輸出 JSON：')[1]}"
+            f"- 子任務 {i['type']}: JSON 格式"
             for i in valid_intents
         ])
         prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in valid_intents])}]\n{output_format}"
@@ -206,7 +198,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     prompt = prompt_builder.build_analyze(
         query=user_query,
         cat_name=cat_name,
-        cat_id=cat_id,
+        cat_id=catocommon_id,
         conversation_context=conversation_context,
         thread_titles=thread_titles,
         metadata=metadata,
@@ -327,12 +319,12 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 600,  # 增加以容納長 reason
+        "max_tokens": 600,
         "temperature": 0.7,
-        "stop": ["}"]  # 確保 JSON 閉合
+        "stop": ["}"]
     }
     
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             async with aiohttp.ClientSession() as session:
@@ -359,38 +351,16 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
-                        # 嘗試修復不完整 JSON
-                        if "top_thread_ids" in content:
-                            try:
-                                # 提取 top_thread_ids
-                                match = re.search(r'"top_thread_ids":\s*\[([\d,\s]*)\]', content)
-                                thread_ids = []
-                                if match:
-                                    thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                                # 提取 reason（若存在）
-                                reason_match = re.search(r'"reason":\s*"([^"]*)"', content)
-                                reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
-                                result = {
-                                    "top_thread_ids": thread_ids,
-                                    "reason": reason
-                                }
-                                logger.info(f"Repaired partial JSON: {result}")
-                            except Exception as repair_e:
-                                logger.warning(f"JSON repair failed: {str(repair_e)}")
-                                if attempt < max_retries - 1:
-                                    await asyncio.sleep(2)
-                                    continue
-                                # 回退到本地排序
-                                sorted_threads = sorted(
-                                    cleaned_threads,
-                                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                                    reverse=True
-                                )
-                                result = {
-                                    "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                    "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
-                                }
-                        else:
+                        # 嘗試修復 JSON
+                        try:
+                            # 確保 JSON 結束
+                            if content.strip().endswith(']'):
+                                content += '}'
+                            elif not content.strip().endswith('}'):
+                                content += '\n}'
+                            result = json.loads(content)
+                        except json.JSONDecodeError:
+                            logger.warning("JSON repair failed")
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(2)
                                 continue
@@ -701,7 +671,7 @@ def clean_cache(max_age=3600):
 def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
-        dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
+        dt = datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
@@ -737,7 +707,8 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
         rate_limit_info = []
         initial_threads = []
         
-        for page in range(1, 4):
+        # 並行抓取帖子列表
+        async def fetch_page(page):
             result = await get_lihkg_topic_list(
                 cat_id=cat_id,
                 order=order,
@@ -747,22 +718,26 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 last_reset=last_reset,
                 rate_limit_until=rate_limit_until
             )
-            request_counter = result.get("request_counter", request_counter)
-            last_reset = result.get("last_reset", last_reset)
-            rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-            rate_limit_info.extend(result.get("rate_limit_info", []))
-            items = result.get("items", [])
-            for item in items:
-                item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
-            initial_threads.extend(items)
-            if len(initial_threads) >= 135:
-                initial_threads = initial_threads[:135]
-                break
-            if progress_callback:
-                progress_callback(f"已抓取第 {page}/3 頁帖子", 0.1 + 0.2 * (page / 3))
+            return result
+        
+        tasks = [fetch_page(page) for page in range(1, 4)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, dict):
+                request_counter = result.get("request_counter", request_counter)
+                last_reset = result.get("last_reset", last_reset)
+                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+                rate_limit_info.extend(result.get("rate_limit_info", []))
+                items = result.get("items", [])
+                for item in items:
+                    item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
+                initial_threads.extend(items)
+        
+        initial_threads = initial_threads[:135]
         
         if progress_callback:
-            progress_callback("正在篩選帖子", 0.3)
+            progress_callback("已抓取帖子列表", 0.3)
         
         filtered_items = [
             item for item in initial_threads
@@ -827,14 +802,14 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
         if not candidate_threads and filtered_items:
             candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items)))
         
-        for idx, item in enumerate(candidate_threads):
+        # 並行抓取帖子內容
+        async def fetch_thread_content(item, idx):
             thread_id = str(item["thread_id"])
             cache_key = thread_id
             cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
             
             if cache_data and cache_data.get("replies"):
-                thread_data.append(cache_data)
-                continue
+                return cache_data
             
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
@@ -847,11 +822,6 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 rate_limit_until=rate_limit_until,
                 max_replies=reply_limit
             )
-            
-            request_counter = content_result.get("request_counter", request_counter)
-            last_reset = content_result.get("last_reset", last_reset)
-            rate_limit_until = content_result.get("rate_limit_until", rate_limit_until)
-            rate_limit_info.extend(content_result.get("rate_limit_info", []))
             
             if content_result.get("replies"):
                 thread_info = {
@@ -872,11 +842,19 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                     ],
                     "fetched_pages": content_result.get("fetched_pages", [])
                 }
-                thread_data.append(thread_info)
                 st.session_state.thread_cache[cache_key] = {
                     "data": thread_info,
                     "timestamp": time.time()
                 }
+                return thread_info
+            return None
+        
+        tasks = [fetch_thread_content(item, idx) for idx, item in enumerate(candidate_threads)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, dict):
+                thread_data.append(result)
         
         if analysis.get("needs_advanced_analysis", False) and thread_data:
             if progress_callback:
