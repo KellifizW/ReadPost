@@ -5,11 +5,11 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 模組化提示詞，減少 prompts.json 依賴，支援動態參數（例如 time_range、category_ids）。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
-- 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，添加數據清理和回退排序。
+- 修正 prioritize_threads_with_grok 的 JSON 解析錯誤，移除截斷風險。
 - 修正 stream_grok3_response 的 processing 參數驗證，處理字符串或無效輸入。
 - 修正 intents 處理，驗證結構並避免 'type' 相關錯誤。
-- 優化 prioritize_threads_with_grok 的 JSON 解析，處理不完整回應並減少警告。
-- 臨時修補 build_response，處理 prompts.json 中無效鍵格式化錯誤。
+- 使用流式 API 處理響應，確保完整數據接收。
+- 添加詳細調試日誌，記錄響應塊和驗證過程。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -38,7 +38,7 @@ HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
@@ -50,14 +50,14 @@ class HongKongFormatter(logging.Formatter):
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
 stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.INFO)
+stream_handler.setLevel(logging.DEBUG)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
-API_TIMEOUT = 120
+API_TIMEOUT = 180  # 增加超時時間
 
 class AppError(Exception):
     def __init__(self, message, user_message=None):
@@ -169,9 +169,12 @@ class PromptBuilder:
                     "description": "{description}",
                     "type": intent_type
                 }
+                logger.debug(f"Format params for intent {intent_type}: {format_params}")
                 instruction_template = component["instructions"].replace('{"type"}', '{type}')
+                logger.debug(f"Instruction template for {intent_type}: {instruction_template}")
                 instruction = instruction_template.format(**format_params)
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
+                logger.debug(f"Generated instruction for {intent_type}: {instruction}")
             except KeyError as e:
                 logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少鍵 {e}，使用通用指令")
@@ -186,6 +189,7 @@ class PromptBuilder:
             for i in valid_intents
         ])
         prompt = f"{system}\n{context}\n{data}\n指令：\n{'\n'.join(instructions)}\n最終輸出格式：\n[{','.join(['{\"type\": \"' + i['type'] + '\", \"result\": {...}}' for i in valid_intents])}]\n{output_format}"
+        logger.debug(f"Final prompt: {prompt[:500]}...")
         return prompt
 
     def get_system_prompt(self, mode):
@@ -232,36 +236,46 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "model": "grok-3-beta",
         "messages": messages,
         "max_tokens": 400,
-        "temperature": 0.7
+        "temperature": 0.7,
+        "stream": True  # 使用流式 API
     }
     
     logger.info(f"Starting intent analysis for query: {user_query}")
     
-    max_retries = 3
+    max_retries = 4
     for attempt in range(max_retries):
         try:
+            response_content = ""
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status != 200:
                         logger.warning(f"Intent analysis failed: status={response.status}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(2 + attempt)
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法連接到分析服務，請稍後重試。")
                     
-                    data = await response.json()
-                    if not data.get("choices"):
-                        logger.warning(f"Intent analysis failed: missing choices, attempt={attempt + 1}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
-                            continue
-                        raise AppError("Invalid API response: missing choices", user_message="分析服務返回無效數據，請稍後重試。")
+                    async for line in response.content:
+                        if line and not line.isspace():
+                            line_str = line.decode('utf-8').strip()
+                            if line_str == "data: [DONE]":
+                                break
+                            if line_str.startswith("data: "):
+                                try:
+                                    chunk = json.loads(line_str[6:])
+                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        response_content += content
+                                        logger.debug(f"Received stream chunk: {content[:100]}...")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
+                                    continue
                     
-                    content = data["choices"][0]["message"]["content"]
+                    logger.debug(f"Full response content (length: {len(response_content)}): {response_content[:500]}...")
                     try:
-                        result = json.loads(content)
+                        result = json.loads(response_content)
                     except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
+                        logger.warning(f"Invalid JSON in response: {str(e)}, content: {response_content[:500]}...")
                         result = {"intents": []}
                     
                     if "intents" not in result or not isinstance(result["intents"], list):
@@ -293,10 +307,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     result.setdefault("reason", "Default analysis")
                     logger.info(f"Intent analysis completed: intents={[i['type'] for i in result['intents']]}")
                     return result
-        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning(f"Intent analysis error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(2 + attempt)
                 continue
             raise AppError(f"Analysis failed after {max_retries} attempts: {str(e)}", user_message="分析服務暫時不可用，請稍後重試。")
 
@@ -328,82 +342,75 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 600,
+        "max_tokens": 300,  # 減小 max_tokens
         "temperature": 0.7,
-        "stop": ["}"]
+        "stream": True,  # 使用流式 API
+        "stop": ["}"]  # 明確停止序列
     }
     
-    max_retries = 3
+    max_retries = 4
     for attempt in range(max_retries):
         try:
+            start_time = time.time()
+            response_content = ""
             async with aiohttp.ClientSession() as session:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    response_time = time.time() - start_time
+                    logger.debug(f"API response status: {response.status}, time: {response_time:.2f}s, headers: {response.headers}")
                     if response.status != 200:
                         logger.warning(f"Thread prioritization failed: status={response.status}, attempt={attempt + 1}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(2 + attempt)
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法完成帖子排序，請稍後重試。")
                     
-                    data = await response.json()
-                    if not data.get("choices"):
-                        logger.warning(f"Thread prioritization failed: missing choices, attempt={attempt + 1}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
-                            continue
-                        raise AppError("Invalid API response: missing choices", user_message="排序服務返回無效數據，請稍後重試。")
+                    async for line in response.content:
+                        if line and not line.isspace():
+                            line_str = line.decode('utf-8').strip()
+                            if line_str == "data: [DONE]":
+                                break
+                            if line_str.startswith("data: "):
+                                try:
+                                    chunk = json.loads(line_str[6:])
+                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        response_content += content
+                                        logger.debug(f"Received stream chunk (length: {len(content)}): {content[:100]}...")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"JSON decode error in stream chunk: {str(e)}")
+                                    continue
                     
-                    content = data["choices"][0]["message"]["content"]
-                    logger.debug(f"Raw API response: {content}")
-                    logger.debug(f"Raw response (hex): {content.encode().hex()}")
-                    
-                    content = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', content).strip()
-                    if content and not content.endswith('}'):
-                        content = content + '}'
-                        logger.debug(f"Appended closing brace to content: {content}")
-                    
+                    logger.debug(f"Full response content (length: {len(response_content)}): {response_content[:500]}...")
                     try:
-                        result = json.loads(content)
+                        result = json.loads(response_content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result:
-                            raise json.JSONDecodeError("Invalid JSON structure", content, 0)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
-                        try:
-                            match = re.search(r'"top_thread_ids"\s*:\s*\[([\d,\s]*)\]', content)
-                            thread_ids = []
-                            if match:
-                                thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                            reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', content)
-                            reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
-                            if not thread_ids:
-                                raise ValueError("No valid thread IDs extracted")
-                            result = {
-                                "top_thread_ids": thread_ids,
-                                "reason": reason
-                            }
-                            logger.info(f"Repaired partial JSON: {result}")
-                        except Exception as repair_e:
-                            logger.warning(f"JSON repair failed: {str(repair_e)}")
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(2)
-                                continue
-                            sorted_threads = sorted(
-                                cleaned_threads,
-                                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                                reverse=True
-                            )
-                            result = {
-                                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
-                            }
+                            raise ValueError("Invalid JSON structure: missing top_thread_ids")
+                        logger.debug(f"Parsed JSON result: {result}")
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"Invalid response: {str(e)}, content (length: {len(response_content)}): {response_content[:500]}...")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 + attempt)
+                            continue
+                        # 回退到本地排序
+                        sorted_threads = sorted(
+                            cleaned_threads,
+                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                            reverse=True
+                        )
+                        result = {
+                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                            "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
+                        }
+                        logger.info(f"Fallback to local sorting: {result}")
                     
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(2 + attempt)
                 continue
+            # 回退到本地排序
             sorted_threads = sorted(
                 cleaned_threads,
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -878,7 +885,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": last_reset,
-            "raterog_limit_until": rate_limit_until,
+            "rate_limit_until": rate_limit_until,
             "analysis": analysis
         }
     
