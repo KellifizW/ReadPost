@@ -6,6 +6,7 @@ Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 - 添加後處理驗證，確保回應包含所有意圖結果。
 - 增強錯誤處理，支持回退回應。
 - 增強 clean_html 處理圖片網址和無效內容，過濾無效回應。
+- 強化 stream_grok3_response 和 process_user_question 的數據驗證，防止 KeyError: 'msg'。
 主要函數：
 - analyze_and_screen：分析問題，識別多意圖。
 - stream_grok3_response：生成流式回應，動態組合提示詞並驗證結果。
@@ -121,7 +122,6 @@ class PromptBuilder:
         instructions = []
         for intent in intents:
             component = self.config["response_components"].get(intent["type"], self.config["response_components"]["general"])
-            # 動態格式化參數
             params = intent.get("parameters", {})
             instruction = component["instructions"].format(
                 theme=intent.get("theme", "general"),
@@ -340,28 +340,41 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    # 解析 intents13
+    # 解析 intents
     intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
     
     # 簡化 metadata 並限制回覆數
     max_replies_per_thread = 20
     simplified_metadata = [{"thread_id": item["thread_id"], "title": item["title"]} for item in metadata]
     filtered_thread_data = {}
+    
     for tid, data in thread_data.items():
-        # 過濾有效回應：msg 存在且為有效文本
+        # 驗證 replies 結構
         valid_replies = []
         invalid_replies = []
         for r in data.get("replies", []):
-            cleaned_msg = clean_html(r.get("msg", ""))
+            if not isinstance(r, dict) or "msg" not in r or not isinstance(r["msg"], str) or not r["msg"].strip():
+                invalid_replies.append(r)
+                continue
+            cleaned_msg = clean_html(r["msg"])
             if cleaned_msg:
-                r["msg"] = cleaned_msg  # 更新清理後的 msg
-                valid_replies.append(r)
+                valid_replies.append({
+                    "post_id": r.get("post_id"),
+                    "msg": cleaned_msg,
+                    "like_count": r.get("like_count", 0),
+                    "dislike_count": r.get("dislike_count", 0),
+                    "reply_time": r.get("reply_time", "")
+                })
             else:
                 invalid_replies.append(r)
         
         if invalid_replies:
-            logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={tid} (empty or URL-only msg)")
+            logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={tid} (missing, empty, or URL-only msg)")
             logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
+        
+        if not valid_replies:
+            logger.warning(f"No valid replies for thread_id={tid}, skipping")
+            continue
         
         replies = sorted(
             valid_replies,
@@ -372,12 +385,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "thread_id": data["thread_id"],
             "title": data["title"],
             "no_of_reply": data.get("no_of_reply", 0),
-            "last_reply_time": data.get("last_reply_time", 0),
+            "last_reply_time": data.get("last_reply_time", ""),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
             "replies": replies,
             "fetched_pages": data.get("fetched_pages", [])
         }
+    
+    # 檢查是否有有效數據
+    if not filtered_thread_data:
+        logger.warning("No valid thread data after filtering, returning fallback response")
+        yield "錯誤：無有效帖子數據，請稍後重試或檢查查詢。"
+        return
     
     # 構建提示詞
     prompt = prompt_builder.build_response(
@@ -676,7 +695,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
         else:
             if not top_thread_ids and filtered_items:
-                if progress_callback:
+                if progress_quote:
                     progress_callback("正在重新分析帖子選擇", 0.4)
                 prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
                 top_thread_ids = prioritization.get("top_thread_ids", [])
@@ -701,8 +720,18 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
             
             if cache_data and cache_data.get("replies"):
-                thread_data.append(cache_data)
-                continue
+                # 驗證緩存數據的回應結構
+                valid_cache_replies = [
+                    r for r in cache_data["replies"]
+                    if isinstance(r, dict) and "msg" in r and isinstance(r["msg"], str) and r["msg"].strip()
+                ]
+                if valid_cache_replies:
+                    cache_data["replies"] = valid_cache_replies
+                    thread_data.append(cache_data)
+                    logger.debug(f"Using valid cache data for thread_id={thread_id}, replies={len(valid_cache_replies)}")
+                    continue
+                else:
+                    logger.warning(f"Invalid cache data for thread_id={thread_id}, fetching fresh data")
             
             if progress_callback:
                 progress_callback(f"正在抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
@@ -725,6 +754,9 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 valid_replies = []
                 invalid_replies = []
                 for reply in content_result["replies"]:
+                    if not isinstance(reply, dict) or "msg" not in reply:
+                        invalid_replies.append(reply)
+                        continue
                     cleaned_msg = clean_html(reply.get("msg", ""))
                     if cleaned_msg:
                         valid_replies.append({
@@ -740,6 +772,10 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 if invalid_replies:
                     logger.warning(f"Filtered {len(invalid_replies)} invalid replies for thread_id={thread_id} (empty or URL-only msg)")
                     logger.debug(f"Invalid replies sample: {invalid_replies[:3]}")
+                
+                if not valid_replies:
+                    logger.warning(f"No valid replies for thread_id={thread_id}, skipping")
+                    continue
                 
                 thread_info = {
                     "thread_id": thread_id,
@@ -775,6 +811,18 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
                 if str(item["thread_id"]) in map(str, advanced_analysis.get("top_thread_ids", []))
             ]
             analysis.update(advanced_analysis)
+        
+        if not thread_data:
+            logger.warning("No valid thread data collected, returning empty result")
+            return {
+                "selected_cat": selected_cat,
+                "thread_data": [],
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis
+            }
         
         return {
             "selected_cat": selected_cat,
