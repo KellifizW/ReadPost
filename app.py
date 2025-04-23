@@ -12,16 +12,16 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
-from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
+import json
+from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question, with_error_handling
 
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 配置日誌記錄器，設置為香港時區
+# 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# 自定義日誌格式器，將時間戳設為香港時區
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
@@ -31,8 +31,6 @@ class HongKongFormatter(logging.Formatter):
             return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
-
-# 清空默認處理器並添加新處理器
 logger.handlers.clear()
 file_handler = logging.FileHandler("app.log")
 file_handler.setFormatter(formatter)
@@ -44,7 +42,7 @@ logger.addHandler(stream_handler)
 # 應用 asyncio 補丁
 nest_asyncio.apply()
 
-def validate_input(user_question):
+def validate_input(user_question: str) -> tuple[bool, str]:
     """
     驗證用戶輸入，確保長度、格式有效。
     """
@@ -62,7 +60,6 @@ async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
     """
-    # 設置 Streamlit 頁面配置
     st.set_page_config(page_title="LIHKG 聊天介面", layout="wide")
     st.title("LIHKG 聊天介面")
 
@@ -91,7 +88,6 @@ async def main():
     cat_id = str(cat_id_map[selected_cat])
     st.write(f"當前討論區：{selected_cat}")
 
-    # 記錄選單選擇
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
     # 顯示速率限制狀態
@@ -110,7 +106,6 @@ async def main():
     # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
     if user_question and not st.session_state.awaiting_response:
-        # 驗證輸入
         is_valid, error_message = validate_input(user_question)
         if not is_valid:
             with st.chat_message("assistant"):
@@ -123,19 +118,16 @@ async def main():
             st.markdown(user_question)
         st.session_state.awaiting_response = True
 
-        # 初始化進度條和狀態顯示
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        # 進度回調函數
-        def update_progress(message, progress):
+        def update_progress(message: str, progress: float):
             status_text.write(f"正在處理... {message}")
             progress_bar.progress(min(max(progress, 0.0), 1.0))
 
         try:
             update_progress("正在初始化", 0.0)
 
-            # 檢查速率限制
             if time.time() < st.session_state.rate_limit_until:
                 error_message = f"速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} 後重試。"
                 logger.warning(error_message)
@@ -149,7 +141,6 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
-            # 重置聊天記錄
             if "last_user_query" not in st.session_state:
                 st.session_state.last_user_query = None
             if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
@@ -158,36 +149,58 @@ async def main():
                 st.session_state.conversation_context = []
                 st.session_state.last_user_query = user_question
 
-            # 分析問題
             update_progress("正在分析問題意圖", 0.1)
-            analysis = await analyze_and_screen(
-                user_query=user_question,
-                cat_name=selected_cat,
-                cat_id=cat_id,
-                conversation_context=st.session_state.conversation_context
+            analysis = await with_error_handling(
+                analyze_and_screen(
+                    user_query=user_question,
+                    cat_name=selected_cat,
+                    cat_id=cat_id,
+                    conversation_context=st.session_state.conversation_context
+                ),
+                "無法分析問題意圖"
             )
+            if "error" in analysis:
+                with st.chat_message("assistant"):
+                    st.markdown(analysis["error"])
+                st.session_state.chat_history.append({"question": user_question, "answer": analysis["error"]})
+                update_progress("處理失敗", 1.0)
+                time.sleep(0.5)
+                status_text.empty()
+                progress_bar.empty()
+                st.session_state.awaiting_response = False
+                return
             logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
-            # 處理問題
             update_progress("正在處理查詢", 0.2)
-            result = await process_user_question(
-                user_question=user_question,
-                selected_cat=selected_cat,
-                cat_id=cat_id,
-                analysis=analysis,
-                request_counter=st.session_state.request_counter,
-                last_reset=st.session_state.last_reset,
-                rate_limit_until=st.session_state.rate_limit_until,
-                conversation_context=st.session_state.conversation_context,
-                progress_callback=update_progress
+            result = await with_error_handling(
+                process_user_question(
+                    user_question=user_question,
+                    selected_cat=selected_cat,
+                    cat_id=cat_id,
+                    analysis=analysis,
+                    request_counter=st.session_state.request_counter,
+                    last_reset=st.session_state.last_reset,
+                    rate_limit_until=st.session_state.rate_limit_until,
+                    conversation_context=st.session_state.conversation_context,
+                    progress_callback=update_progress
+                ),
+                "無法處理查詢"
             )
+            if "error" in result:
+                with st.chat_message("assistant"):
+                    st.markdown(result["error"])
+                st.session_state.chat_history.append({"question": user_question, "answer": result["error"]})
+                update_progress("處理失敗", 1.0)
+                time.sleep(0.5)
+                status_text.empty()
+                progress_bar.empty()
+                st.session_state.awaiting_response = False
+                return
 
-            # 更新速率限制
             st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
             st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
 
-            # 顯示回應
             response = ""
             with st.chat_message("assistant"):
                 grok_container = st.empty()
@@ -197,7 +210,7 @@ async def main():
                     user_query=user_question,
                     metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    processing=analysis.get("processing", "general"),
+                    processing=analysis,
                     selected_cat=selected_cat,
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
