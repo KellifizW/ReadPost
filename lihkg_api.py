@@ -40,7 +40,7 @@ if not logger.handlers:
     file_handler = logging.FileHandler("app.log", encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
-    stream_handler = logging.StreamHandler()
+    stream_handler = logging.StreamHandler()  # 修正：使用 StreamHandler
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
