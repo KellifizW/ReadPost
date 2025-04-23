@@ -255,40 +255,34 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                             continue
                         raise AppError(f"API request failed with status {response.status}", user_message="無法完成帖子排序，請稍後重試。")
                     
-                    content = await response.text()
-                    logger.debug(f"Raw prioritize response: {content}")
+                    data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"Thread prioritization failed: missing choices, attempt={attempt + 1}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        raise AppError("Invalid API response: missing choices", user_message="排序服務返回無效數據，請稍後重試。")
                     
-                    # 清理和修復 JSON
+                    content = data["choices"][0]["message"]["content"]
+                    logger.debug(f"Raw prioritize content: {content}")
+                    
+                    # 清理 content（移除換行、縮進）
                     content = content.strip()
-                    if content and not content.endswith('}'):
-                        content += '}'
+                    content = re.sub(r'\s+', ' ', content)
+                    
+                    # 嘗試解析 content 為 JSON
                     try:
                         result = json.loads(content)
                     except json.JSONDecodeError as e:
-                        logger.warning(f"JSON parse error: {str(e)}, content: {content}")
-                        # 嘗試提取部分 JSON
-                        match = re.search(r'\{"top_thread_ids":\s*\[[\d,\s]*\](?:,\s*"reason":\s*".*?")?\s*(?:\})?', content)
-                        if match:
-                            partial_content = match.group(0)
-                            if not partial_content.endswith('}'):
-                                partial_content += '}'
-                            try:
-                                result = json.loads(partial_content)
-                                result.setdefault("reason", "Partial JSON extracted")
-                            except json.JSONDecodeError:
-                                logger.warning(f"Failed to parse partial JSON: {partial_content}")
-                                # 回退到簡單排序
-                                sorted_threads = sorted(
-                                    threads,
-                                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                                    reverse=True
-                                )
-                                result = {
-                                    "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                                    "reason": "Fallback sorting due to invalid JSON"
-                                }
-                        else:
-                            # 無有效 JSON，回退
+                        logger.warning(f"JSON parse error in content: {str(e)}, content: {content}")
+                        # 嘗試修復 JSON
+                        if content and not content.endswith('}'):
+                            content += '}'
+                        try:
+                            result = json.loads(content)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to repair JSON: {content}")
+                            # 回退到簡單排序
                             sorted_threads = sorted(
                                 threads,
                                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -299,9 +293,20 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                                 "reason": "Fallback sorting due to invalid JSON"
                             }
                     
+                    # 驗證結果格式
                     if not isinstance(result, dict) or "top_thread_ids" not in result:
-                        logger.warning(f"Invalid prioritization result format: {content}")
-                        raise AppError("Invalid result format: missing required keys", user_message="排序結果格式錯誤，請稍後重試。")
+                        logger.warning(f"Invalid prioritization result format: {result}")
+                        # 回退到簡單排序
+                        sorted_threads = sorted(
+                            threads,
+                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                            reverse=True
+                        )
+                        result = {
+                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
+                            "reason": "Fallback sorting due to invalid format"
+                        }
+                    
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
         except Exception as e:
