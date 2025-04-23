@@ -139,7 +139,6 @@ class PromptBuilder:
         instructions = []
         valid_intents = []
         
-        # 處理 intents，轉換字符串或驗證字典
         for intent in intents:
             if isinstance(intent, str):
                 logger.warning(f"String intent detected: {intent}, converting to dict")
@@ -158,32 +157,30 @@ class PromptBuilder:
             component = self.config["response_components"].get(intent_type, self.config["response_components"]["general"])
             params = intent.get("parameters", {})
             try:
-                # 提供所有可能的鍵，與 prompts.json 的指令格式匹配
                 format_params = {
                     "theme": intent.get("theme", "general"),
                     "limit": intent.get("limit", 10),
                     "parameters": json.dumps(params, ensure_ascii=False),
-                    "msg": "{msg}",  # 占位符，防止 KeyError
-                    "like_count": "{like_count}",  # 占位符
-                    "reply_time": "{reply_time}",  # 占位符
-                    "thread_id": "{thread_id}",  # 占位符
-                    "title": "{title}",  # 占位符
-                    "description": "{description}",  # 占位符
-                    "type": intent_type  # 明確提供 intent type
+                    "msg": "{msg}",
+                    "like_count": "{like_count}",
+                    "reply_time": "{reply_time}",
+                    "thread_id": "{thread_id}",
+                    "title": "{title}",
+                    "description": "{description}",
+                    "type": intent_type
                 }
-                instruction = component["instructions"].format(**format_params)
+                instruction_template = component["instructions"].replace('{"type"}', '{type}')
+                instruction = instruction_template.format(**format_params)
                 instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n{instruction}")
             except KeyError as e:
                 logger.error(f"Failed to format instruction for intent {intent_type}: missing key {e}")
-                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少配置")
+                instructions.append(f"子任務 {intent_type}（權重 {intent.get('weight', 1.0)}）：\n無法生成指令，缺少鍵 {e}，使用通用指令")
         
-        # 確保至少有一個指令
         if not instructions:
             logger.warning("No valid instructions generated, using default")
             valid_intents.append({"type": "general", "theme": "general", "weight": 1.0, "parameters": {}})
             instructions.append("子任務 general（權重 1.0）：\n生成通用回應，總結查詢相關內容")
         
-        # 修正最終輸出格式
         output_format = "\n".join([
             f"- 子任務 {i['type']}: JSON 格式，參考 {self.config['response_components'].get(i['type'], self.config['response_components']['general'])['instructions'].split('輸出 JSON：')[1]}"
             for i in valid_intents
@@ -267,12 +264,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
                         result = {"intents": []}
                     
-                    # 修正 intents 結構
                     if "intents" not in result or not isinstance(result["intents"], list):
                         logger.warning(f"Invalid intents format: {result.get('intents')}")
                         result["intents"] = [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
                     
-                    # 將字符串 intents 轉換為字典
                     valid_intents = []
                     for intent in result["intents"]:
                         if isinstance(intent, str):
@@ -289,7 +284,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                             logger.warning(f"Invalid intent: {intent}, skipping")
                     result["intents"] = valid_intents or [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}]
                     
-                    # 設置默認值
                     result.setdefault("theme_keywords", [])
                     result.setdefault("post_limit", 10)
                     result.setdefault("reply_limit", 50)
@@ -361,25 +355,26 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                     
                     content = data["choices"][0]["message"]["content"]
                     logger.debug(f"Raw API response: {content}")
+                    logger.debug(f"Raw response (hex): {content.encode().hex()}")
+                    
+                    content = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', content).strip()
+                    if content and not content.endswith('}'):
+                        content = content + '}'
+                        logger.debug(f"Appended closing brace to content: {content}")
                     
                     try:
-                        # 嘗試解析 JSON
                         result = json.loads(content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result:
                             raise json.JSONDecodeError("Invalid JSON structure", content, 0)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON in response: {str(e)}, content: {content}")
-                        # 嘗試修復不完整 JSON
                         try:
-                            # 提取 top_thread_ids
                             match = re.search(r'"top_thread_ids"\s*:\s*\[([\d,\s]*)\]', content)
                             thread_ids = []
                             if match:
                                 thread_ids = [int(id.strip()) for id in match.group(1).split(",") if id.strip().isdigit()]
-                            # 提取 reason
                             reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', content)
                             reason = reason_match.group(1) if reason_match else "API 回應不完整，提取部分數據"
-                            # 驗證提取的數據
                             if not thread_ids:
                                 raise ValueError("No valid thread IDs extracted")
                             result = {
@@ -392,7 +387,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(2)
                                 continue
-                            # 回退到本地排序
                             sorted_threads = sorted(
                                 cleaned_threads,
                                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -402,22 +396,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                                 "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
                                 "reason": f"API 回應無效（{str(e)}），回退到本地排序（基於回覆數和點讚數）"
                             }
-                    
-                    # 驗證 result 結構
-                    if not isinstance(result, dict) or "top_thread_ids" not in result:
-                        logger.warning(f"Invalid prioritization result format: {content}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2)
-                            continue
-                        sorted_threads = sorted(
-                            cleaned_threads,
-                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                            reverse=True
-                        )
-                        result = {
-                            "top_thread_ids": [t["thread_id"] for t in sorted_threads[:10]],
-                            "reason": f"API 回應格式錯誤，回退到本地排序（基於回覆數和點讚數）"
-                        }
                     
                     logger.info(f"Thread prioritization succeeded: {result}")
                     return result
@@ -441,7 +419,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     logger.info(f"Starting stream_grok3_response for query: {user_query}, processing type: {type(processing)}")
     
-    # 驗證 processing 參數
     if not isinstance(processing, dict):
         logger.warning(f"Invalid processing parameter: expected dict, got {type(processing)}, content: {processing}")
         try:
@@ -458,7 +435,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"}
             }
     
-    # 驗證 intents 結構
     intents = processing.get("intents", [{"type": "summarize_posts", "theme": "general", "weight": 1.0, "parameters": {}}])
     if not isinstance(intents, list):
         logger.warning(f"Invalid intents format: expected list, got {type(intents)}, content: {intents}")
@@ -902,7 +878,7 @@ async def process_user_question(user_question, selected_cat, cat_id, order, anal
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": last_reset,
-            "rate_limit_until": rate_limit_until,
+            "raterog_limit_until": rate_limit_until,
             "analysis": analysis
         }
     
