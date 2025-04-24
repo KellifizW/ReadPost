@@ -1,5 +1,8 @@
 """
 Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
+僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
+主要函數：
+- main：初始化應用，處理用戶輸入，渲染介面。
 """
 
 import streamlit as st
@@ -9,24 +12,27 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
-import json
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 配置日誌記錄器
+# 配置日誌記錄器，設置為香港時區
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# 自定義日誌格式器，將時間戳設為香港時區
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
         if datefmt:
             return dt.strftime(datefmt)
-        return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+        else:
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# 清空默認處理器並添加新處理器
 logger.handlers.clear()
 file_handler = logging.FileHandler("app.log")
 file_handler.setFormatter(formatter)
@@ -40,25 +46,25 @@ nest_asyncio.apply()
 
 def validate_input(user_question):
     """
-    驗證用戶輸入。
+    驗證用戶輸入，確保長度有效，允許純中文查詢。
     """
     if not user_question:
         return False, "輸入不能為空"
-    if len(user_question) < 5:
-        return False, "輸入過短，至少5個字"
+    if len(user_question) < 3:
+        return False, "輸入過短，至少3個字"
     if len(user_question) > 200:
         return False, "輸入過長，最多200個字"
-    if not any(c.isalnum() for c in user_question):
-        return False, "輸入需包含字母或數字"
     return True, ""
 
 async def main():
     """
-    主函數，初始化 Streamlit 應用。
+    主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面，增強上下文記憶。
     """
+    # 設置 Streamlit 頁面配置
     st.set_page_config(page_title="LIHKG 聊天介面", layout="wide")
     st.title("LIHKG 聊天介面")
 
+    # 初始化 session_state
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "thread_cache" not in st.session_state:
@@ -74,6 +80,7 @@ async def main():
     if "conversation_context" not in st.session_state:
         st.session_state.conversation_context = []
 
+    # 分類選擇
     cat_id_map = {
         "吹水台": 1, "熱門台": 2, "時事台": 5, "上班台": 14,
         "財經台": 15, "成人台": 29, "創意台": 31
@@ -82,21 +89,26 @@ async def main():
     cat_id = str(cat_id_map[selected_cat])
     st.write(f"當前討論區：{selected_cat}")
 
+    # 記錄選單選擇
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
+    # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
     st.markdown(f"- 請求計數: {st.session_state.request_counter}")
     st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
     st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
 
+    # 顯示聊天記錄
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
             st.markdown(chat["question"])
         with st.chat_message("assistant"):
             st.markdown(chat["answer"])
 
+    # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
     if user_question and not st.session_state.awaiting_response:
+        # 驗證輸入
         is_valid, error_message = validate_input(user_question)
         if not is_valid:
             with st.chat_message("assistant"):
@@ -109,9 +121,11 @@ async def main():
             st.markdown(user_question)
         st.session_state.awaiting_response = True
 
+        # 初始化進度條和狀態顯示
         status_text = st.empty()
         progress_bar = st.progress(0)
 
+        # 進度回調函數
         def update_progress(message, progress):
             status_text.write(f"正在處理... {message}")
             progress_bar.progress(min(max(progress, 0.0), 1.0))
@@ -119,6 +133,7 @@ async def main():
         try:
             update_progress("正在初始化", 0.0)
 
+            # 檢查速率限制
             if time.time() < st.session_state.rate_limit_until:
                 error_message = f"速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} 後重試。"
                 logger.warning(error_message)
@@ -132,6 +147,7 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
+            # 重置聊天記錄
             if "last_user_query" not in st.session_state:
                 st.session_state.last_user_query = None
             if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
@@ -140,6 +156,11 @@ async def main():
                 st.session_state.conversation_context = []
                 st.session_state.last_user_query = user_question
 
+            # 限制上下文長度（最近5輪對話）
+            if len(st.session_state.conversation_context) > 10:  # 5輪（用戶+助手）
+                st.session_state.conversation_context = st.session_state.conversation_context[-10:]
+
+            # 分析問題
             update_progress("正在分析問題意圖", 0.1)
             analysis = await analyze_and_screen(
                 user_query=user_question,
@@ -149,6 +170,7 @@ async def main():
             )
             logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
+            # 處理問題
             update_progress("正在處理查詢", 0.2)
             result = await process_user_question(
                 user_question=user_question,
@@ -162,10 +184,12 @@ async def main():
                 progress_callback=update_progress
             )
 
+            # 更新速率限制
             st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
             st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
 
+            # 顯示回應
             response = ""
             with st.chat_message("assistant"):
                 grok_container = st.empty()
@@ -173,59 +197,16 @@ async def main():
                 logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
                 async for chunk in stream_grok3_response(
                     user_query=user_question,
-                    metadata=[{
-                        "thread_id": item["thread_id"],
-                        "title": item["title"],
-                        "no_of_reply": item.get("no_of_reply", 0),
-                        "last_reply_time": item.get("last_reply_time", "0"),
-                        "like_count": item.get("like_count", 0),
-                        "dislike_count": item.get("dislike_count", 0)
-                    } for item in result.get("thread_data", [])],
+                    metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    intent=analysis.get("intent", "general_query"),
+                    processing=analysis.get("processing", "general"),
                     selected_cat=selected_cat,
                     conversation_context=st.session_state.conversation_context,
+                    needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
+                    reason=analysis.get("reason", ""),
                     filters=analysis.get("filters", {})
                 ):
-                    try:
-                        parsed_chunk = json.loads(chunk)
-                        if "error" in parsed_chunk:
-                            response += parsed_chunk["error"]
-                        elif analysis["intent"] in ["summarize_posts", "analyze_popular_posts", "search_opinions"]:
-                            response += f"**簡介**：{parsed_chunk.get('intro', '')}\n\n"
-                            if analysis["intent"] == "search_opinions":
-                                for item in parsed_chunk.get("opinions", []):
-                                    response += f"**標題**：{item.get('title', '')}\n"
-                                    response += f"**意見總結**：{item.get('summary', '')}\n"
-                                    response += f"**關鍵詞**：{', '.join(item.get('keywords', []))}\n\n"
-                            else:
-                                for item in parsed_chunk.get("analysis", []):
-                                    response += f"**標題**：{item.get('title', '')}\n"
-                                    response += f"**主題**：{item.get('theme', '')}\n"
-                                    response += f"**觀點**：{item.get('views', '')}\n"
-                                    response += f"**趨勢**：{item.get('trend', '')}\n\n"
-                            response += f"**總結**：{parsed_chunk.get('summary', '')}"
-                        elif analysis["intent"] == "list_titles":
-                            for item in parsed_chunk.get("titles", []):
-                                response += f"帖子 ID: {item.get('thread_id', '')} 標題: {item.get('title', '')}\n"
-                            response = response.strip()
-                        elif analysis["intent"] == "analyze_sentiment":
-                            sentiments = parsed_chunk.get("sentiments", {})
-                            response += f"**情緒分佈**：正面 {sentiments.get('positive', 0)}%，負面 {sentiments.get('negative', 0)}%，中立 {sentiments.get('neutral', 0)}%\n"
-                            response += f"**原因**：{parsed_chunk.get('reasons', '')}"
-                        elif analysis["intent"] == "fetch_dates":
-                            response += f"**日期資料**：\n\n"
-                            for item in parsed_chunk.get("dates", []):
-                                response += f"**標題**：{item.get('title', '')}\n"
-                                response += f"**最後回覆時間**：{item.get('last_reply_time', '')}\n"
-                                response += f"**熱門回覆時間**：{item.get('top_reply_time', '')}\n\n"
-                            response += f"**總結**：{parsed_chunk.get('summary', '')}"
-                        elif analysis["intent"] in ["general_query", "ask_functionality"]:
-                            response += parsed_chunk.get("response", "")
-                        else:
-                            response += json.dumps(parsed_chunk, ensure_ascii=False)
-                    except json.JSONDecodeError:
-                        response += chunk
+                    response += chunk
                     grok_container.markdown(response)
                 if not response:
                     logger.warning(f"No response generated for query: {user_question}")
