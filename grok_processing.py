@@ -384,12 +384,23 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
     prompt_builder = PromptBuilder()
+    # 規範化 threads 數據，確保 no_of_reply 和 like_count 是整數
+    normalized_threads = [
+        {
+            "thread_id": t["thread_id"],
+            "title": t["title"],
+            "no_of_reply": int(t.get("no_of_reply", 0)),
+            "like_count": int(t.get("like_count", 0))
+        }
+        for t in threads
+    ]
+    
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
             cat_name=cat_name,
             cat_id=cat_id,
-            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
+            threads=normalized_threads
         )
     except Exception as e:
         logger.error(f"Failed to build prioritize prompt: {str(e)}")
@@ -821,7 +832,14 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         cache_key = thread_id
         cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
         if cache_data and cache_data.get("replies") and cache_data.get("fetched_pages"):
-            thread_data.append(cache_data)
+            # 規範化緩存數據
+            normalized_cache_data = {
+                **cache_data,
+                "no_of_reply": int(cache_data.get("no_of_reply", 0)),
+                "like_count": int(cache_data.get("like_count", 0)),
+                "dislike_count": int(cache_data.get("dislike_count", 0))
+            }
+            thread_data.append(normalized_cache_data)
             continue
         
         specific_pages = None
@@ -861,16 +879,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             thread_info = {
                 "thread_id": thread_id,
                 "title": content_result.get("title", candidate_threads[idx]["title"]),
-                "no_of_reply": candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0)),
+                "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),  # 轉換為整數
                 "last_reply_time": candidate_threads[idx]["last_reply_time"],
-                "like_count": candidate_threads[idx].get("like_count", 0),
-                "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                "like_count": int(candidate_threads[idx].get("like_count", 0)),  # 轉換為整數
+                "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),  # 轉換為整數
                 "replies": [
                     {
                         "post_id": reply.get("post_id"),
                         "msg": clean_html(reply.get("msg", "")),
-                        "like_count": reply.get("like_count", 0),
-                        "dislike_count": reply.get("dislike_count", 0),
+                        "like_count": int(reply.get("like_count", 0)),  # 確保回覆的 like_count 也是整數
+                        "dislike_count": int(reply.get("dislike_count", 0)),  # 確保回覆的 dislike_count 也是整數
                         "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                     } for reply in content_result["replies"] if reply.get("msg")
                 ],
