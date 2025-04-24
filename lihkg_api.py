@@ -15,6 +15,7 @@ import random
 import hashlib
 import logging
 import json
+from grok_processing import clean_html, safe_int
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
@@ -44,21 +45,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
 ]
 
-def safe_int(value, default=0):
-    """
-    安全將值轉換為整數，處理異常格式。
-    """
-    try:
-        if isinstance(value, (int, float)):
-            return int(value)
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-        logger.warning(f"Invalid integer value: {value}, using default={default}")
-        return default
-    except (ValueError, TypeError) as e:
-        logger.warning(f"Failed to convert {value} to int: {str(e)}, using default={default}")
-        return default
-
 class RateLimiter:
     """
     速率限制器，控制 API 請求頻率。
@@ -87,11 +73,14 @@ class ApiClient:
         self.base_url = LIHKG_BASE_URL
         self.device_id = LIHKG_DEVICE_ID
         self.cookie = LIHKG_COOKIE
-        self.avg_response_time = 1.0  # 初始平均響應時間（秒）
-        self.response_times = []  # 儲存最近10次響應時間
+        self.avg_response_time = 1.0
+        self.response_times = []
 
     def generate_headers(self, url: str, timestamp: int):
-        digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
+        # 改進 X-LI-DIGEST 生成邏輯，確保正確編碼
+        encoded_url = url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c').replace(' ', '%20')
+        digest_input = f"jeams$get${encoded_url}${timestamp}"
+        digest = hashlib.sha1(digest_input.encode('utf-8')).hexdigest()
         return {
             "User-Agent": random.choice(USER_AGENTS),
             "X-LI-DEVICE": self.device_id,
@@ -104,7 +93,7 @@ class ApiClient:
             "Referer": url.rsplit('/', 1)[0]
         }
 
-    async def get(self, url: str, function_name: str, params=None, max_retries=3, timeout=10):
+    async def get(self, url: str, function_name: str, params=None, max_retries=5, timeout=10):
         timestamp = int(time.time())
         headers = self.generate_headers(url, timestamp)
         rate_limit_info = []
@@ -119,15 +108,17 @@ class ApiClient:
                         if len(self.response_times) > 10:
                             self.response_times.pop(0)
                         self.avg_response_time = sum(self.response_times) / len(self.response_times)
-                        delay = max(0.5, min(2.0, self.avg_response_time * 0.8))  # 動態延遲：0.5-2秒
+                        delay = max(0.5, min(2.0, self.avg_response_time * 0.8))
                         await asyncio.sleep(delay)
                         status = "success" if response.status == 200 else f"failed_status_{response.status}"
+                        response_text = await response.text()
                         logger.info(
                             json.dumps({
                                 "event": "lihkg_api_request",
                                 "function": function_name,
                                 "url": url,
-                                "status": status
+                                "status": status,
+                                "response_sample": response_text[:200]
                             }, ensure_ascii=False)
                         )
                         if response.status == 429:
@@ -137,12 +128,21 @@ class ApiClient:
                             await asyncio.sleep(wait_time)
                             continue
                         if response.status != 200:
-                            logger.error(f"Fetch failed: {function_name}, url={url}, status={response.status}")
-                            break
+                            logger.error(f"Fetch failed: {function_name}, url={url}, status={response.status}, response={response_text[:500]}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 + attempt * 2)
+                                continue
+                            return None, rate_limit_info
                         data = await response.json()
                         if not data.get("success"):
-                            logger.error(f"API error: {function_name}, url={url}, message={data.get('error_message', 'Unknown')}")
-                            break
+                            error_message = data.get('error_message', 'Unknown')
+                            logger.error(f"API error: {function_name}, url={url}, message={error_message}, response={response_text[:500]}")
+                            if error_message == "Error (2)" and attempt < max_retries - 1:
+                                await asyncio.sleep(5 + attempt * 5)
+                                timestamp = int(time.time())
+                                headers = self.generate_headers(url, timestamp)
+                                continue
+                            return None, rate_limit_info
                         return data, rate_limit_info
             except Exception as e:
                 logger.error(
@@ -155,10 +155,9 @@ class ApiClient:
                     }, ensure_ascii=False)
                 )
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2 + attempt * 2)
                     continue
-                break
-        return None, rate_limit_info
+                return None, rate_limit_info
 
 # 初始化速率限制器和客戶端
 rate_limiter = RateLimiter(max_requests=50, period=60)
@@ -270,7 +269,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                 "last_reset": last_reset, "rate_limit_until": rate_limit_until
             }
     else:
-        pages_to_fetch = list(range(start_page, start_page + 3))
+        pages_to_fetch = list(range(start_page, min(start_page + 3, total_pages + 1)))
     
     title = ""
     for page in pages_to_fetch:
