@@ -111,6 +111,7 @@ class PromptBuilder:
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
         prompt += f"任務：分析問題意圖，選擇最適合的意圖，僅從以下選項中選擇：{', '.join(available_intents)}。\n"
+        prompt += "示例：\n- '你可以做什麼？' -> intent=ask_functionality\n- '分析熱門帖子' -> intent=analyze_popular_posts\n- '連登仔點睇美股' -> intent=search_opinions\n"
         prompt += "輸出格式：{\"intent\": \"string\", \"data_requirements\": [\"string\"], \"filters\": {\"min_replies\": number, \"min_likes\": number, \"sort\": \"string\"}, \"post_limit\": number, \"reply_limit\": number, \"task\": \"string\", \"output_format\": \"string\", \"theme\": \"string\", \"theme_keywords\": [\"string\"]}"
         return prompt
 
@@ -236,18 +237,32 @@ async def stream_grok3_response(user_query, metadata, thread_data, intent, selec
     
     max_replies_per_thread = 20
     filtered_thread_data = {}
-    for tid, data in (thread_data or {}).items():
+    if not isinstance(thread_data, (dict, list)):
+        logger.error(f"Invalid thread_data type: {type(thread_data)}, expected dict or list")
+        yield json.dumps({"error": prompt_builder.config["intents"]["error_templates"]["data_invalid"]})
+        return
+    
+    if isinstance(thread_data, list):
+        thread_data = {item["thread_id"]: item for item in thread_data if isinstance(item, dict) and "thread_id" in item}
+    
+    for tid, data in thread_data.items():
+        if not isinstance(data, dict):
+            logger.warning(f"Skipping invalid thread_data entry for tid {tid}: {data}")
+            continue
         replies = data.get("replies", [])
+        if not isinstance(replies, list):
+            logger.warning(f"Invalid replies format for tid {tid}: {replies}")
+            replies = []
         sorted_replies = sorted(
-            [r for r in replies if r.get("msg")],
+            [r for r in replies if isinstance(r, dict) and r.get("msg")],
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
         filtered_thread_data[tid] = {
-            "thread_id": data["thread_id"],
-            "title": data["title"],
+            "thread_id": data.get("thread_id", tid),
+            "title": data.get("title", ""),
             "no_of_reply": data.get("no_of_reply", 0),
-            "last_reply_time": data.get("last_reply_time", 0),
+            "last_reply_time": data.get("last_reply_time", "0"),
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
             "replies": sorted_replies,
@@ -302,6 +317,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, intent, selec
                                         response_content += content
                                         yield content
                                 except json.JSONDecodeError:
+                                    logger.warning(f"Invalid JSON chunk: {line_str}")
                                     continue
                     if response_content:
                         return
@@ -380,7 +396,13 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(result.get("rate_limit_info", []))
                 items = result.get("items", [])
+                if not isinstance(items, list):
+                    logger.error(f"Invalid items format from API: {items}")
+                    items = []
                 for item in items:
+                    if not isinstance(item, dict):
+                        logger.warning(f"Skipping invalid item: {item}")
+                        continue
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
                 thread_data.extend(items)
                 if len(thread_data) >= 150:
@@ -394,7 +416,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 progress_callback("正在抓取帖子內容", 0.3)
             filtered_items = [
                 item for item in thread_data
-                if item.get("no_of_reply", 0) >= filters.get("min_replies", 20) and
+                if isinstance(item, dict) and
+                   item.get("no_of_reply", 0) >= filters.get("min_replies", 20) and
                    int(item.get("like_count", 0)) >= filters.get("min_likes", 5)
             ]
             sorted_items = sorted(
@@ -405,7 +428,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             
             final_thread_data = []
             for idx, item in enumerate(sorted_items):
-                thread_id = str(item["thread_id"])
+                thread_id = str(item.get("thread_id", ""))
+                if not thread_id:
+                    logger.warning(f"Skipping item with missing thread_id: {item}")
+                    continue
                 cache_key = f"{intent}:{thread_id}"
                 cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
                 
@@ -433,19 +459,19 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 if content_result.get("replies"):
                     thread_info = {
                         "thread_id": thread_id,
-                        "title": content_result.get("title", item["title"]),
+                        "title": content_result.get("title", item.get("title", "")),
                         "no_of_reply": item.get("no_of_reply", content_result.get("total_replies", 0)),
-                        "last_reply_time": item["last_reply_time"],
+                        "last_reply_time": item.get("last_reply_time", "0"),
                         "like_count": item.get("like_count", 0),
                         "dislike_count": item.get("dislike_count", 0),
                         "replies": [
                             {
-                                "post_id": reply.get("post_id"),
+                                "post_id": reply.get("post_id", ""),
                                 "msg": clean_html(reply.get("msg", "")),
                                 "like_count": reply.get("like_count", 0),
                                 "dislike_count": reply.get("dislike_count", 0),
                                 "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                            } for reply in content_result["replies"] if reply.get("msg")
+                            } for reply in content_result.get("replies", []) if reply.get("msg")
                         ],
                         "fetched_pages": content_result.get("fetched_pages", [])
                     }
@@ -460,6 +486,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if progress_callback:
             progress_callback("完成數據處理", 0.9)
         
+        logger.info(f"Processed thread_data: {len(thread_data)} items")
         return {
             "selected_cat": selected_cat,
             "thread_data": thread_data,
