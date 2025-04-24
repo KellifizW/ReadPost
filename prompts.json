@@ -58,6 +58,24 @@
         "data_processing": "無需抓取數據，直接回答，字數 200-400",
         "no_data_response": "問題與 LIHKG 無關，直接回答。",
         "fallback": {"source": "none", "message": "無需數據，直接回答。"}
+      },
+      "ask_functionality": {
+        "task": "說明應用功能",
+        "data_requirements": ["none"],
+        "filters": {},
+        "output_format": "{\"response\": \"string\"}",
+        "data_processing": "直接回答功能說明，字數 200-400",
+        "no_data_response": "無需數據，直接說明功能。",
+        "fallback": {"source": "none", "message": "無需數據，直接回答。"}
+      },
+      "analyze_popular_posts": {
+        "task": "分析熱門帖子內容，引用高關注回覆",
+        "data_requirements": ["titles", "replies"],
+        "filters": {"min_replies": 50, "min_likes": 10, "sort": "popular"},
+        "output_format": "{\"intro\": \"string\", \"analysis\": [{\"title\": \"string\", \"theme\": \"string\", \"views\": \"string\", \"trend\": \"string\"}], \"summary\": \"string\"}",
+        "data_processing": "使用元數據和回覆內容，優先高讚回覆，字數 400-600",
+        "no_data_response": "在 {cat_name} 中未找到符合條件的熱門帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。",
+        "fallback": {"source": "cache", "max_items": 5, "message": "使用緩存數據分析。"}
       }
     },
     "error_templates": {
