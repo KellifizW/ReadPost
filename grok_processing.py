@@ -27,7 +27,7 @@ HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # 設置為 DEBUG 以捕獲詳細信息
 
 # 自定義日誌格式器，將時間戳設為香港時區
 class HongKongFormatter(logging.Formatter):
@@ -42,7 +42,7 @@ formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(me
 
 # 控制台處理器
 stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.INFO)
+stream_handler.setLevel(logging.DEBUG)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
@@ -50,6 +50,21 @@ logger.addHandler(stream_handler)
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
+
+def safe_int(value, default=0):
+    """
+    安全將值轉換為整數，處理異常格式。
+    """
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        logger.warning(f"Invalid integer value: {value}, using default={default}")
+        return default
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Failed to convert {value} to int: {str(e)}, using default={default}")
+        return default
 
 class PromptBuilder:
     """
@@ -147,7 +162,7 @@ def unix_to_readable(unix_timestamp):
     將 Unix 時間戳轉換為可讀格式（香港時區）。
     """
     try:
-        timestamp = int(unix_timestamp)
+        timestamp = safe_int(unix_timestamp, 0)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
@@ -383,7 +398,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         logger.error(f"Grok 3 API key missing: {str(e)}")
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
-    logger.debug(f"Prioritizing {len(threads)} threads, sample_types: {[type(t.get('no_of_reply')) for t in threads[:3]]}")
+    logger.debug(f"Prioritizing {len(threads)} threads, sample_data={[{'thread_id': t['thread_id'], 'no_of_reply': t.get('no_of_reply'), 'like_count': t.get('like_count'), 'types': {'no_of_reply': type(t.get('no_of_reply')), 'like_count': type(t.get('like_count'))}} for t in threads[:3]]}")
     
     prompt_builder = PromptBuilder()
     # 規範化 threads 數據
@@ -391,8 +406,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         {
             "thread_id": t["thread_id"],
             "title": t["title"],
-            "no_of_reply": int(t.get("no_of_reply", 0)),
-            "like_count": int(t.get("like_count", 0))
+            "no_of_reply": safe_int(t.get("no_of_reply", 0), 0),
+            "like_count": safe_int(t.get("like_count", 0), 0)
         }
         for t in threads
     ]
@@ -406,7 +421,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         )
     except Exception as e:
         logger.error(f"Failed to build prioritize prompt: {str(e)}")
-        return {"top_thread_ids": [], "reason": f"Prompt building failed: {str(e)}"}
+        return {"top_thread_ids": [], "reason": f"Prompt Vaginas building failed: {str(e)}"}
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -476,7 +491,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         replies = data.get("replies", [])
         sorted_replies = sorted(
             [r for r in replies if r.get("msg")],
-            key=lambda x: x.get("like_count", 0),
+            key=lambda x: safe_int(x.get("like_count", 0), 0),
             reverse=True
         )[:max_replies_per_thread]
         
@@ -487,10 +502,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         filtered_thread_data[tid] = {
             "thread_id": data["thread_id"],
             "title": data["title"],
-            "no_of_reply": data.get("no_of_reply", 0),
+            "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
             "last_reply_time": data.get("last_reply_time", 0),
-            "like_count": data.get("like_count", 0),
-            "dislike_count": data.get("dislike_count", 0),
+            "like_count": safe_int(data.get("like_count", 0), 0),
+            "dislike_count": safe_int(data.get("dislike_count", 0), 0),
             "replies": sorted_replies,
             "fetched_pages": data.get("fetched_pages", [])
         }
@@ -501,10 +516,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             tid: {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
-                "no_of_reply": data.get("no_of_reply", 0),
+                "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
                 "last_reply_time": data.get("last_reply_time", 0),
-                "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
+                "like_count": safe_int(data.get("like_count", 0), 0),
+                "dislike_count": safe_int(data.get("dislike_count", 0), 0),
                 "replies": [],
                 "fetched_pages": data.get("fetched_pages", [])
             } for tid, data in thread_data.items()
@@ -529,10 +544,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             tid: {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
-                "no_of_reply": data.get("no_of_reply", 0),
+                "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
                 "last_reply_time": data.get("last_reply_time", 0),
-                "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
+                "like_count": safe_int(data.get("like_count", 0), 0),
+                "dislike_count": safe_int(data.get("dislike_count", 0), 0),
                 "replies": data["replies"][:max_replies_per_thread],
                 "fetched_pages": data.get("fetched_pages", [])
             } for tid, data in filtered_thread_data.items()
@@ -554,8 +569,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             tid: {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
-                "no_of_reply": data.get("no_of_reply", 0),
-                "like_count": data.get("like_count", 0),
+                "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
+                "like_count": safe_int(data.get("like_count", 0), 0),
                 "replies": data["replies"][:5]
             } for tid, data in filtered_thread_data.items()
         }
@@ -626,8 +641,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     tid: {
                                         "thread_id": data["thread_id"],
                                         "title": data["title"],
-                                        "no_of_reply": data.get("no_of_reply", 0),
-                                        "like_count": data.get("like_count", 0),
+                                        "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
+                                        "like_count": safe_int(data.get("like_count", 0), 0),
                                         "replies": data["replies"][:5]
                                     } for tid, data in filtered_thread_data.items()
                                 }
@@ -675,10 +690,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             tid: {
                                 "thread_id": data["thread_id"],
                                 "title": data["title"],
-                                "no_of_reply": data.get("no_of_reply", 0),
+                                "no_of_reply": safe_int(data.get("no_of_reply", 0), 0),
                                 "last_reply_time": data.get("last_reply_time", 0),
-                                "like_count": data.get("like_count", 0),
-                                "dislike_count": data.get("dislike_count", 0),
+                                "like_count": safe_int(data.get("like_count", 0), 0),
+                                "dislike_count": safe_int(data.get("dislike_count", 0), 0),
                                 "replies": data["replies"][:max_replies_per_thread],
                                 "fetched_pages": data.get("fetched_pages", [])
                             } for tid, data in filtered_thread_data.items()
@@ -710,7 +725,12 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     rate_limit_info = []
     current_time = time.time()
     
-    logger.debug(f"Processing query: {user_question}, intent={analysis.get('intent')}, cat_id={cat_id}")
+    # 清空緩存以避免舊數據影響
+    if "thread_cache" in st.session_state:
+        st.session_state.thread_cache.clear()
+        logger.info("Cleared thread cache on query start")
+    
+    logger.debug(f"Processing query: {user_question}, intent={analysis.get('intent')}, cat_id={cat_id}, filters={analysis.get('filters')}")
     
     if current_time < rate_limit_until:
         rate_limit_info.append(f"{datetime.datetime.now(HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.datetime.fromtimestamp(rate_limit_until, HONG_KONG_TZ)}")
@@ -750,9 +770,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 if response.status == 200:
                     data = await response.json()
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    pages = max(1, min(10, int(result["pages"])))  # 確保整數
+                    pages = safe_int(result["pages"], 5)  # 使用安全轉換
                     segment = result["segment"]
-                    logger.debug(f"Dynamic page selection: pages={pages}, segment={segment}")
+                    logger.debug(f"Dynamic page selection: pages={pages}, segment={segment}, reason={result['reason']}")
                 else:
                     logger.warning(f"Dynamic page selection failed: status={response.status}")
                     pages, segment = 5, "head"
@@ -783,16 +803,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_until": rate_limit_until
         }
     
-    logger.debug(f"Candidate threads: {len(candidate_threads)}, sample_types: {[type(t.get('no_of_reply')) for t in candidate_threads[:3]]}, sample_total_pages: {[t.get('total_pages') for t in candidate_threads[:3]]}")
+    logger.debug(f"Candidate threads: {len(candidate_threads)}, sample_data: {[{'thread_id': t['thread_id'], 'no_of_reply': t.get('no_of_reply'), 'like_count': t.get('like_count'), 'total_pages': t.get('total_pages'), 'types': {'no_of_reply': type(t.get('no_of_reply')), 'like_count': type(t.get('like_count')), 'total_pages': type(t.get('total_pages'))}} for t in candidate_threads[:3]]}")
     
     # 篩選帖子
     filters = analysis.get("filters", {"min_replies": 20, "min_likes": 5})
-    min_replies = int(filters.get("min_replies", 20))  # 確保整數
-    min_likes = int(filters.get("min_likes", 5))      # 確保整數
+    min_replies = safe_int(filters.get("min_replies", 20), 20)
+    min_likes = safe_int(filters.get("min_likes", 5), 5)
     
     filtered_threads = [
         item for item in candidate_threads
-        if int(item.get("no_of_reply", 0)) >= min_replies and int(item.get("like_count", 0)) >= min_likes
+        if safe_int(item.get("no_of_reply", 0), 0) >= min_replies and safe_int(item.get("like_count", 0), 0) >= min_likes
     ]
     
     logger.debug(f"Filtered threads: {len(filtered_threads)}, filters: min_replies={min_replies}, min_likes={min_likes}")
@@ -823,7 +843,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     logger.debug(f"Prioritization result: top_thread_ids={top_thread_ids}, reason={reason}")
     
     if not top_thread_ids:
-        top_thread_ids = [item["thread_id"] for item in filtered_threads[:analysis.get("post_limit", 10)]]
+        top_thread_ids = [item["thread_id"] for item in filtered_threads[:safe_int(analysis.get("post_limit", 10), 10)]]
         logger.info(f"Fallback to default thread selection: {top_thread_ids}")
     
     candidate_threads = [
@@ -832,13 +852,13 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     ]
     
     if not candidate_threads:
-        candidate_threads = filtered_threads[:analysis.get("post_limit", 10)]
+        candidate_threads = filtered_threads[:safe_int(analysis.get("post_limit", 10), 10)]
         logger.warning(f"No prioritized threads found, using default: {len(candidate_threads)} threads")
     
-    logger.debug(f"Final candidate threads: {len(candidate_threads)}")
+    logger.debug(f"Final candidate threads: {len(candidate_threads)}, thread_ids={[t['thread_id'] for t in candidate_threads]}")
     
     # 並行抓取帖子內容
-    reply_limit = int(analysis.get("reply_limit", 50))  # 確保整數
+    reply_limit = safe_int(analysis.get("reply_limit", 50), 50)
     tasks = []
     for idx, item in enumerate(candidate_threads):
         thread_id = str(item["thread_id"])
@@ -849,39 +869,33 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             try:
                 normalized_cache_data = {
                     **cache_data,
-                    "no_of_reply": int(cache_data.get("no_of_reply", 0)),
-                    "like_count": int(cache_data.get("like_count", 0)),
-                    "dislike_count": int(cache_data.get("dislike_count", 0)),
-                    "total_pages": int(cache_data.get("total_pages", 1)) if cache_data.get("total_pages") else 1,  # 處理 total_pages
+                    "no_of_reply": safe_int(cache_data.get("no_of_reply", 0), 0),
+                    "like_count": safe_int(cache_data.get("like_count", 0), 0),
+                    "dislike_count": safe_int(cache_data.get("dislike_count", 0), 0),
+                    "total_pages": safe_int(cache_data.get("total_pages", 1), 1),
                     "replies": [
                         {
                             **reply,
-                            "like_count": int(reply.get("like_count", 0)),
-                            "dislike_count": int(reply.get("dislike_count", 0))
+                            "like_count": safe_int(reply.get("like_count", 0), 0),
+                            "dislike_count": safe_int(reply.get("dislike_count", 0), 0)
                         } for reply in cache_data.get("replies", [])
                     ]
                 }
-                logger.debug(f"Using cached data for thread_id={thread_id}, no_of_reply_type={type(normalized_cache_data['no_of_reply'])}, total_pages={normalized_cache_data['total_pages']}")
+                logger.debug(f"Using cached data for thread_id={thread_id}, data={normalized_cache_data}")
                 thread_data.append(normalized_cache_data)
                 continue
-            except ValueError as e:
+            except Exception as e:
                 logger.warning(f"Invalid cache data for thread_id={thread_id}: {str(e)}")
-                # 跳過無效緩存數據
                 st.session_state.thread_cache.pop(cache_key, None)
         
         specific_pages = None
         fetch_last_pages = pages if segment == "tail" else 0
-        try:
-            total_pages_raw = item.get("total_pages", 1)
-            total_pages = int(total_pages_raw) if str(total_pages_raw).isdigit() else 1  # 處理異常格式
-            logger.debug(f"Thread_id={thread_id}, total_pages_raw={total_pages_raw}, total_pages={total_pages}")
-            start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, total_pages - pages))
-            if segment == "avg":
-                specific_pages = [int(i * total_pages / pages) + 1 for i in range(pages)] if total_pages > pages else list(range(1, total_pages + 1))
-        except ValueError as e:
-            logger.warning(f"Invalid total_pages for thread_id={thread_id}: {total_pages_raw}, error={str(e)}")
-            total_pages = 1
-            start_page = 1
+        total_pages_raw = item.get("total_pages", 1)
+        total_pages = safe_int(total_pages_raw, 1)
+        logger.debug(f"Thread_id={thread_id}, total_pages_raw={total_pages_raw}, total_pages={total_pages}")
+        start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, total_pages - pages))
+        if segment == "avg":
+            specific_pages = [int(i * total_pages / pages) + 1 for i in range(pages)] if total_pages > pages else list(range(1, total_pages + 1))
         
         tasks.append(get_lihkg_thread_content(
             thread_id=thread_id,
@@ -914,26 +928,26 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 thread_info = {
                     "thread_id": thread_id,
                     "title": content_result.get("title", candidate_threads[idx]["title"]),
-                    "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),
+                    "no_of_reply": safe_int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0)), 0),
                     "last_reply_time": candidate_threads[idx]["last_reply_time"],
-                    "like_count": int(candidate_threads[idx].get("like_count", 0)),
-                    "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),
-                    "total_pages": int(content_result.get("total_pages", 1)) if content_result.get("total_pages") else 1,  # 處理 total_pages
+                    "like_count": safe_int(candidate_threads[idx].get("like_count", 0), 0),
+                    "dislike_count": safe_int(candidate_threads[idx].get("dislike_count", 0), 0),
+                    "total_pages": safe_int(content_result.get("total_pages", 1), 1),
                     "replies": [
                         {
                             "post_id": reply.get("post_id"),
                             "msg": clean_html(reply.get("msg", "")),
-                            "like_count": int(reply.get("like_count", 0)),
-                            "dislike_count": int(reply.get("dislike_count", 0)),
+                            "like_count": safe_int(reply.get("like_count", 0), 0),
+                            "dislike_count": safe_int(reply.get("dislike_count", 0), 0),
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         } for reply in content_result["replies"] if reply.get("msg")
                     ],
                     "fetched_pages": content_result.get("fetched_pages", [])
                 }
-                logger.debug(f"Thread_id={thread_id}, no_of_reply_type={type(thread_info['no_of_reply'])}, total_pages={thread_info['total_pages']}, reply_count={len(thread_info['replies'])}")
+                logger.debug(f"Thread_id={thread_id}, thread_info={thread_info}")
                 thread_data.append(thread_info)
                 st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
-            except ValueError as e:
+            except Exception as e:
                 logger.warning(f"Invalid data for thread_id={thread_id}: {str(e)}")
                 continue
     
