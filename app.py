@@ -44,15 +44,15 @@ logger.addHandler(stream_handler)
 # 應用 asyncio 補丁
 nest_asyncio.apply()
 
-def validate_input(user_question):
+def validate_input(user_query):
     """
     驗證用戶輸入，確保長度有效，允許純中文查詢。
     """
-    if not user_question:
+    if not user_query:
         return False, "輸入不能為空"
-    if len(user_question) < 3:
+    if len(user_query) < 3:
         return False, "輸入過短，至少3個字"
-    if len(user_question) > 200:
+    if len(user_query) > 200:
         return False, "輸入過長，最多200個字"
     return True, ""
 
@@ -145,19 +145,19 @@ async def main():
                 )
 
     # 用戶輸入
-    user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
-    if user_question and not st.session_state.awaiting_response:
+    user_query = st.chat_input("請輸入 LIHKG 話題或一般問題")
+    if user_query and not st.session_state.awaiting_response:
         # 驗證輸入
-        is_valid, error_message = validate_input(user_question)
+        is_valid, error_message = validate_input(user_query)
         if not is_valid:
             with st.chat_message("assistant"):
                 st.error(error_message)
-            st.session_state.chat_history.append({"question": user_question, "answer": error_message})
+            st.session_state.chat_history.append({"question": user_query, "answer": error_message})
             return
         
-        logger.info(f"User query: {user_question}, category: {selected_cat}, cat_id: {cat_id}")
+        logger.info(f"User query: {user_query}, category: {selected_cat}, cat_id: {cat_id}")
         with st.chat_message("user"):
-            st.markdown(user_question)
+            st.markdown(user_query)
         st.session_state.awaiting_response = True
 
         # 清理過舊上下文（超過1小時）
@@ -189,7 +189,7 @@ async def main():
                 logger.warning(error_message)
                 with st.chat_message("assistant"):
                     st.markdown(error_message)
-                st.session_state.chat_history.append({"question": user_question, "answer": error_message})
+                st.session_state.chat_history.append({"question": user_query, "answer": error_message})
                 update_progress("處理失敗", 1.0)
                 time.sleep(0.5)
                 status_text.empty()
@@ -200,15 +200,15 @@ async def main():
             # 重置聊天記錄（僅當話題完全無關）
             if "last_user_query" not in st.session_state:
                 st.session_state.last_user_query = None
-            if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
-                st.session_state.chat_history = [{"question": user_question, "answer": ""}]
+            if not st.session_state.last_user_query or len(set(user_query.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
+                st.session_state.chat_history = [{"question": user_query, "answer": ""}]
                 st.session_state.thread_cache = {}
-                st.session_state.last_user_query = user_question
+                st.session_state.last_user_query = user_query
 
             # 分析問題
             update_progress("正在分析問題意圖", 0.1)
             analysis = await analyze_and_screen(
-                user_query=user_question,
+                user_query=user_query,
                 cat_name=selected_cat,
                 cat_id=cat_id,
                 conversation_context=st.session_state.conversation_context
@@ -218,7 +218,7 @@ async def main():
             # 處理問題
             update_progress("正在處理查詢", 0.2)
             result = await process_user_question(
-                user_question=user_question,
+                user_query=user_query,  # 修改為 user_query
                 selected_cat=selected_cat,
                 cat_id=cat_id,
                 analysis=analysis,
@@ -239,9 +239,9 @@ async def main():
             with st.chat_message("assistant"):
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
-                logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
+                logger.info(f"Starting stream_grok3_response for query: {user_query}, intent: {analysis.get('intent')}")
                 async for chunk in stream_grok3_response(
-                    user_query=user_question,
+                    user_query=user_query,
                     metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
                     processing=analysis.get("processing", "general"),
@@ -254,12 +254,12 @@ async def main():
                     response += chunk
                     grok_container.markdown(response)
                 if not response:
-                    logger.warning(f"No response generated for query: {user_question}")
+                    logger.warning(f"No response generated for query: {user_query}")
                     response = "無法生成回應，請稍後重試。"
                     grok_container.markdown(response)
 
             st.session_state.chat_history[-1]["answer"] = response
-            st.session_state.conversation_context.append({"role": "user", "content": user_question})
+            st.session_state.conversation_context.append({"role": "user", "content": user_query})
             st.session_state.conversation_context.append({"role": "assistant", "content": response})
             st.session_state.context_timestamps.append(time.time())
             st.session_state.context_timestamps.append(time.time())
@@ -272,10 +272,10 @@ async def main():
 
         except Exception as e:
             error_message = f"處理失敗：{str(e)}"
-            logger.error(f"Error processing query: {user_question}, error: {str(e)}")
+            logger.error(f"Error processing query: {user_query}, error: {str(e)}")
             with st.chat_message("assistant"):
                 st.markdown(error_message)
-            st.session_state.chat_history.append({"question": user_question, "answer": error_message})
+            st.session_state.chat_history.append({"question": user_query, "answer": error_message})
             update_progress("處理失敗", 1.0)
             time.sleep(0.5)
             status_text.empty()
