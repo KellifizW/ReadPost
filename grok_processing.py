@@ -151,19 +151,57 @@ def extract_keywords(query):
     words = re.findall(r'\w+', query)
     return [word for word in words if word not in stop_words][:3]
 
+async def summarize_context(conversation_context):
+    """
+    使用 Grok 3 提煉對話歷史主題。
+    """
+    if not conversation_context:
+        return {"theme": "general", "keywords": []}
+    
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+    except KeyError as e:
+        logger.error(f"Grok 3 API key missing: {str(e)}")
+        return {"theme": "general", "keywords": []}
+    
+    prompt = f"""
+    你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
+    """
+    
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    payload = {
+        "model": "grok-3-beta",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 100,
+        "temperature": 0.5
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status != 200:
+                    logger.warning(f"Context summarization failed: status={response.status}")
+                    return {"theme": "general", "keywords": []}
+                data = await response.json()
+                result = json.loads(data["choices"][0]["message"]["content"])
+                return result
+    except Exception as e:
+        logger.warning(f"Context summarization error: {str(e)}")
+        return {"theme": "general", "keywords": []}
+
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，使用語義嵌入識別意圖，確保廣泛查詢進入分析流程。
+    分析用戶問題，使用語義嵌入識別意圖，優先延續歷史意圖。
     """
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    # 從對話歷史提取主題
-    historical_themes = []
-    for msg in conversation_context[-4:]:  # 檢查最近2輪對話
-        if msg["role"] == "user":
-            keywords = extract_keywords(msg["content"])
-            historical_themes.extend(keywords)
+    # 提煉對話歷史主題
+    context_summary = await summarize_context(conversation_context)
+    historical_theme = context_summary.get("theme", "general")
+    historical_keywords = context_summary.get("keywords", [])
     
     # 定義意圖描述
     intent_descriptions = {
@@ -180,12 +218,18 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "classify_opinions": "將回覆按意見立場分類"
     }
     
+    # 檢查問題是否模糊
+    query_words = set(re.findall(r'\w+', user_query))
+    is_vague = len(query_words) < 3 or query_words.issubset({"是", "什麼", "有", "嗎", "請問"})
+    
     # 準備語義比較提示詞
     semantic_prompt = f"""
     你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
+    若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
     用戶問題：{user_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    歷史主題：{json.dumps(historical_themes, ensure_ascii=False)}
+    歷史主題：{historical_theme}
+    歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
     意圖描述：
     {json.dumps(intent_descriptions, ensure_ascii=False, indent=2)}
     輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
@@ -198,7 +242,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         return {
             "direct_response": True,
             "intent": "general_query",
-            "theme": "",
+            "theme": historical_theme,
             "category_ids": [],
             "data_type": "none",
             "post_limit": 5,
@@ -209,7 +253,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "top_thread_ids": [],
             "needs_advanced_analysis": False,
             "reason": "Missing API key",
-            "theme_keywords": []
+            "theme_keywords": historical_keywords
         }
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -244,16 +288,21 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     confidence = result.get("confidence", 0.7)
                     reason = result.get("reason", "語義匹配")
                     
+                    # 若問題模糊，延續歷史意圖
+                    if is_vague and historical_theme != "general":
+                        intent = "summarize_posts" if historical_theme in ["general", "帖子推薦"] else intent
+                        reason = f"問題模糊，延續歷史主題：{historical_theme}"
+                    
                     # 根據意圖設置參數
-                    theme = "general"
-                    theme_keywords = []
+                    theme = historical_theme if is_vague else "general"
+                    theme_keywords = historical_keywords if is_vague else []
                     post_limit = 10
                     reply_limit = 50
                     data_type = "both"
                     processing = intent
                     if intent in ["search_keywords", "find_themed"]:
-                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else "general"
-                        theme_keywords = extract_keywords(user_query)
+                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
+                        theme_keywords = extract_keywords(user_query) or historical_keywords
                     elif intent == "monitor_events":
                         theme = "事件追蹤"
                         reply_limit = 100
@@ -293,7 +342,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             return {
                 "direct_response": False,
                 "intent": "summarize_posts",
-                "theme": "general",
+                "theme": historical_theme,
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
@@ -303,8 +352,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "candidate_thread_ids": [],
                 "top_thread_ids": [],
                 "needs_advanced_analysis": False,
-                "reason": f"Semantic analysis failed: {str(e)}",
-                "theme_keywords": []
+                "reason": f"Semantic analysis failed, defaulting to historical theme: {historical_theme}",
+                "theme_keywords": historical_keywords
             }
 
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
@@ -382,11 +431,15 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
-    使用 Grok 3 API 生成流式回應，根據意圖和分類動態選擇模板。
+    使用 Grok 3 API 生成流式回應，添加銜接句以增強連續性。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 20, "min_likes": 5}
     prompt_builder = PromptBuilder()
+    
+    # 提煉對話歷史主題
+    context_summary = await summarize_context(conversation_context)
+    historical_theme = context_summary.get("theme", "general")
     
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -439,6 +492,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if intent not in ["list", "summarize", "sentiment", "compare", "introduce", "general", "themed", "fetch_dates", "search_keywords", "recommend_threads", "monitor_events", "classify_opinions"]:
         intent = "general"
     
+    # 添加銜接句
+    transition = f"承接您之前的話題（{historical_theme}），以下是對 {user_query} 的回應：\n" if conversation_context and historical_theme != "general" else ""
+    
     prompt = prompt_builder.build_response(
         intent=intent,
         query=user_query,
@@ -448,6 +504,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         thread_data=filtered_thread_data,
         filters=filters
     )
+    
+    # 在提示詞開頭插入銜接句
+    prompt = transition + prompt
     
     prompt_length = len(prompt)
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -464,7 +523,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "fetched_pages": data.get("fetched_pages", [])
             } for tid, data in filtered_thread_data.items()
         }
-        prompt = prompt_builder.build_response(
+        prompt = transition + prompt_builder.build_response(
             intent=intent,
             query=user_query,
             selected_cat=selected_cat,
@@ -486,7 +545,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "replies": data["replies"][:5]
             } for tid, data in filtered_thread_data.items()
         }
-        prompt = prompt_builder.build_response(
+        prompt = transition + prompt_builder.build_response(
             intent=intent,
             query=user_query,
             selected_cat=selected_cat,
@@ -558,7 +617,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         "replies": data["replies"][:5]
                                     } for tid, data in filtered_thread_data.items()
                                 }
-                                prompt = prompt_builder.build_response(
+                                prompt = transition + prompt_builder.build_response(
                                     intent=intent,
                                     query=user_query,
                                     selected_cat=selected_cat,
@@ -589,7 +648,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                             response_content = content
                                             yield content
                                             return
-                            response_content = "無法生成詳細總結，可能是數據不足。以下是吹水台的通用概述：吹水台討論涵蓋時事、娛樂等多主題，網民觀點多元。"
+                            response_content = f"承接之前的討論，以下是 {selected_cat} 的通用概述：討論涵蓋多主題，網民觀點多元。"
                             yield response_content
                             return
                         logger.info(f"Response generation completed: length={len(response_content)}")
@@ -610,7 +669,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "fetched_pages": data.get("fetched_pages", [])
                             } for tid, data in filtered_thread_data.items()
                         }
-                        prompt = prompt_builder.build_response(
+                        prompt = transition + prompt_builder.build_response(
                             intent=intent,
                             query=user_query,
                             selected_cat=selected_cat,
