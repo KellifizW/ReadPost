@@ -193,7 +193,7 @@ async def summarize_context(conversation_context):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，使用語義嵌入識別意圖，優先延續歷史意圖。
+    分析用戶問題，使用語義嵌入識別意圖，優先延續歷史意圖，新增追問意圖。
     """
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
@@ -215,17 +215,28 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "search_keywords": "根據關鍵詞搜索帖子",
         "recommend_threads": "推薦相關或熱門帖子",
         "monitor_events": "追蹤特定事件或話題的討論",
-        "classify_opinions": "將回覆按意見立場分類"
+        "classify_opinions": "將回覆按意見立場分類",
+        "follow_up": "追問之前回應中提到的帖子內容"
     }
     
     # 檢查問題是否模糊
     query_words = set(re.findall(r'\w+', user_query))
     is_vague = len(query_words) < 3 or query_words.issubset({"是", "什麼", "有", "嗎", "請問"})
     
+    # 檢查是否為追問
+    is_follow_up = False
+    if conversation_context and len(conversation_context) >= 2:
+        last_user_query = conversation_context[-2].get("content", "")
+        last_response = conversation_context[-1].get("content", "")
+        common_words = set(user_query.split()).intersection(set(last_user_query.split() + last_response.split()))
+        if len(common_words) >= 2 and any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "深入", "接著"]):
+            is_follow_up = True
+    
     # 準備語義比較提示詞
     semantic_prompt = f"""
     你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
     若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
+    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」等詞或與前問題/回應有重疊），選擇「follow_up」意圖。
     用戶問題：{user_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
     歷史主題：{historical_theme}
@@ -246,7 +257,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "category_ids": [],
             "data_type": "none",
             "post_limit": 5,
-            "reply_limit": 0,
+            "reply_limit": 250,
             "filters": {},
             "processing": "general",
             "candidate_thread_ids": [],
@@ -293,11 +304,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         intent = "summarize_posts" if historical_theme in ["general", "帖子推薦"] else intent
                         reason = f"問題模糊，延續歷史主題：{historical_theme}"
                     
+                    # 若檢測到追問，強制設置為 follow_up
+                    if is_follow_up:
+                        intent = "follow_up"
+                        reason = "檢測到追問，與前問題或回應有語義重疊"
+                    
                     # 根據意圖設置參數
                     theme = historical_theme if is_vague else "general"
                     theme_keywords = historical_keywords if is_vague else []
                     post_limit = 10
-                    reply_limit = 50
+                    reply_limit = 250  # 默認 250，後續由 Grok 3 動態調整
                     data_type = "both"
                     processing = intent
                     if intent in ["search_keywords", "find_themed"]:
@@ -305,10 +321,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         theme_keywords = extract_keywords(user_query) or historical_keywords
                     elif intent == "monitor_events":
                         theme = "事件追蹤"
-                        reply_limit = 100
                     elif intent == "classify_opinions":
                         theme = "意見分類"
-                        reply_limit = 100
                         data_type = "replies"
                     elif intent == "recommend_threads":
                         theme = "帖子推薦"
@@ -316,7 +330,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     elif intent == "fetch_dates":
                         theme = "日期相關資料"
                         post_limit = 5
-                        reply_limit = 50
+                    elif intent == "follow_up":
+                        theme = historical_theme
+                        reply_limit = 250  # 追問允許更多回覆
+                        data_type = "replies"
                     
                     return {
                         "direct_response": intent in ["general_query", "introduce"],
@@ -346,7 +363,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 50,
+                "reply_limit": 250,
                 "filters": {"min_replies": 20, "min_likes": 5},
                 "processing": "summarize",
                 "candidate_thread_ids": [],
@@ -359,7 +376,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID。
-    強化錯誤處理，確保始終返回字典格式，修復 'prioritize' 錯誤。
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -431,7 +447,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None):
     """
-    使用 Grok 3 API 生成流式回應，添加銜接句以增強連續性。
+    使用 Grok 3 API 生成流式回應，添加銜接句以增強連續性，讓 Grok 3 決定每個帖子回覆數量。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 20, "min_likes": 5}
@@ -448,7 +464,38 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    max_replies_per_thread = 20
+    # 讓 Grok 3 決定每個帖子回覆數量
+    reply_count_prompt = f"""
+    你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（25、50、100、200 條）。
+    問題：{user_query}
+    意圖：{processing}
+    若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（100-200）。
+    若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
+    默認：50 條。
+    輸出格式：{{"replies_per_thread": 50, "reason": "決定原因"}}
+    """
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    payload = {
+        "model": "grok-3-beta",
+        "messages": [{"role": "user", "content": reply_count_prompt}],
+        "max_tokens": 100,
+        "temperature": 0.5
+    }
+    
+    max_replies_per_thread = 50  # 默認
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    max_replies_per_thread = result.get("replies_per_thread", 50)
+                    logger.info(f"Grok selected replies_per_thread: {max_replies_per_thread}, reason: {result.get('reason', 'Default')}")
+                else:
+                    logger.warning("Failed to determine replies_per_thread, using default 50")
+    except Exception as e:
+        logger.warning(f"Replies per thread selection failed: {str(e)}, using default 50")
+    
     filtered_thread_data = {}
     for tid, data in thread_data.items():
         replies = data.get("replies", [])
@@ -489,7 +536,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
     
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
-    if intent not in ["list", "summarize", "sentiment", "compare", "introduce", "general", "themed", "fetch_dates", "search_keywords", "recommend_threads", "monitor_events", "classify_opinions"]:
+    if intent not in ["list", "summarize", "sentiment", "compare", "introduce", "general", "themed", "fetch_dates", "search_keywords", "recommend_threads", "monitor_events", "classify_opinions", "follow_up"]:
         intent = "general"
     
     # 添加銜接句
@@ -710,12 +757,12 @@ def unix_to_readable(timestamp):
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
         return "1970-01-01 00:00:00"
 
-async def process_user_question(user_question, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
+async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數。
     """
     try:
-        logger.info(f"Processing user question: {user_question}, category: {selected_cat}")
+        logger.info(f"Processing user question: {user_query}, category: {selected_cat}")
         
         clean_cache()
         
@@ -735,7 +782,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             progress_callback("正在抓取帖子列表", 0.1)
         
         post_limit = min(analysis.get("post_limit", 5), 20)
-        reply_limit = analysis.get("reply_limit", 50)
+        reply_limit = 250  # 默認 250
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 20)
         min_likes = filters.get("min_likes", 5)
@@ -743,8 +790,40 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         time_range = filters.get("time_range", "recent")
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
-        
         intent = analysis.get("intent", "summarize_posts")
+        
+        # 讓 Grok 3 決定總回覆數量
+        reply_limit_prompt = f"""
+        你是資料抓取助手，請根據問題和意圖決定總回覆數量（50、100、150、200 條）。
+        問題：{user_query}
+        意圖：{intent}
+        若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（150-200）。
+        若問題簡單（如標題列出、日期提取），建議較少回覆（50-100）。
+        若意圖為「follow_up」，建議 200 條。
+        默認：250 條。
+        輸出格式：{{"reply_limit": 250, "reason": "決定原因"}}
+        """
+        
+        try:
+            GROK3_API_KEY = st.secrets["grok3key"]
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+            payload = {
+                "model": "grok-3-beta",
+                "messages": [{"role": "user", "content": reply_limit_prompt}],
+                "max_tokens": 100,
+                "temperature": 0.5
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        reply_limit = result.get("reply_limit", 250)
+                        logger.info(f"Grok selected reply_limit: {reply_limit}, reason: {result.get('reason', 'Default')}")
+                    else:
+                        logger.warning("Failed to determine reply_limit, using default 250")
+        except Exception as e:
+            logger.warning(f"Reply limit selection failed: {str(e)}, using default 250")
         
         thread_data = []
         rate_limit_info = []
@@ -816,18 +895,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
             logger.info(f"Fetch dates mode, selected threads: {top_thread_ids}")
         else:
-            # 其他意圖（如 summarize_posts）才執行優先排序
             if not top_thread_ids and filtered_items:
                 if progress_callback:
                     progress_callback("正在重新分析帖子選擇", 0.4)
-                prioritization = await prioritize_threads_with_grok(user_question, filtered_items, selected_cat, cat_id)
+                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id)
                 if not isinstance(prioritization, dict):
                     logger.error(f"Invalid prioritization result: {prioritization}")
                     prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
                 top_thread_ids = prioritization.get("top_thread_ids", [])
                 if not top_thread_ids:
                     logger.warning(f"Prioritization failed: {prioritization.get('reason', 'Unknown reason')}")
-                    # 回退機制：按熱門程度排序
                     sorted_items = sorted(
                         filtered_items,
                         key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
@@ -857,19 +934,19 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         if progress_callback:
             progress_callback("正在決定抓取頁數", 0.45)
         
-        # 動態決定抓取頁數
+        # 讓 Grok 3 決定頁數和頁數類型
         page_prompt = f"""
-        你是資料抓取助手，請根據問題複雜度決定需要抓取的回覆頁數（1-10頁）。
-        問題：{user_question}
+        你是資料抓取助手，請根據問題複雜度和意圖決定需要抓取的回覆頁數（1-10頁）以及頁數類型（最舊、中段、最新）。
+        問題：inius{user_query}
         意圖：{intent}
-        若問題需要深入分析（如情緒、意見分類）或追蹤事件，建議多頁（5-10）。
-        若問題簡單（如標題列出、日期提取），建議少頁（1-2）。
-        默認：首頁+末頁（2頁）。
-        輸出格式：{{"pages": [1, 總頁數], "reason": "決定原因"}}
+        若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（5-10），偏向最新頁。
+        若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。
+        若意圖為「follow_up」，優先抓取未下載的最新頁（5-10頁）。
+        默認：首頁+末頁（[1, 總頁數]）。
+        輸出格式：{{"pages": [頁數列表], "page_type": "oldest/middle/latest", "reason": "決定原因"}}
         """
         
         try:
-            GROK3_API_KEY = st.secrets["grok3key"]
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
             payload = {
                 "model": "grok-3-beta",
@@ -883,13 +960,16 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                         data = await response.json()
                         result = json.loads(data["choices"][0]["message"]["content"])
                         pages_to_fetch = result.get("pages", [1, 2])
-                        logger.info(f"Dynamic pages selected: {pages_to_fetch}, reason: {result.get('reason', 'Default')}")
+                        page_type = result.get("page_type", "latest")
+                        logger.info(f"Dynamic pages selected: {pages_to_fetch}, type: {page_type}, reason: {result.get('reason', 'Default')}")
                     else:
                         pages_to_fetch = [1, 2]
-                        logger.warning("Failed to determine dynamic pages, using default [1, 2]")
+                        page_type = "latest"
+                        logger.warning("Failed to determine dynamic pages, using default [1, 2], type: latest")
         except Exception as e:
             pages_to_fetch = [1, 2]
-            logger.warning(f"Dynamic page selection failed: {str(e)}, using default [1, 2]")
+            page_type = "latest"
+            logger.warning(f"Dynamic page selection failed: {str(e)}, using default [1, 2], type: latest")
         
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
@@ -910,6 +990,15 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 thread_data.append(cache_data)
                 continue
             
+            # 為 follow_up 意圖優先抓取未下載頁數
+            specific_pages = pages_to_fetch
+            if intent == "follow_up" and cache_data.get("fetched_pages"):
+                total_pages = cache_data.get("total_pages", 10)
+                specific_pages = [p for p in range(1, total_pages + 1) if p not in cache_data["fetched_pages"]][:10]
+                if not specific_pages:
+                    specific_pages = pages_to_fetch
+                logger.info(f"Follow-up intent, fetching new pages for thread_id={thread_id}: {specific_pages}")
+            
             tasks.append(
                 get_lihkg_thread_content(
                     thread_id=thread_id,
@@ -919,7 +1008,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                     rate_limit_until=rate_limit_until,
                     max_replies=reply_limit,
                     fetch_last_pages=0,
-                    specific_pages=pages_to_fetch,
+                    specific_pages=specific_pages,
                     start_page=1
                 )
             )
@@ -956,7 +1045,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         } for reply in content_result["replies"] if reply.get("msg")
                     ],
-                    "fetched_pages": content_result.get("fetched_pages", [])
+                    "fetched_pages": content_result.get("fetched_pages", []),
+                    "total_pages": content_result.get("total_pages", 1)
                 }
                 thread_data.append(thread_info)
                 
@@ -972,7 +1062,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 progress_callback("正在進行進階分析", 0.8)
             
             advanced_analysis = await analyze_and_screen(
-                user_query=user_question,
+                user_query=user_query,
                 cat_name=selected_cat,
                 cat_id=cat_id,
                 thread_titles=[item["title"] for item in thread_data],
