@@ -107,7 +107,7 @@ async def main():
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
     cat_id = str(cat_id_map[selected_cat])
 
-    # 檢測分類變化並清理對話歷史
+    # 檢測分類變化並清理對話歷史（僅在實際切換時清空）
     if st.session_state.last_selected_cat != selected_cat:
         st.session_state.chat_history = []
         st.session_state.conversation_context = []
@@ -116,6 +116,8 @@ async def main():
         st.session_state.last_user_query = None
         st.session_state.last_selected_cat = selected_cat
         logger.info(f"Category changed to {selected_cat}, cleared conversation history")
+    else:
+        logger.info(f"Category unchanged: {selected_cat}, preserving conversation history")
 
     st.write(f"當前討論區：{selected_cat}")
 
