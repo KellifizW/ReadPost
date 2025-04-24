@@ -708,6 +708,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     rate_limit_info = []
     current_time = time.time()
     
+    logger.debug(f"Processing query: {user_question}, intent={analysis.get('intent')}, cat_id={cat_id}")
+    
     if current_time < rate_limit_until:
         rate_limit_info.append(f"{datetime.datetime.now(HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.datetime.fromtimestamp(rate_limit_until, HONG_KONG_TZ)}")
         logger.warning(f"Rate limit active until {datetime.datetime.fromtimestamp(rate_limit_until, HONG_KONG_TZ)}")
@@ -746,8 +748,9 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 if response.status == 200:
                     data = await response.json()
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    pages = max(1, min(10, result["pages"]))
+                    pages = max(1, min(10, int(result["pages"])))  # 確保整數
                     segment = result["segment"]
+                    logger.debug(f"Dynamic page selection: pages={pages}, segment={segment}")
                 else:
                     logger.warning(f"Dynamic page selection failed: status={response.status}")
                     pages, segment = 5, "head"
@@ -778,15 +781,19 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_until": rate_limit_until
         }
     
+    logger.debug(f"Candidate threads: {len(candidate_threads)}, sample_types: {[type(t.get('no_of_reply')) for t in candidate_threads[:3]]}")
+    
     # 篩選帖子
     filters = analysis.get("filters", {"min_replies": 20, "min_likes": 5})
-    min_replies = filters.get("min_replies", 20)
-    min_likes = filters.get("min_likes", 5)
+    min_replies = int(filters.get("min_replies", 20))  # 確保整數
+    min_likes = int(filters.get("min_likes", 5))      # 確保整數
     
     filtered_threads = [
         item for item in candidate_threads
         if int(item.get("no_of_reply", 0)) >= min_replies and int(item.get("like_count", 0)) >= min_likes
     ]
+    
+    logger.debug(f"Filtered threads: {len(filtered_threads)}, filters: min_replies={min_replies}, min_likes={min_likes}")
     
     if not filtered_threads:
         logger.warning(f"No threads passed filters: min_replies={min_replies}, min_likes={min_likes}")
@@ -811,6 +818,8 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     top_thread_ids = prioritization.get("top_thread_ids", [])
     reason = prioritization.get("reason", "No prioritization reason provided")
     
+    logger.debug(f"Prioritization result: top_thread_ids={top_thread_ids}, reason={reason}")
+    
     if not top_thread_ids:
         top_thread_ids = [item["thread_id"] for item in filtered_threads[:analysis.get("post_limit", 10)]]
         logger.info(f"Fallback to default thread selection: {top_thread_ids}")
@@ -824,8 +833,10 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         candidate_threads = filtered_threads[:analysis.get("post_limit", 10)]
         logger.warning(f"No prioritized threads found, using default: {len(candidate_threads)} threads")
     
+    logger.debug(f"Final candidate threads: {len(candidate_threads)}")
+    
     # 並行抓取帖子內容
-    reply_limit = analysis.get("reply_limit", 50)
+    reply_limit = int(analysis.get("reply_limit", 50))  # 確保整數
     tasks = []
     for idx, item in enumerate(candidate_threads):
         thread_id = str(item["thread_id"])
@@ -837,16 +848,24 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
                 **cache_data,
                 "no_of_reply": int(cache_data.get("no_of_reply", 0)),
                 "like_count": int(cache_data.get("like_count", 0)),
-                "dislike_count": int(cache_data.get("dislike_count", 0))
+                "dislike_count": int(cache_data.get("dislike_count", 0)),
+                "replies": [
+                    {
+                        **reply,
+                        "like_count": int(reply.get("like_count", 0)),
+                        "dislike_count": int(reply.get("dislike_count", 0))
+                    } for reply in cache_data.get("replies", [])
+                ]
             }
+            logger.debug(f"Using cached data for thread_id={thread_id}, no_of_reply_type={type(normalized_cache_data['no_of_reply'])}, like_count_type={type(normalized_cache_data['like_count'])}")
             thread_data.append(normalized_cache_data)
             continue
         
         specific_pages = None
         fetch_last_pages = pages if segment == "tail" else 0
-        start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, item.get("total_pages", 1) - pages))
+        start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, int(item.get("total_pages", 1)) - pages))  # 確保整數
         if segment == "avg":
-            total_pages = item.get("total_pages", 10)
+            total_pages = int(item.get("total_pages", 10))  # 確保整數
             specific_pages = [int(i * total_pages / pages) + 1 for i in range(pages)] if total_pages > pages else list(range(1, total_pages + 1))
         
         tasks.append(get_lihkg_thread_content(
@@ -879,26 +898,29 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             thread_info = {
                 "thread_id": thread_id,
                 "title": content_result.get("title", candidate_threads[idx]["title"]),
-                "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),  # 轉換為整數
+                "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),  # 確保整數
                 "last_reply_time": candidate_threads[idx]["last_reply_time"],
-                "like_count": int(candidate_threads[idx].get("like_count", 0)),  # 轉換為整數
-                "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),  # 轉換為整數
+                "like_count": int(candidate_threads[idx].get("like_count", 0)),  # 確保整數
+                "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),  # 確保整數
                 "replies": [
                     {
                         "post_id": reply.get("post_id"),
                         "msg": clean_html(reply.get("msg", "")),
-                        "like_count": int(reply.get("like_count", 0)),  # 確保回覆的 like_count 也是整數
-                        "dislike_count": int(reply.get("dislike_count", 0)),  # 確保回覆的 dislike_count 也是整數
+                        "like_count": int(reply.get("like_count", 0)),  # 確保整數
+                        "dislike_count": int(reply.get("dislike_count", 0)),  # 確保整數
                         "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                     } for reply in content_result["replies"] if reply.get("msg")
                 ],
                 "fetched_pages": content_result.get("fetched_pages", [])
             }
+            logger.debug(f"Thread_id={thread_id}, no_of_reply_type={type(thread_info['no_of_reply'])}, like_count_type={type(thread_info['like_count'])}, reply_count={len(thread_info['replies'])}")
             thread_data.append(thread_info)
             st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
     
     if not thread_data:
         logger.warning(f"No valid thread data retrieved for query: {user_question}")
+    
+    logger.info(f"Query processing completed: thread_data_count={len(thread_data)}, rate_limit_info={len(rate_limit_info)}")
     
     return {
         "thread_data": thread_data,
