@@ -79,6 +79,8 @@ async def main():
         st.session_state.awaiting_response = False
     if "conversation_context" not in st.session_state:
         st.session_state.conversation_context = []
+    if "context_timestamps" not in st.session_state:
+        st.session_state.context_timestamps = []  # 儲存每條訊息的時間戳
 
     # 分類選擇
     cat_id_map = {
@@ -121,6 +123,17 @@ async def main():
             st.markdown(user_question)
         st.session_state.awaiting_response = True
 
+        # 清理過舊上下文（超過1小時）
+        current_time = time.time()
+        valid_context = []
+        valid_timestamps = []
+        for msg, ts in zip(st.session_state.conversation_context, st.session_state.context_timestamps):
+            if current_time - ts < 3600:  # 1小時
+                valid_context.append(msg)
+                valid_timestamps.append(ts)
+        st.session_state.conversation_context = valid_context[:20]  # 最多20條訊息
+        st.session_state.context_timestamps = valid_timestamps[:20]
+
         # 初始化進度條和狀態顯示
         status_text = st.empty()
         progress_bar = st.progress(0)
@@ -147,13 +160,12 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
-            # 重置聊天記錄
+            # 重置聊天記錄（僅當話題完全無關）
             if "last_user_query" not in st.session_state:
                 st.session_state.last_user_query = None
             if not st.session_state.last_user_query or len(set(user_question.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
                 st.session_state.chat_history = [{"question": user_question, "answer": ""}]
                 st.session_state.thread_cache = {}
-                st.session_state.conversation_context = []
                 st.session_state.last_user_query = user_question
 
             # 分析問題
@@ -212,8 +224,11 @@ async def main():
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_question})
             st.session_state.conversation_context.append({"role": "assistant", "content": response})
-            # 限制上下文長度，最多5輪對話（10條訊息）
-            st.session_state.conversation_context = st.session_state.conversation_context[-10:]
+            st.session_state.context_timestamps.append(time.time())
+            st.session_state.context_timestamps.append(time.time())
+            # 限制上下文長度，最多10輪對話（20條訊息）
+            st.session_state.conversation_context = st.session_state.conversation_context[-20:]
+            st.session_state.context_timestamps = st.session_state.context_timestamps[-20:]
             update_progress("完成", 1.0)
             time.sleep(0.5)
             status_text.empty()
