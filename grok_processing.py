@@ -383,8 +383,10 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
         logger.error(f"Grok 3 API key missing: {str(e)}")
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
+    logger.debug(f"Prioritizing {len(threads)} threads, sample_types: {[type(t.get('no_of_reply')) for t in threads[:3]]}")
+    
     prompt_builder = PromptBuilder()
-    # 規範化 threads 數據，確保 no_of_reply 和 like_count 是整數
+    # 規範化 threads 數據
     normalized_threads = [
         {
             "thread_id": t["thread_id"],
@@ -435,7 +437,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id):
                         return {"top_thread_ids": [], "reason": "Invalid API response: missing choices"}
                     
                     content = data["choices"][0]["message"]["content"]
-                    logger.info(f"Raw API response for prioritization: {content}")
+                    logger.debug(f"Raw API response for prioritization: {content}")
                     try:
                         result = json.loads(content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result or "reason" not in result:
