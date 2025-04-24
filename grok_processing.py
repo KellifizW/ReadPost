@@ -783,7 +783,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
             "rate_limit_until": rate_limit_until
         }
     
-    logger.debug(f"Candidate threads: {len(candidate_threads)}, sample_types: {[type(t.get('no_of_reply')) for t in candidate_threads[:3]]}")
+    logger.debug(f"Candidate threads: {len(candidate_threads)}, sample_types: {[type(t.get('no_of_reply')) for t in candidate_threads[:3]]}, sample_total_pages: {[t.get('total_pages') for t in candidate_threads[:3]]}")
     
     # 篩選帖子
     filters = analysis.get("filters", {"min_replies": 20, "min_likes": 5})
@@ -846,29 +846,42 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
         if cache_data and cache_data.get("replies") and cache_data.get("fetched_pages"):
             # 規範化緩存數據
-            normalized_cache_data = {
-                **cache_data,
-                "no_of_reply": int(cache_data.get("no_of_reply", 0)),
-                "like_count": int(cache_data.get("like_count", 0)),
-                "dislike_count": int(cache_data.get("dislike_count", 0)),
-                "replies": [
-                    {
-                        **reply,
-                        "like_count": int(reply.get("like_count", 0)),
-                        "dislike_count": int(reply.get("dislike_count", 0))
-                    } for reply in cache_data.get("replies", [])
-                ]
-            }
-            logger.debug(f"Using cached data for thread_id={thread_id}, no_of_reply_type={type(normalized_cache_data['no_of_reply'])}, like_count_type={type(normalized_cache_data['like_count'])}")
-            thread_data.append(normalized_cache_data)
-            continue
+            try:
+                normalized_cache_data = {
+                    **cache_data,
+                    "no_of_reply": int(cache_data.get("no_of_reply", 0)),
+                    "like_count": int(cache_data.get("like_count", 0)),
+                    "dislike_count": int(cache_data.get("dislike_count", 0)),
+                    "total_pages": int(cache_data.get("total_pages", 1)) if cache_data.get("total_pages") else 1,  # 處理 total_pages
+                    "replies": [
+                        {
+                            **reply,
+                            "like_count": int(reply.get("like_count", 0)),
+                            "dislike_count": int(reply.get("dislike_count", 0))
+                        } for reply in cache_data.get("replies", [])
+                    ]
+                }
+                logger.debug(f"Using cached data for thread_id={thread_id}, no_of_reply_type={type(normalized_cache_data['no_of_reply'])}, total_pages={normalized_cache_data['total_pages']}")
+                thread_data.append(normalized_cache_data)
+                continue
+            except ValueError as e:
+                logger.warning(f"Invalid cache data for thread_id={thread_id}: {str(e)}")
+                # 跳過無效緩存數據
+                st.session_state.thread_cache.pop(cache_key, None)
         
         specific_pages = None
         fetch_last_pages = pages if segment == "tail" else 0
-        start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, int(item.get("total_pages", 1)) - pages))  # 確保整數
-        if segment == "avg":
-            total_pages = int(item.get("total_pages", 10))  # 確保整數
-            specific_pages = [int(i * total_pages / pages) + 1 for i in range(pages)] if total_pages > pages else list(range(1, total_pages + 1))
+        try:
+            total_pages_raw = item.get("total_pages", 1)
+            total_pages = int(total_pages_raw) if str(total_pages_raw).isdigit() else 1  # 處理異常格式
+            logger.debug(f"Thread_id={thread_id}, total_pages_raw={total_pages_raw}, total_pages={total_pages}")
+            start_page = 1 if segment == "head" else (1 if segment == "avg" else max(1, total_pages - pages))
+            if segment == "avg":
+                specific_pages = [int(i * total_pages / pages) + 1 for i in range(pages)] if total_pages > pages else list(range(1, total_pages + 1))
+        except ValueError as e:
+            logger.warning(f"Invalid total_pages for thread_id={thread_id}: {total_pages_raw}, error={str(e)}")
+            total_pages = 1
+            start_page = 1
         
         tasks.append(get_lihkg_thread_content(
             thread_id=thread_id,
@@ -897,27 +910,32 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
         rate_limit_info.extend(content_result.get("rate_limit_info", []))
         if content_result.get("replies"):
             thread_id = candidate_threads[idx]["thread_id"]
-            thread_info = {
-                "thread_id": thread_id,
-                "title": content_result.get("title", candidate_threads[idx]["title"]),
-                "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),  # 確保整數
-                "last_reply_time": candidate_threads[idx]["last_reply_time"],
-                "like_count": int(candidate_threads[idx].get("like_count", 0)),  # 確保整數
-                "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),  # 確保整數
-                "replies": [
-                    {
-                        "post_id": reply.get("post_id"),
-                        "msg": clean_html(reply.get("msg", "")),
-                        "like_count": int(reply.get("like_count", 0)),  # 確保整數
-                        "dislike_count": int(reply.get("dislike_count", 0)),  # 確保整數
-                        "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                    } for reply in content_result["replies"] if reply.get("msg")
-                ],
-                "fetched_pages": content_result.get("fetched_pages", [])
-            }
-            logger.debug(f"Thread_id={thread_id}, no_of_reply_type={type(thread_info['no_of_reply'])}, like_count_type={type(thread_info['like_count'])}, reply_count={len(thread_info['replies'])}")
-            thread_data.append(thread_info)
-            st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
+            try:
+                thread_info = {
+                    "thread_id": thread_id,
+                    "title": content_result.get("title", candidate_threads[idx]["title"]),
+                    "no_of_reply": int(candidate_threads[idx].get("no_of_reply", content_result.get("total_replies", 0))),
+                    "last_reply_time": candidate_threads[idx]["last_reply_time"],
+                    "like_count": int(candidate_threads[idx].get("like_count", 0)),
+                    "dislike_count": int(candidate_threads[idx].get("dislike_count", 0)),
+                    "total_pages": int(content_result.get("total_pages", 1)) if content_result.get("total_pages") else 1,  # 處理 total_pages
+                    "replies": [
+                        {
+                            "post_id": reply.get("post_id"),
+                            "msg": clean_html(reply.get("msg", "")),
+                            "like_count": int(reply.get("like_count", 0)),
+                            "dislike_count": int(reply.get("dislike_count", 0)),
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                        } for reply in content_result["replies"] if reply.get("msg")
+                    ],
+                    "fetched_pages": content_result.get("fetched_pages", [])
+                }
+                logger.debug(f"Thread_id={thread_id}, no_of_reply_type={type(thread_info['no_of_reply'])}, total_pages={thread_info['total_pages']}, reply_count={len(thread_info['replies'])}")
+                thread_data.append(thread_info)
+                st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
+            except ValueError as e:
+                logger.warning(f"Invalid data for thread_id={thread_id}: {str(e)}")
+                continue
     
     if not thread_data:
         logger.warning(f"No valid thread data retrieved for query: {user_question}")
