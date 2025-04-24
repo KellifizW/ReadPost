@@ -104,12 +104,13 @@ class PromptBuilder:
 
     def build_analyze_prompt(self, query, cat_name, cat_id, conversation_context):
         intent_config = self.config["intents"]["generic"]
+        available_intents = list(self.config["intents"]["specific_intents"].keys())
         prompt = f"{intent_config['system']}\n"
         prompt += intent_config["context"].format(
             query=query, cat_name=cat_name, cat_id=cat_id,
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
-        prompt += "任務：分析問題意圖，選擇最適合的意圖（summarize_posts, list_titles, analyze_sentiment, fetch_dates, general_query）。\n"
+        prompt += f"任務：分析問題意圖，選擇最適合的意圖，僅從以下選項中選擇：{', '.join(available_intents)}。\n"
         prompt += "輸出格式：{\"intent\": \"string\", \"data_requirements\": [\"string\"], \"filters\": {\"min_replies\": number, \"min_likes\": number, \"sort\": \"string\"}, \"post_limit\": number, \"reply_limit\": number, \"task\": \"string\", \"output_format\": \"string\", \"theme\": \"string\", \"theme_keywords\": [\"string\"]}"
         return prompt
 
@@ -235,7 +236,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, intent, selec
     
     max_replies_per_thread = 20
     filtered_thread_data = {}
-    for tid, data in thread_data.items():
+    for tid, data in (thread_data or {}).items():
         replies = data.get("replies", [])
         sorted_replies = sorted(
             [r for r in replies if r.get("msg")],
