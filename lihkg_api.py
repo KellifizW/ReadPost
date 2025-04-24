@@ -18,7 +18,7 @@ import json
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # 設置為 DEBUG 以捕獲詳細信息
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
 # 檔案處理器：寫入 app.log
@@ -43,6 +43,21 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
 ]
+
+def safe_int(value, default=0):
+    """
+    安全將值轉換為整數，處理異常格式。
+    """
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        logger.warning(f"Invalid integer value: {value}, using default={default}")
+        return default
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Failed to convert {value} to int: {str(e)}, using default={default}")
+        return default
 
 class RateLimiter:
     """
@@ -189,14 +204,16 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
             filtered_items = [
                 {
                     **item,
-                    "no_of_reply": int(item.get("no_of_reply", 0)),  # 轉換為整數
-                    "like_count": int(item.get("like_count", 0))      # 轉換為整數
+                    "no_of_reply": safe_int(item.get("no_of_reply", 0), 0),
+                    "like_count": safe_int(item.get("like_count", 0), 0),
+                    "dislike_count": safe_int(item.get("dislike_count", 0), 0),
+                    "total_pages": safe_int(item.get("total_pages", 1), 1)
                 }
                 for item in data["response"]["items"]
-                if item.get("title") and int(item.get("no_of_reply", 0)) > 0
+                if item.get("title") and safe_int(item.get("no_of_reply", 0), 0) > 0
             ]
+            logger.debug(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}, sample_data={[{'thread_id': item['thread_id'], 'no_of_reply': item['no_of_reply'], 'like_count': item['like_count'], 'total_pages': item['total_pages']} for item in filtered_items[:3]]}")
             items.extend(filtered_items)
-            logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
             logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
         
@@ -220,8 +237,8 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
     current_time = time.time()
     
     if current_time < rate_limit_until:
-        rate_limit_info.append(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.datetime.fromtimestamp(rate_limit_until)}")
-        logger.warning(f"Rate limit active until {datetime.datetime.fromtimestamp(rate_limit_until)}")
+        rate_limit_info.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
+        logger.warning(f"Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
         return {
             "thread_id": thread_id, "title": "", "replies": replies, "fetched_pages": fetched_pages,
             "total_replies": 0, "rate_limit_info": rate_limit_info, "request_counter": request_counter,
@@ -243,7 +260,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
         request_counter += 1
         rate_limit_info.extend(page_rate_limit_info)
         if data and data.get("response", {}).get("total_page"):
-            total_pages = int(data["response"]["total_page"])  # 確保整數
+            total_pages = safe_int(data["response"]["total_page"], 1)
             pages_to_fetch = list(range(max(1, total_pages - fetch_last_pages + 1), total_pages + 1))
         else:
             logger.error(f"Failed to fetch thread_id={thread_id}, page=1")
@@ -266,7 +283,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
             if not title and data["response"].get("title"):
                 title = clean_html(data["response"]["title"])
             page_replies = data["response"]["items"]
-            logger.debug(f"Thread_id={thread_id}, page={page}, raw_replies={len(page_replies)}")
+            logger.debug(f"Thread_id={thread_id}, page={page}, raw_replies={len(page_replies)}, sample_data={[{'post_id': r.get('post_id'), 'like_count': r.get('like_count'), 'dislike_count': r.get('dislike_count')} for r in page_replies[:3]]}")
             for reply in page_replies:
                 msg = clean_html(reply.get("msg", ""))
                 if not msg:
@@ -274,11 +291,10 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
                 normalized_reply = {
                     "post_id": reply.get("post_id"),
                     "msg": msg,
-                    "like_count": int(reply.get("like_count", 0)),  # 轉換為整數
-                    "dislike_count": int(reply.get("dislike_count", 0)),  # 轉換為整數
+                    "like_count": safe_int(reply.get("like_count", 0), 0),
+                    "dislike_count": safe_int(reply.get("dislike_count", 0), 0),
                     "reply_time": reply.get("reply_time", "0")
                 }
-                logger.debug(f"Reply post_id={normalized_reply['post_id']}, like_count_type={type(normalized_reply['like_count'])}, value={normalized_reply['like_count']}")
                 replies.append(normalized_reply)
             fetched_pages.append(page)
             if len(replies) >= max_replies:
@@ -289,7 +305,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
         
         await asyncio.sleep(1)
     
-    total_replies = int(data["response"].get("total_reply", 0)) if data and data.get("response") else len(replies)
+    total_replies = safe_int(data["response"].get("total_reply", 0), len(replies)) if data and data.get("response") else len(replies)
     logger.info(f"Fetched thread_id={thread_id}, total_replies={total_replies}, fetched_pages={fetched_pages}")
     
     return {
@@ -298,6 +314,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
         "replies": replies,
         "fetched_pages": fetched_pages,
         "total_replies": total_replies,
+        "total_pages": total_pages,
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": last_reset,
