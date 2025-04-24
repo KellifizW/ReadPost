@@ -937,7 +937,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         # 讓 Grok 3 決定頁數和頁數類型
         page_prompt = f"""
         你是資料抓取助手，請根據問題複雜度和意圖決定需要抓取的回覆頁數（1-10頁）以及頁數類型（最舊、中段、最新）。
-        問題：inius{user_query}
+        僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
+        問題：{user_query}
         意圖：{intent}
         若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（5-10），偏向最新頁。
         若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。
@@ -958,18 +959,30 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
-                        result = json.loads(data["choices"][0]["message"]["content"])
-                        pages_to_fetch = result.get("pages", [1, 2])
-                        page_type = result.get("page_type", "latest")
-                        logger.info(f"Dynamic pages selected: {pages_to_fetch}, type: {page_type}, reason: {result.get('reason', 'Default')}")
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        logger.info(f"Dynamic page selection raw response: {content}")
+                        try:
+                            result = json.loads(content)
+                            if not isinstance(result, dict) or "pages" not in result or "page_type" not in result:
+                                logger.warning(f"Invalid dynamic page response format: {content}")
+                                pages_to_fetch = [1, 2]
+                                page_type = "latest"
+                            else:
+                                pages_to_fetch = result.get("pages", [1, 2])
+                                page_type = result.get("page_type", "latest")
+                                logger.info(f"Dynamic pages selected: {pages_to_fetch}, type: {page_type}, reason: {result.get('reason', 'Default')}")
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Failed to parse dynamic page response: {content}, error: {str(e)}")
+                            pages_to_fetch = [1, 2]
+                            page_type = "latest"
                     else:
+                        logger.warning(f"Dynamic page selection API failed: status={response.status}")
                         pages_to_fetch = [1, 2]
                         page_type = "latest"
-                        logger.warning("Failed to determine dynamic pages, using default [1, 2], type: latest")
         except Exception as e:
+            logger.warning(f"Dynamic page selection failed: {str(e)}")
             pages_to_fetch = [1, 2]
             page_type = "latest"
-            logger.warning(f"Dynamic page selection failed: {str(e)}, using default [1, 2], type: latest")
         
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
