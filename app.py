@@ -12,6 +12,7 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 import logging
+from streamlit.components.v1 import html
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
 
 # 香港時區
@@ -55,6 +56,20 @@ def validate_input(user_query):
     if len(user_query) > 200:
         return False, "輸入過長，最多200個字"
     return True, ""
+
+def render_copy_button(content, key):
+    """
+    渲染複製按鈕，使用 HTML 和 JavaScript。
+    """
+    escaped_content = content.replace("`", "\\`").replace("\n", "\\n")
+    html_code = f"""
+    <button onclick="navigator.clipboard.writeText(`{escaped_content}`)"
+            title="複製回應"
+            style="border: none; background: none; cursor: pointer; font-size: 20px;">
+        📋
+    </button>
+    """
+    html(html_code, height=30)
 
 async def main():
     """
@@ -132,17 +147,7 @@ async def main():
             with col1:
                 st.markdown(chat["answer"])
             with col2:
-                # 複製按鈕
-                st.markdown(
-                    f"""
-                    <button onclick="navigator.clipboard.writeText(`{chat['answer'].replace('`', '\\`')}`)"
-                            title="複製回應"
-                            style="border: none; background: none; cursor: pointer; font-size: 20px;">
-                        📋
-                    </button>
-                    """,
-                    unsafe_allow_html=True
-                )
+                render_copy_button(chat["answer"], key=f"copy_{idx}")
 
     # 用戶輸入
     user_query = st.chat_input("請輸入 LIHKG 話題或一般問題")
@@ -218,7 +223,7 @@ async def main():
             # 處理問題
             update_progress("正在處理查詢", 0.2)
             result = await process_user_question(
-                user_query=user_query,  # 修改為 user_query
+                user_query=user_query,
                 selected_cat=selected_cat,
                 cat_id=cat_id,
                 analysis=analysis,
