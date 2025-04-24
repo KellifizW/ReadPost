@@ -121,7 +121,7 @@ class PromptBuilder:
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
-            filters=json.dumps(filters or {}, ensure_ascii=False)
+            filters=json.dumps(filters insistent_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
@@ -142,10 +142,14 @@ def clean_html(text):
         text = clean.sub('', text)
         # 規範化空白
         text = re.sub(r'\s+', ' ', text).strip()
-        # 若清空後無內容，記錄並返回原始文本
+        # 若清空後無內容，返回 [表情符號] 或原始文本
         if not text:
-            logger.warning(f"HTML cleaning resulted in empty string, original: {original_text}")
-            return original_text
+            if "hkgmoji" in original_text:
+                text = "[表情符號]"
+                logger.info(f"HTML cleaning: replaced with [表情符號], original: {original_text}")
+            else:
+                logger.warning(f"HTML cleaning resulted in empty string, original: {original_text}")
+                text = original_text
         return text
     except Exception as e:
         logger.error(f"HTML cleaning failed: {str(e)}, original: {original_text}")
@@ -390,7 +394,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "post_limit": post_limit,
                         "reply_limit": reply_limit,
                         "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"},
-                        "processing": processing,
+                        "processing": intent,
                         "candidate_thread_ids": [],
                         "top_thread_ids": top_thread_ids,
                         "needs_advanced_analysis": confidence < 0.7,
@@ -557,7 +561,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
-        thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in referenced_thread_ids}
+        if not referenced_thread_ids:
+            # 回退到 prioritized thread IDs
+            prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
+            referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
+            logger.info(f"No referenced IDs in context, using prioritized IDs: {referenced_thread_ids}")
+        thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
         logger.info(f"Filtered thread_data for follow_up: {list(thread_data.keys())}")
 
     filtered_thread_data = {}
@@ -1111,13 +1120,12 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
         
-        candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
-        if not candidate_threads and filtered_items and intent != "follow_up":
-            candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items)))
-            logger.info(f"No candidate threads, using random: {len(candidate_threads)} threads selected")
-        elif intent == "follow_up" and not candidate_threads:
-            logger.warning("No candidate threads match referenced thread IDs for follow_up intent")
-            candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items))) if filtered_items else []
+        # 確保 top_thread_ids 優先被抓取
+        candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)]
+        if len(candidate_threads) < post_limit and filtered_items:
+            additional_threads = [item for item in filtered_items if str(item["thread_id"]) not in map(str, top_thread_ids)]
+            candidate_threads.extend(random.sample(additional_threads, min(post_limit - len(candidate_threads), len(additional_threads))))
+        logger.info(f"Selected candidate threads: {[item['thread_id'] for item in candidate_threads]}")
         
         # 並行抓取帖子內容
         tasks = []
