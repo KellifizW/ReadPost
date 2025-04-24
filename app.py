@@ -171,56 +171,60 @@ async def main():
                 grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
                 logger.info(f"Starting stream_grok3_response for query: {user_question}, intent: {analysis.get('intent')}")
-                async for chunk in stream_grok3_response(
-                    user_query=user_question,
-                    metadata=[{
-                        "thread_id": item["thread_id"],
-                        "title": item["title"],
-                        "no_of_reply": item.get("no_of_reply", 0),
-                        "last_reply_time": item.get("last_reply_time", "0"),
-                        "like_count": item.get("like_count", 0),
-                        "dislike_count": item.get("dislike_count", 0)
-                    } for item in result.get("thread_data", [])],
-                    thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    intent=analysis.get("intent", "summarize_posts"),
-                    selected_cat=selected_cat,
-                    conversation_context=st.session_state.conversation_context,
-                    filters=analysis.get("filters", {})
-                ):
-                    try:
-                        parsed_chunk = json.loads(chunk)
-                        if "error" in parsed_chunk:
-                            response += parsed_chunk["error"]
-                        elif analysis["intent"] == "summarize_posts":
-                            response += f"**簡介**：{parsed_chunk.get('intro', '')}\n\n"
-                            for item in parsed_chunk.get("analysis", []):
-                                response += f"**標題**：{item.get('title', '')}\n"
-                                response += f"**主題**：{item.get('theme', '')}\n"
-                                response += f"**觀點**：{item.get('views', '')}\n"
-                                response += f"**趨勢**：{item.get('trend', '')}\n\n"
-                            response += f"**總結**：{parsed_chunk.get('summary', '')}"
-                        elif analysis["intent"] == "list_titles":
-                            for item in parsed_chunk.get("titles", []):
-                                response += f"帖子 ID: {item.get('thread_id', '')} 標題: {item.get('title', '')}\n"
-                            response = response.strip()
-                        elif analysis["intent"] == "analyze_sentiment":
-                            sentiments = parsed_chunk.get("sentiments", {})
-                            response += f"**情緒分佈**：正面 {sentiments.get('positive', 0)}%，負面 {sentiments.get('negative', 0)}%，中立 {sentiments.get('neutral', 0)}%\n"
-                            response += f"**原因**：{parsed_chunk.get('reasons', '')}"
-                        elif analysis["intent"] == "fetch_dates":
-                            response += f"**日期資料**：\n\n"
-                            for item in parsed_chunk.get("dates", []):
-                                response += f"**標題**：{item.get('title', '')}\n"
-                                response += f"**最後回覆時間**：{item.get('last_reply_time', '')}\n"
-                                response += f"**熱門回覆時間**：{item.get('top_reply_time', '')}\n\n"
-                            response += f"**總結**：{parsed_chunk.get('summary', '')}"
-                        elif analysis["intent"] == "general_query":
-                            response += parsed_chunk.get("response", "")
-                        else:
-                            response += json.dumps(parsed_chunk, ensure_ascii=False)
-                    except json.JSONDecodeError:
-                        response += chunk
-                    grok_container.markdown(response)
+                try:
+                    async for chunk in stream_grok3_response(
+                        user_query=user_question,
+                        metadata=[{
+                            "thread_id": item["thread_id"],
+                            "title": item["title"],
+                            "no_of_reply": item.get("no_of_reply", 0),
+                            "last_reply_time": item.get("last_reply_time", "0"),
+                            "like_count": item.get("like_count", 0),
+                            "dislike_count": item.get("dislike_count", 0)
+                        } for item in result.get("thread_data", [])],
+                        thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
+                        intent=analysis.get("intent", "general_query"),
+                        selected_cat=selected_cat,
+                        conversation_context=st.session_state.conversation_context,
+                        filters=analysis.get("filters", {})
+                    ):
+                        try:
+                            parsed_chunk = json.loads(chunk)
+                            if "error" in parsed_chunk:
+                                response += parsed_chunk["error"]
+                            elif analysis["intent"] == "summarize_posts" or analysis["intent"] == "analyze_popular_posts":
+                                response += f"**簡介**：{parsed_chunk.get('intro', '')}\n\n"
+                                for item in parsed_chunk.get("analysis", []):
+                                    response += f"**標題**：{item.get('title', '')}\n"
+                                    response += f"**主題**：{item.get('theme', '')}\n"
+                                    response += f"**觀點**：{item.get('views', '')}\n"
+                                    response += f"**趨勢**：{item.get('trend', '')}\n\n"
+                                response += f"**總結**：{parsed_chunk.get('summary', '')}"
+                            elif analysis["intent"] == "list_titles":
+                                for item in parsed_chunk.get("titles", []):
+                                    response += f"帖子 ID: {item.get('thread_id', '')} 標題: {item.get('title', '')}\n"
+                                response = response.strip()
+                            elif analysis["intent"] == "analyze_sentiment":
+                                sentiments = parsed_chunk.get("sentiments", {})
+                                response += f"**情緒分佈**：正面 {sentiments.get('positive', 0)}%，負面 {sentiments.get('negative', 0)}%，中立 {sentiments.get('neutral', 0)}%\n"
+                                response += f"**原因**：{parsed_chunk.get('reasons', '')}"
+                            elif analysis["intent"] == "fetch_dates":
+                                response += f"**日期資料**：\n\n"
+                                for item in parsed_chunk.get("dates", []):
+                                    response += f"**標題**：{item.get('title', '')}\n"
+                                    response += f"**最後回覆時間**：{item.get('last_reply_time', '')}\n"
+                                    response += f"**熱門回覆時間**：{item.get('top_reply_time', '')}\n\n"
+                                response += f"**總結**：{parsed_chunk.get('summary', '')}"
+                            elif analysis["intent"] in ["general_query", "ask_functionality"]:
+                                response += parsed_chunk.get("response", "")
+                            else:
+                                response += json.dumps(parsed_chunk, ensure_ascii=False)
+                        except json.JSONDecodeError:
+                            response += chunk
+                        grok_container.markdown(response)
+                finally:
+                    # 確保異步生成器正確關閉
+                    pass
                 if not response:
                     logger.warning(f"No response generated for query: {user_question}")
                     response = "無法生成回應，請稍後重試。"
