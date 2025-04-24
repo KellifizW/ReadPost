@@ -2,6 +2,7 @@
 Grok 3 API 處理模組，負責問題分析、帖子篩選和回應生成。
 修復輸入驗證過嚴問題，確保廣泛查詢（如「分析吹水台時事主題」）進入分析流程。
 修復 'prioritize' 錯誤，強化 prioritize_threads_with_grok 的錯誤處理。
+增強靈活性：允許回覆數量最小值為 0，確保回應包含帖子 ID，優化 follow_up 意圖。
 主要函數：
 - analyze_and_screen：分析問題，識別意圖，放寬語義要求，動態設置篩選條件。
 - stream_grok3_response：生成流式回應，動態選擇模板。
@@ -225,12 +226,17 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     # 檢查是否為追問
     is_follow_up = False
+    referenced_thread_ids = []
     if conversation_context and len(conversation_context) >= 2:
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
         common_words = set(user_query.split()).intersection(set(last_user_query.split() + last_response.split()))
         if len(common_words) >= 2 and any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "深入", "接著"]):
             is_follow_up = True
+            # 提取歷史回應中的帖子 ID
+            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            referenced_thread_ids = matches
+            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}")
     
     # 準備語義比較提示詞
     semantic_prompt = f"""
@@ -257,7 +263,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "category_ids": [],
             "data_type": "none",
             "post_limit": 5,
-            "reply_limit": 250,
+            "reply_limit": 0,
             "filters": {},
             "processing": "general",
             "candidate_thread_ids": [],
@@ -313,7 +319,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     theme = historical_theme if is_vague else "general"
                     theme_keywords = historical_keywords if is_vague else []
                     post_limit = 10
-                    reply_limit = 250  # 默認 250，後續由 Grok 3 動態調整
+                    reply_limit = 0  # 默認 0，後續由 Grok 3 動態調整
                     data_type = "both"
                     processing = intent
                     if intent in ["search_keywords", "find_themed"]:
@@ -332,8 +338,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         post_limit = 5
                     elif intent == "follow_up":
                         theme = historical_theme
-                        reply_limit = 250  # 追問允許更多回覆
+                        reply_limit = 200  # 追問默認 200
                         data_type = "replies"
+                    elif intent in ["general_query", "introduce"]:
+                        reply_limit = 0
+                        data_type = "none"
+                    
+                    # 對於 follow_up，設置 top_thread_ids 為歷史引用的帖子 ID
+                    top_thread_ids = referenced_thread_ids if is_follow_up else []
                     
                     return {
                         "direct_response": intent in ["general_query", "introduce"],
@@ -346,7 +358,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "filters": {"min_replies": 20, "min_likes": 5, "sort": "popular"},
                         "processing": processing,
                         "candidate_thread_ids": [],
-                        "top_thread_ids": [],
+                        "top_thread_ids": top_thread_ids,
                         "needs_advanced_analysis": confidence < 0.7,
                         "reason": reason,
                         "theme_keywords": theme_keywords
@@ -363,7 +375,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 250,
+                "reply_limit": 0,
                 "filters": {"min_replies": 20, "min_likes": 5},
                 "processing": "summarize",
                 "candidate_thread_ids": [],
@@ -466,11 +478,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     # 讓 Grok 3 決定每個帖子回覆數量
     reply_count_prompt = f"""
-    你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（25、50、100、200 條）。
+    你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200 條）。
+    僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
     問題：{user_query}
     意圖：{processing}
     若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（100-200）。
     若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
+    若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
     默認：50 條。
     輸出格式：{{"replies_per_thread": 50, "reason": "決定原因"}}
     """
@@ -491,6 +505,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     result = json.loads(data["choices"][0]["message"]["content"])
                     max_replies_per_thread = result.get("replies_per_thread", 50)
                     logger.info(f"Grok selected replies_per_thread: {max_replies_per_thread}, reason: {result.get('reason', 'Default')}")
+                    if max_replies_per_thread == 0:
+                        logger.info(f"Skipping reply download due to replies_per_thread=0 for intent: {processing}")
                 else:
                     logger.warning("Failed to determine replies_per_thread, using default 50")
     except Exception as e:
@@ -699,6 +715,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             yield response_content
                             return
                         logger.info(f"Response generation completed: length={len(response_content)}")
+                        logger.info(f"Referenced thread IDs: {re.findall(r'\[帖子 ID: (\d+)\]', response_content)}")
                         return
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
                     logger.warning(f"Response generation error: {str(e)}, attempt={attempt + 1}")
@@ -782,7 +799,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             progress_callback("正在抓取帖子列表", 0.1)
         
         post_limit = min(analysis.get("post_limit", 5), 20)
-        reply_limit = 250  # 默認 250
+        reply_limit = analysis.get("reply_limit", 0)  # 使用 analyze_and_screen 設置的 reply_limit
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 20)
         min_likes = filters.get("min_likes", 5)
@@ -794,14 +811,16 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         
         # 讓 Grok 3 決定總回覆數量
         reply_limit_prompt = f"""
-        你是資料抓取助手，請根據問題和意圖決定總回覆數量（50、100、150、200 條）。
+        你是資料抓取助手，請根據問題和意圖決定總回覆數量（0、50、100、150、200 條）。
+        僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
         問題：{user_query}
         意圖：{intent}
         若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（150-200）。
         若問題簡單（如標題列出、日期提取），建議較少回覆（50-100）。
+        若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
         若意圖為「follow_up」，建議 200 條。
-        默認：250 條。
-        輸出格式：{{"reply_limit": 250, "reason": "決定原因"}}
+        默認：50 條。
+        輸出格式：{{"reply_limit": 50, "reason": "決定原因"}}
         """
         
         try:
@@ -818,12 +837,14 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     if response.status == 200:
                         data = await response.json()
                         result = json.loads(data["choices"][0]["message"]["content"])
-                        reply_limit = result.get("reply_limit", 250)
+                        reply_limit = result.get("reply_limit", 50)
                         logger.info(f"Grok selected reply_limit: {reply_limit}, reason: {result.get('reason', 'Default')}")
+                        if reply_limit == 0:
+                            logger.info(f"Skipping reply download due to reply_limit=0 for intent: {intent}")
                     else:
-                        logger.warning("Failed to determine reply_limit, using default 250")
+                        logger.warning("Failed to determine reply_limit, using default 50")
         except Exception as e:
-            logger.warning(f"Reply limit selection failed: {str(e)}, using default 250")
+            logger.warning(f"Reply limit selection failed: {str(e)}, using default 50")
         
         thread_data = []
         rate_limit_info = []
@@ -943,6 +964,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（5-10），偏向最新頁。
         若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。
         若意圖為「follow_up」，優先抓取未下載的最新頁（5-10頁）。
+        若意圖為「general_query」或「introduce」，建議 0 頁。
         默認：首頁+末頁（[1, 總頁數]）。
         輸出格式：{{"pages": [頁數列表], "page_type": "oldest/middle/latest", "reason": "決定原因"}}
         """
@@ -984,13 +1006,20 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             pages_to_fetch = [1, 2]
             page_type = "latest"
         
+        if intent in ["general_query", "introduce"]:
+            pages_to_fetch = []
+            logger.info(f"Skipping page fetch due to intent: {intent}")
+        
         if progress_callback:
             progress_callback("正在抓取候選帖子內容", 0.5)
         
         candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit]
-        if not candidate_threads and filtered_items:
+        if not candidate_threads and filtered_items and intent != "follow_up":
             candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items)))
             logger.info(f"No candidate threads, using random: {len(candidate_threads)} threads selected")
+        elif intent == "follow_up" and not candidate_threads:
+            logger.warning("No candidate threads match referenced thread IDs for follow_up intent")
+            candidate_threads = random.sample(filtered_items, min(post_limit, len(filtered_items))) if filtered_items else []
         
         # 並行抓取帖子內容
         tasks = []
