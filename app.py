@@ -58,7 +58,7 @@ def validate_input(user_question):
 
 async def main():
     """
-    主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面，增強上下文記憶。
+    主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
     """
     # 設置 Streamlit 頁面配置
     st.set_page_config(page_title="LIHKG 聊天介面", layout="wide")
@@ -156,10 +156,6 @@ async def main():
                 st.session_state.conversation_context = []
                 st.session_state.last_user_query = user_question
 
-            # 限制上下文長度（最近5輪對話）
-            if len(st.session_state.conversation_context) > 10:  # 5輪（用戶+助手）
-                st.session_state.conversation_context = st.session_state.conversation_context[-10:]
-
             # 分析問題
             update_progress("正在分析問題意圖", 0.1)
             analysis = await analyze_and_screen(
@@ -216,6 +212,8 @@ async def main():
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_question})
             st.session_state.conversation_context.append({"role": "assistant", "content": response})
+            # 限制上下文長度，最多5輪對話（10條訊息）
+            st.session_state.conversation_context = st.session_state.conversation_context[-10:]
             update_progress("完成", 1.0)
             time.sleep(0.5)
             status_text.empty()
