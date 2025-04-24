@@ -63,7 +63,6 @@ class RateLimiter:
             await asyncio.sleep(wait_time)
             self.requests = self.requests[1:]
         self.requests.append(now)
-        # 根據最後響應時間調整延遲，最小 0.5 秒，最大 2 秒
         await asyncio.sleep(max(0.5, min(self.last_response_time, 2.0)))
 
 class ApiClient:
@@ -100,7 +99,6 @@ class ApiClient:
                 start_time = time.time()
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, headers=headers, params=params, timeout=timeout) as response:
-                        # 記錄響應時間
                         response_time = time.time() - start_time
                         self.rate_limiter.last_response_time = response_time
                         logger.info(f"API response time: {response_time:.2f} seconds for {function_name}")
@@ -200,9 +198,9 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
         "rate_limit_until": rate_limit_until
     }
 
-async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=600, fetch_last_pages=0, specific_pages=None, start_page=1):
+async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
-    抓取指定帖子的回覆內容。
+    抓取指定帖子的回覆內容，支援動態頁數選擇。
     """
     replies = []
     fetched_pages = []
@@ -211,7 +209,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     total_pages = None
     rate_limit_info = []
     current_time = time.time()
-    max_replies = max(max_replies, 100)
+    max_replies = max(max_replies, 250)
     
     if current_time < rate_limit_until:
         rate_limit_info.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
