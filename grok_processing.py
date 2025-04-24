@@ -774,7 +774,7 @@ async def process_user_question(user_question, selected_cat, cat_id, analysis, r
     
     filtered_threads = [
         item for item in candidate_threads
-        if item.get("no_of_reply", 0) >= min_replies and item.get("like_count", 0) >= min_likes
+        if int(item.get("no_of_reply", 0)) >= min_replies and int(item.get("like_count", 0)) >= min_likes
     ]
     
     if not filtered_threads:
