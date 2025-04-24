@@ -80,7 +80,9 @@ async def main():
     if "conversation_context" not in st.session_state:
         st.session_state.conversation_context = []
     if "context_timestamps" not in st.session_state:
-        st.session_state.context_timestamps = []  # 儲存每條訊息的時間戳
+        st.session_state.context_timestamps = []
+    if "last_selected_cat" not in st.session_state:
+        st.session_state.last_selected_cat = None
 
     # 分類選擇
     cat_id_map = {
@@ -89,10 +91,31 @@ async def main():
     }
     selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
     cat_id = str(cat_id_map[selected_cat])
+
+    # 檢測分類變化並清理對話歷史
+    if st.session_state.last_selected_cat != selected_cat:
+        st.session_state.chat_history = []
+        st.session_state.conversation_context = []
+        st.session_state.context_timestamps = []
+        st.session_state.thread_cache = {}
+        st.session_state.last_user_query = None
+        st.session_state.last_selected_cat = selected_cat
+        logger.info(f"Category changed to {selected_cat}, cleared conversation history")
+
     st.write(f"當前討論區：{selected_cat}")
 
     # 記錄選單選擇
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
+
+    # 新對話按鈕
+    if st.button("🆕", help="開始新對話"):
+        st.session_state.chat_history = []
+        st.session_state.conversation_context = []
+        st.session_state.context_timestamps = []
+        st.session_state.thread_cache = {}
+        st.session_state.last_user_query = None
+        logger.info("New conversation started, cleared history")
+        st.rerun()
 
     # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
@@ -101,11 +124,25 @@ async def main():
     st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
 
     # 顯示聊天記錄
-    for chat in st.session_state.chat_history:
+    for idx, chat in enumerate(st.session_state.chat_history):
         with st.chat_message("user"):
             st.markdown(chat["question"])
         with st.chat_message("assistant"):
-            st.markdown(chat["answer"])
+            col1, col2 = st.columns([0.95, 0.05])
+            with col1:
+                st.markdown(chat["answer"])
+            with col2:
+                # 複製按鈕
+                st.markdown(
+                    f"""
+                    <button onclick="navigator.clipboard.writeText(`{chat['answer'].replace('`', '\\`')}`)"
+                            title="複製回應"
+                            style="border: none; background: none; cursor: pointer; font-size: 20px;">
+                        📋
+                    </button>
+                    """,
+                    unsafe_allow_html=True
+                )
 
     # 用戶輸入
     user_question = st.chat_input("請輸入 LIHKG 話題或一般問題")
@@ -131,7 +168,7 @@ async def main():
             if current_time - ts < 3600:  # 1小時
                 valid_context.append(msg)
                 valid_timestamps.append(ts)
-        st.session_state.conversation_context = valid_context[:20]  # 最多20條訊息
+        st.session_state.conversation_context = valid_context[:20]
         st.session_state.context_timestamps = valid_timestamps[:20]
 
         # 初始化進度條和狀態顯示
@@ -226,7 +263,6 @@ async def main():
             st.session_state.conversation_context.append({"role": "assistant", "content": response})
             st.session_state.context_timestamps.append(time.time())
             st.session_state.context_timestamps.append(time.time())
-            # 限制上下文長度，最多10輪對話（20條訊息）
             st.session_state.conversation_context = st.session_state.conversation_context[-20:]
             st.session_state.context_timestamps = st.session_state.context_timestamps[-20:]
             update_progress("完成", 1.0)
