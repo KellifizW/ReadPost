@@ -121,7 +121,7 @@ class PromptBuilder:
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
-            filters=json.dumps(filters insistent_ascii=False)
+            filters=json.dumps(filters, ensure_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
