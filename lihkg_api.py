@@ -15,7 +15,6 @@ import random
 import hashlib
 import logging
 import json
-from grok_processing import clean_html, safe_int
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
@@ -177,6 +176,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
     """
     抓取指定分類的帖子標題列表。
     """
+    from grok_processing import safe_int  # Local import
     items = []
     rate_limit_info = []
     current_time = time.time()
@@ -230,6 +230,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
     """
     抓取指定帖子的內容，包括回覆。
     """
+    from grok_processing import clean_html, safe_int  # Local import
     replies = []
     rate_limit_info = []
     fetched_pages = []
