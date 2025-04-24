@@ -18,7 +18,7 @@ import json
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # 設置為 DEBUG 以捕獲詳細信息
+logger.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
 # 檔案處理器：寫入 app.log
@@ -33,8 +33,8 @@ logger.addHandler(stream_handler)
 
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
-LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
-LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
+LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"  # 需確認有效性
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"  # 需更新有效 Cookie
 
 # 用戶代理列表
 USER_AGENTS = [
@@ -76,10 +76,7 @@ class ApiClient:
         self.response_times = []
 
     def generate_headers(self, url: str, timestamp: int):
-        # 改進 X-LI-DIGEST 生成邏輯，確保正確編碼
-        encoded_url = url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c').replace(' ', '%20')
-        digest_input = f"jeams$get${encoded_url}${timestamp}"
-        digest = hashlib.sha1(digest_input.encode('utf-8')).hexdigest()
+        digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
         return {
             "User-Agent": random.choice(USER_AGENTS),
             "X-LI-DEVICE": self.device_id,
@@ -93,12 +90,12 @@ class ApiClient:
         }
 
     async def get(self, url: str, function_name: str, params=None, max_retries=5, timeout=10):
-        timestamp = int(time.time())
-        headers = self.generate_headers(url, timestamp)
         rate_limit_info = []
         for attempt in range(max_retries):
             try:
                 await self.rate_limiter.acquire()
+                timestamp = int(time.time())
+                headers = self.generate_headers(url, timestamp)
                 start_time = time.time()
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, headers=headers, params=params, timeout=timeout) as response:
@@ -130,16 +127,15 @@ class ApiClient:
                             logger.error(f"Fetch failed: {function_name}, url={url}, status={response.status}, response={response_text[:500]}")
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(2 + attempt * 2)
-                                continue
-                            return None, rate_limit_info
+                            continue
                         data = await response.json()
                         if not data.get("success"):
                             error_message = data.get('error_message', 'Unknown')
                             logger.error(f"API error: {function_name}, url={url}, message={error_message}, response={response_text[:500]}")
                             if error_message == "Error (2)" and attempt < max_retries - 1:
-                                await asyncio.sleep(5 + attempt * 5)
-                                timestamp = int(time.time())
-                                headers = self.generate_headers(url, timestamp)
+                                wait_time = 5 + attempt * 5  # Exponential backoff
+                                logger.warning(f"Retrying {function_name} due to Error (2), attempt {attempt + 1}/{max_retries}, waiting {wait_time}s")
+                                await asyncio.sleep(wait_time)
                                 continue
                             return None, rate_limit_info
                         return data, rate_limit_info
@@ -157,6 +153,7 @@ class ApiClient:
                     await asyncio.sleep(2 + attempt * 2)
                     continue
                 return None, rate_limit_info
+        return None, rate_limit_info
 
 # 初始化速率限制器和客戶端
 rate_limiter = RateLimiter(max_requests=50, period=60)
@@ -176,7 +173,6 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
     """
     抓取指定分類的帖子標題列表。
     """
-    from grok_processing import safe_int  # Local import
     items = []
     rate_limit_info = []
     current_time = time.time()
@@ -203,16 +199,15 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
             filtered_items = [
                 {
                     **item,
-                    "no_of_reply": safe_int(item.get("no_of_reply", 0), 0),
-                    "like_count": safe_int(item.get("like_count", 0), 0),
-                    "dislike_count": safe_int(item.get("dislike_count", 0), 0),
-                    "total_pages": safe_int(item.get("total_pages", 1), 1)
+                    "no_of_reply": int(item.get("no_of_reply", 0)),
+                    "like_count": int(item.get("like_count", 0)),
+                    "total_pages": int(item.get("total_page", 1))
                 }
                 for item in data["response"]["items"]
-                if item.get("title") and safe_int(item.get("no_of_reply", 0), 0) > 0
+                if item.get("title") and int(item.get("no_of_reply", 0)) > 0
             ]
-            logger.debug(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}, sample_data={[{'thread_id': item['thread_id'], 'no_of_reply': item['no_of_reply'], 'like_count': item['like_count'], 'total_pages': item['total_pages']} for item in filtered_items[:3]]}")
             items.extend(filtered_items)
+            logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
             logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
         
@@ -230,7 +225,8 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
     """
     抓取指定帖子的內容，包括回覆。
     """
-    from grok_processing import clean_html, safe_int  # Local import
+    from grok_processing import clean_html, safe_int  # Local import to avoid circular dependency
+    
     replies = []
     rate_limit_info = []
     fetched_pages = []
@@ -283,7 +279,7 @@ async def get_lihkg_thread_content(thread_id, cat_id, request_counter=0, last_re
             if not title and data["response"].get("title"):
                 title = clean_html(data["response"]["title"])
             page_replies = data["response"]["items"]
-            logger.debug(f"Thread_id={thread_id}, page={page}, raw_replies={len(page_replies)}, sample_data={[{'post_id': r.get('post_id'), 'like_count': r.get('like_count'), 'dislike_count': r.get('dislike_count')} for r in page_replies[:3]]}")
+            logger.debug(f"Thread_id={thread_id}, page={page}, raw_replies={len(page_replies)}")
             for reply in page_replies:
                 msg = clean_html(reply.get("msg", ""))
                 if not msg:
