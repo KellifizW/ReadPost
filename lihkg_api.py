@@ -1,6 +1,6 @@
 """
 LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
-提供速率限制管理、錯誤處理和日誌記錄功能。
+提供速率限制管理、錯誤處理和日誌記錄功能，支援動態延遲。
 主要函數：
 - get_lihkg_topic_list：抓取指定分類的帖子標題。
 - get_lihkg_thread_content：抓取指定帖子的回覆內容。
@@ -65,13 +65,15 @@ class RateLimiter:
 
 class ApiClient:
     """
-    LIHKG API 客戶端，處理共用請求邏輯。
+    LIHKG API 客戶端，處理共用請求邏輯，支援動態延遲。
     """
     def __init__(self, rate_limiter: RateLimiter):
         self.rate_limiter = rate_limiter
         self.base_url = LIHKG_BASE_URL
         self.device_id = LIHKG_DEVICE_ID
         self.cookie = LIHKG_COOKIE
+        self.avg_response_time = 1.0  # 初始平均響應時間（秒）
+        self.response_times = []  # 儲存最近10次響應時間
 
     def generate_headers(self, url: str, timestamp: int):
         digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
@@ -94,8 +96,16 @@ class ApiClient:
         for attempt in range(max_retries):
             try:
                 await self.rate_limiter.acquire()
+                start_time = time.time()
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, headers=headers, params=params, timeout=timeout) as response:
+                        response_time = time.time() - start_time
+                        self.response_times.append(response_time)
+                        if len(self.response_times) > 10:
+                            self.response_times.pop(0)
+                        self.avg_response_time = sum(self.response_times) / len(self.response_times)
+                        delay = max(0.5, min(2.0, self.avg_response_time * 0.8))  # 動態延遲：0.5-2秒
+                        await asyncio.sleep(delay)
                         status = "success" if response.status == 200 else f"failed_status_{response.status}"
                         logger.info(
                             json.dumps({
