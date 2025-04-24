@@ -186,7 +186,15 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response", {}).get("items"):
-            filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
+            filtered_items = [
+                {
+                    **item,
+                    "no_of_reply": int(item.get("no_of_reply", 0)),  # 轉換為整數
+                    "like_count": int(item.get("like_count", 0))      # 轉換為整數
+                }
+                for item in data["response"]["items"]
+                if item.get("title") and int(item.get("no_of_reply", 0)) > 0
+            ]
             items.extend(filtered_items)
             logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
