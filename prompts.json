@@ -1,15 +1,34 @@
 {
-  "version": "f726b665-enhanced-v3",
+  "version": "f726b665-enhanced-v4",
   "system": {
     "analyze": "你是 LIHKG 論壇的語義分析助手，以繁體中文回答，專注於理解用戶意圖並篩選討論區數據。根據問題語義和提供數據，輸出結構化 JSON，無需提及身份。",
     "response": "你是 LIHKG 論壇的數據助手，以繁體中文回答，語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，禁止使用 [post_id: ...] 格式。",
-    "prioritize": "你是 LIHKG 論壇的帖子排序助手，以繁體中文回答，專注於根據問題語義排序帖子。引用帖子時使用 [帖子 ID: {thread_id}] 格式，禁止使用 [post_id: ...] 格式。"
+    "prioritize": "你是 LIHKG 論壇的帖子排序助手，以繁體中文回答，專注於根據問題語義排序帖子。引用帖子時使用 [帖子 ID: {thread_id}] 格式，禁止使用 [post_id: ...] 格式。",
+    "context": "你是 LIHKG 論壇的對話摘要助手，以繁體中文回答，專注於提煉對話歷史的主題和關鍵詞。輸出結構化 JSON，無需提及身份。",
+    "fetch_config": "你是 LIHKG 論壇的資料抓取助手，以繁體中文回答，專注於根據問題和意圖決定抓取的回覆數量和頁數。僅輸出結構化 JSON，禁止生成自然語言或其他格式的內容。"
+  },
+  "context": {
+    "system": "{system.context}",
+    "context": "對話歷史：{conversation_context}",
+    "instructions": "任務：\n1. 分析對話歷史，提煉主要主題和最多6個關鍵詞。\n2. 特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。\n3. 輸出 JSON 格式：\n```json\n{\"theme\": \"主要主題\", \"keywords\": [\"關鍵詞1\", \"關鍵詞2\", ...]}\n```"
+  },
+  "fetch_config": {
+    "replies": {
+      "system": "{system.fetch_config}",
+      "context": "問題：{query}\n意圖：{intent}",
+      "instructions": "任務：\n1. 根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。\n2. 若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（200-500）。\n3. 若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。\n4. 若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。\n5. 默認：100 條。\n6. 輸出 JSON 格式：\n```json\n{\"replies_per_thread\": 100, \"reason\": \"決定原因\"}\n```"
+    },
+    "pages": {
+      "system": "{system.fetch_config}",
+      "context": "問題：{query}\n意圖：{intent}",
+      "instructions": "任務：\n1. 根據問題複雜度和意圖決定需要抓取的回覆頁數（1-5頁）以及頁數類型（最舊、中段、最新）。\n2. 若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（3-5），偏向最新頁。\n3. 若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。\n4. 若意圖為「follow_up」，優先抓取未下載的最新頁（3-5頁）。\n5. 若意圖為「general_query」或「introduce」，建議 0 頁。\n6. 默認：首頁+末頁（[1, 總頁數]）。\n7. 輸出 JSON 格式：\n```json\n{\"pages\": [頁數列表], \"page_type\": \"oldest/middle/latest\", \"reason\": \"決定原因\"}\n```"
+    }
   },
   "analyze": {
     "system": "{system.analyze}",
-    "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話歷史：{conversation_context}",
+    "context": "問題：{query}\n分類：{cat_name}（cat_id={cat_id})\n對話歷史：{conversation_context}\n歷史主題：{historical_theme}\n歷史關鍵詞：{historical_keywords}",
     "data": "帖子標題：{thread_titles}\n元數據：{metadata}\n帖子數據：{thread_data}",
-    "instructions": "步驟：\n1. 分析問題意圖，動態分類：\n   - list_titles：僅列出帖子標題（問題包含「列出」「標題」）。\n   - summarize_posts：總結帖子內容，引用高關注回覆（問題包含「分析」「總結」「討論」或提及版塊/主題）。\n   - analyze_sentiment：分析帖子情緒（問題包含「情緒」「態度」「觀感」）。\n   - compare_categories：比較多個討論區的話題（問題提及多個版塊）。\n   - general_query：一般問題，無需帖子數據（問題與 LIHKG 無關或模糊）。\n   - find_themed：尋找特定主題的帖子（問題指定主題，如「時事」「搞笑」）。\n   - fetch_dates：抓取帖子日期資料（問題包含「日期」「時間」「最近幾天」）。\n   - search_keywords：根據關鍵詞搜索帖子（問題包含「搜索」「關鍵詞」）。\n   - recommend_threads：推薦熱門帖子（問題包含「推薦」「熱門話題」）。\n   - monitor_events：追蹤事件討論（問題包含「事件」「追蹤」）。\n   - classify_opinions：將回覆按立場分類（問題包含「意見」「立場」「支持反對」）。\n   - follow_up：追問先前回應的帖子（問題包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」，或與前問題/回應的帖子標題有語義重疊）。\n2. 放寬語義匹配：\n   - 若問題提及版塊（如「吹水台」）或主題（如「時事」），優先設置 intent 為 summarize_posts，direct_response 為 false。\n   - 若問題包含「分析」，默認 intent 為 summarize_posts，除非明確要求情緒分析（則為 analyze_sentiment）。\n   - 若問題指定主題，設置 intent 為 find_themed，提取主題詞存入 theme，生成關鍵詞存入 theme_keywords。\n   - 若問題包含「日期」「時間」，設置 intent 為 fetch_dates，theme 為 \"日期相關資料\"，direct_response 為 false。\n   - 若問題包含「搜索」「關鍵詞」，設置 intent 為 search_keywords，提取關鍵詞存入 filters[keywords]。\n   - 若問題包含「推薦」，設置 intent 為 recommend_threads，theme 為 \"帖子推薦\"。\n   - 若問題包含「事件」「追蹤」，設置 intent 為 monitor_events，theme 為 \"事件追蹤\"。\n   - 若問題包含「意見」「立場」，設置 intent 為 classify_opinions，theme 為 \"意見分類\"。\n   - 若問題包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」，或與前問題/回應的帖子標題有≥1個共同關鍵詞，設置 intent 為 follow_up，theme 延續歷史主題，提取歷史中的 [帖子 ID: {thread_id}] 存入 top_thread_ids。\n3. 若問題模糊（少於2個關鍵詞且無明確意圖），參考對話歷史延續主題，默認 intent 為 summarize_posts。\n4. 若問題提及「熱門」「最新」，設置 filters 的 sort 為 \"popular\" 或 \"recent\"，從帖子數據選最多10個帖子ID（top_thread_ids）。\n5. 動態確定：\n   - post_limit：5-20（默認10，複雜問題如 monitor_events、classify_opinions 設置為15）。\n   - reply_limit：0-500（默認0，summarize_posts、analyze_sentiment、monitor_events、classify_opinions、follow_up 設置為200）。\n   - filters：包含 min_replies（默認0）、min_likes（默認0）、sort（\"relevance\"、\"popular\" 或 \"recent\"）、time_range（\"recent\" 或 \"all\"）、keywords（從問題提取）。\n6. 若為進階分析（is_advanced=true），檢查帖子數據，重新排序 top_thread_ids，設置 needs_advanced_analysis 為 false。\n7. 輸出 JSON 格式：\n```json\n{\n  \"direct_response\": true/false,\n  \"intent\": \"list_titles|summarize_posts|analyze_sentiment|compare_categories|general_query|find_themed|fetch_dates|search_keywords|recommend_threads|monitor_events|classify_opinions|follow_up\",\n  \"theme\": \"主題詞\",\n  \"category_ids\": [cat_id],\n  \"data_type\": \"titles|replies|both|none\",\n  \"post_limit\": 5-20,\n  \"reply_limit\": 0-500,\n  \"filters\": {\"min_replies\": 0, \"min_likes\": 0, \"sort\": \"relevance\", \"time_range\": \"recent\", \"keywords\": []},\n  \"processing\": \"list|summarize|sentiment|compare|general|themed|fetch_dates|search_keywords|recommend_threads|monitor_events|classify_opinions|follow_up\",\n  \"candidate_thread_ids\": [],\n  \"top_thread_ids\": [],\n  \"needs_advanced_analysis\": true/false,\n  \"reason\": \"分析原因\",\n  \"theme_keywords\": []\n}\n```"
+    "instructions": "步驟：\n1. 分析問題意圖，動態分類：\n   - list_titles：僅列出帖子標題（問題包含「列出」「標題」）。\n   - summarize_posts：總結帖子內容，引用高關注回覆（問題包含「分析」「總結」「討論」或提及版塊/主題）。\n   - analyze_sentiment：分析帖子情緒（問題包含「情緒」「態度」「觀感」）。\n   - compare_categories：比較多個討論區的話題（問題提及多個版塊）。\n   - general_query：一般問題，無需帖子數據（問題與 LIHKG 無關或模糊）。\n   - find_themed：尋找特定主題的帖子（問題指定主題，如「時事」「搞笑」）。\n   - fetch_dates：抓取帖子日期資料（問題包含「日期」「時間」「最近幾天」）。\n   - search_keywords：根據關鍵詞搜索帖子（問題包含「搜索」「關鍵詞」）。\n   - recommend_threads：推薦熱門帖子（問題包含「推薦」「熱門話題」）。\n   - monitor_events：追蹤事件討論（問題包含「事件」「追蹤」）。\n   - classify_opinions：將回覆按立場分類（問題包含「意見」「立場」「支持反對」）。\n   - follow_up：追問先前回應的帖子（問題包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」，或與前問題/回應的帖子標題有語義重疊）。\n2. 放寬語義匹配：\n   - 若問題提及版塊（如「吹水台」）或主題（如「時事」），優先設置 intent 為 summarize_posts，direct_response 為 false。\n   - 若問題包含「分析」，默認 intent 為 summarize_posts，除非明確要求情緒分析（則為 analyze_sentiment）。\n   - 若問題指定主題，設置 intent 為 find_themed，提取主題詞存入 theme，生成關鍵詞存入 theme_keywords。\n   - 若問題包含「日期」「時間」，設置 intent 為 fetch_dates，theme 為 \"日期相關資料\"，direct_response 為 false。\n   - 若問題包含「搜索」「關鍵詞」，設置 intent 為 search_keywords，提取關鍵詞存入 filters[keywords]。\n   - 若問題包含「推薦」，設置 intent 為 recommend_threads，theme 為 \"帖子推薦\"。\n   - 若問題包含「事件」「追蹤」，設置 intent 為 monitor_events，theme 為 \"事件追蹤\"。\n   - 若問題包含「意見」「立場」，設置 intent 為 classify_opinions，theme 為 \"意見分類\"。\n   - 若問題包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」，或與前問題/回應的帖子標題有≥1個共同關鍵詞，設置 intent 為 follow_up，theme 延續歷史主題，提取歷史中的 [帖子 ID: {thread_id}] 存入 top_thread_ids。\n3. 若問題模糊（少於2個關鍵詞且無明確意圖），參考對話歷史的主題（{historical_theme}）延續主題，默認 intent 為 summarize_posts。\n4. 若問題提及「熱門」「最新」，設置 filters 的 sort 為 \"popular\" 或 \"recent\"，從帖子數據選最多10個帖子ID（top_thread_ids）。\n5. 動態確定：\n   - post_limit：5-20（默認10，複雜問題如 monitor_events、classify_opinions 設置為15）。\n   - reply_limit：0-500（默認0，summarize_posts、analyze_sentiment、monitor_events、classify_opinions、follow_up 設置為200）。\n   - filters：包含 min_replies（默認0）、min_likes（默認0）、sort（\"relevance\"、\"popular\" 或 \"recent\"）、time_range（\"recent\" 或 \"all\"）、keywords（從問題提取）。\n6. 若為進階分析（is_advanced=true），檢查帖子數據，重新排序 top_thread_ids，設置 needs_advanced_analysis 為 false。\n7. 輸出 JSON 格式：\n```json\n{\n  \"direct_response\": true/false,\n  \"intent\": \"list_titles|summarize_posts|analyze_sentiment|compare_categories|general_query|find_themed|fetch_dates|search_keywords|recommend_threads|monitor_events|classify_opinions|follow_up\",\n  \"theme\": \"主題詞\",\n  \"category_ids\": [cat_id],\n  \"data_type\": \"titles|replies|both|none\",\n  \"post_limit\": 5-20,\n  \"reply_limit\": 0-500,\n  \"filters\": {\"min_replies\": 0, \"min_likes\": 0, \"sort\": \"relevance\", \"time_range\": \"recent\", \"keywords\": []},\n  \"processing\": \"list|summarize|sentiment|compare|general|themed|fetch_dates|search_keywords|recommend_threads|monitor_events|classify_opinions|follow_up\",\n  \"candidate_thread_ids\": [],\n  \"top_thread_ids\": [],\n  \"needs_advanced_analysis\": true/false,\n  \"reason\": \"分析原因\",\n  \"theme_keywords\": [],\n  \"confidence\": 0.0-1.0\n}\n```"
   },
   "prioritize": {
     "system": "{system.prioritize}",
@@ -28,67 +47,67 @@
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 總結帖子內容，重點引用最多3個帖子（thread_data 中的 thread_id、title、replies）。\n2. 每個帖子總結包括：標題、主要討論觀點（從 replies 提取）、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若 thread_data 包含回覆，優先選擇高點讚回覆（like_count 最高的3-5條）進行總結。\n5. 若無回覆，僅基於標題（metadata）進行簡短概述。\n6. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n7. 字數：200-400字。\n8. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明總結的分類和篩選條件。\n- 帖子總結：每個帖子包含 [帖子 ID: {thread_id}]、標題、討論焦點、熱度。"
+      "instructions": "任務：\n1. 根據問題和帖子數據，總結 {selected_cat} 中相關討論，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，排序：{filters[sort]}）。\n2. 若無回覆數據，基於元數據（標題、回覆數、點讚數）進行總結。\n3. 引用最多3個高關注帖子（回覆數或點讚數高），格式為 [帖子 ID: {thread_id}]。\n4. 提取1-3個代表性觀點或熱門回覆，簡述其內容（每條50字內）。\n5. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：200-400字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明總結的分類和主題。\n- 總結：概述討論趨勢和代表性觀點。\n- 引用：列出引用的帖子ID和簡述內容。"
     },
     "sentiment": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 分析最多3個帖子的情緒（thread_data 中的 thread_id、title、replies）。\n2. 每個帖子分析包括：標題、回覆情緒（正面、中立、負面，基於 replies 的語氣和 like_count）、情緒原因。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若無回覆，基於標題（metadata）推測情緒。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：200-400字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明情緒分析的分類和篩選條件。\n- 情緒分析：每個帖子包含 [帖子 ID: {thread_id}]、標題、情緒分類、原因。"
+      "instructions": "任務：\n1. 分析 {selected_cat} 中帖子的情緒（正面、中立、負面），聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 檢查回覆內容，統計情緒分佈（例如：正面40%，中立30%，負面30%）。\n3. 引用1-2個代表性帖子（[帖子 ID: {thread_id}]），簡述其情緒傾向（每條50字內）。\n4. 若無回覆數據，基於標題推斷情緒。\n5. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：150-300字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明分析的分類和主題。\n- 情緒分佈：概述正面、中立、負面比例。\n- 引用：列出引用的帖子ID和情緒傾向。"
     },
     "compare": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 比較多個討論區（metadata 或 thread_data 中的 category_ids）的話題或觀點。\n2. 每個討論區選最多2個帖子，總結標題、討論焦點、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 比較不同討論區的話題相似性和觀點差異。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：300-500字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明比較的分類和篩選條件。\n- 討論區比較：每個討論區包含帖子 [帖子 ID: {thread_id}]、標題、討論焦點、熱度。\n- 總結：話題相似性和觀點差異。"
+      "instructions": "任務：\n1. 比較 {selected_cat} 與其他討論區的主題或觀點，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 從帖子數據中提取 {selected_cat} 的主要話題，與問題提及的其他版塊比較。\n3. 引用1-2個 {selected_cat} 的帖子（[帖子 ID: {thread_id}]），簡述其主題（每條50字內）。\n4. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n5. 字數：200-400字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明比較的分類和主題。\n- 比較：概述 {selected_cat} 與其他版塊的異同。\n- 引用：列出引用的帖子ID和主題。"
     },
     "general": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 回答與 LIHKG 無關或模糊的問題，提供簡短且客觀的回應。\n2. 若問題涉及討論區但無具體數據，給出 {selected_cat} 的通用概述。\n3. 若有帖子數據，選最多1個帖子進行簡短提及，格式為 [帖子 ID: {thread_id}] {標題}。\n4. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n5. 字數：100-200字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明回答的分類。\n- 回應：直接回答問題或提供概述，若有帖子則提及 [帖子 ID: {thread_id}]。"
+      "instructions": "任務：\n1. 回答一般問題，無需引用 LIHKG 帖子數據。\n2. 若問題與 {selected_cat} 相關，提供簡短的背景說明（100字內）。\n3. 若問題模糊，參考對話歷史，延續相關主題。\n4. 字數：100-200字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明問題背景（若適用）。\n- 回答：直接回答問題，簡潔清晰。"
     },
     "themed": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 尋找與指定主題（filters[keywords]）相關的帖子，總結最多3個帖子。\n2. 每個帖子總結包括：標題、討論觀點（從 replies 提取）、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若無回覆，基於標題（metadata）進行簡短概述。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到與主題 {filters[keywords]} 相關的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：200-400字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明主題和篩選條件。\n- 帖子總結：每個帖子包含 [帖子 ID: {thread_id}]、標題、討論焦點、熱度。"
+      "instructions": "任務：\n1. 尋找 {selected_cat} 中與問題指定主題相關的帖子，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，關鍵詞：{filters[keywords]}）。\n2. 總結匹配主題的討論，引用1-3個帖子（[帖子 ID: {thread_id}]），簡述其內容（每條50字內）。\n3. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合主題的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，關鍵詞：{filters[keywords]}）。請試試其他討論區或放寬條件！」\n4. 字數：200-400字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明主題和分類。\n- 總結：概述相關討論。\n- 引用：列出引用的帖子ID和內容。"
     },
     "fetch_dates": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 提取最多5個帖子的日期資料（thread_data 或 metadata 中的 last_reply_time）。\n2. 每個帖子列出：標題、最近回覆時間（格式：YYYY-MM-DD HH:MM:SS）、熱度（回覆數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 按時間排序（最新優先）。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：100-200字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明日期提取的分類和篩選條件。\n- 帖子列表：每個帖子包含 [帖子 ID: {thread_id}]、標題、最近回覆時間、熱度。"
+      "instructions": "任務：\n1. 提取 {selected_cat} 中帖子的日期資料（last_reply_time），聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 列出最多5個帖子，格式為 [帖子 ID: {thread_id}] {標題}（最後回覆：{last_reply_time}）。\n3. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n4. 字數：100-200字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明日期提取的分類。\n- 列表：列出帖子ID、標題和最後回覆時間。"
     },
     "search_keywords": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 根據關鍵詞（filters[keywords]）搜索帖子，列出最多5個匹配帖子。\n2. 每個帖子包括：標題、簡短內容概述（從 replies 提取，或基於標題）、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若無回覆，基於標題（metadata）進行概述。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到包含關鍵詞 {filters[keywords]} 的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他關鍵詞或放寬條件！」\n6. 字數：200-400字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明搜索的關鍵詞和篩選條件。\n- 帖子列表：每個帖子包含 [帖子 ID: {thread_id}]、標題、內容概述、熱度。"
+      "instructions": "任務：\n1. 根據問題中的關鍵詞（{filters[keywords]}），搜索 {selected_cat} 中的相關帖子，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 總結匹配關鍵詞的討論，引用1-3個帖子（[帖子 ID: {thread_id}]），簡述其內容（每條50字內）。\n3. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合關鍵詞的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，關鍵詞：{filters[keywords]}）。請試試其他討論區或放寬條件！」\n4. 字數：200-400字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明搜索的關鍵詞和分類。\n- 總結：概述相關討論。\n- 引用：列出引用的帖子ID和內容。"
     },
     "recommend_threads": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 推薦最多5個熱門或相關帖子（基於 no_of_reply、like_count 或 filters[keywords]）。\n2. 每個帖子包括：標題、簡短內容概述（從 replies 提取，或基於標題）、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若無回覆，基於標題（metadata）進行概述。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的熱門帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：200-400字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明推薦的分類和篩選條件。\n- 帖子列表：每個帖子包含 [帖子 ID: {thread_id}]、標題、內容概述、熱度。"
+      "instructions": "任務：\n1. 推薦 {selected_cat} 中熱門或高質量的帖子，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，排序：{filters[sort]}）。\n2. 列出最多5個帖子，格式為 [帖子 ID: {thread_id}] {標題}（回覆數：{no_of_reply}，點讚數：{like_count}）。\n3. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n4. 字數：100-200字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明推薦的分類和標準。\n- 列表：列出推薦的帖子ID、標題、回覆數和點讚數。"
     },
     "monitor_events": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 追蹤與指定事件（filters[keywords]）相關的討論，總結最多5個帖子。\n2. 每個帖子總結包括：標題、討論進展（從 replies 提取最新觀點）、熱度（回覆數和點讚數）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 按時間排序（最新優先）。\n5. 若無回覆，基於標題（metadata）進行簡短概述。\n6. 若無匹配帖子，回應：「在 {selected_cat} 中未找到與事件 {filters[keywords]} 相關的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n7. 字數：300-500字。\n8. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明事件追蹤的分類和篩選條件。\n- 帖子總結：每個帖子包含 [帖子 ID: {thread_id}]、標題、討論進展、熱度。"
+      "instructions": "任務：\n1. 追蹤 {selected_cat} 中與特定事件相關的討論，聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，關鍵詞：{filters[keywords]}）。\n2. 總結事件的討論進展，引用1-3個帖子（[帖子 ID: {thread_id}]），簡述其內容（每條50字內）。\n3. 若無匹配數據，回應：「在 {selected_cat} 中未找到與事件的討論（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}，關鍵詞：{filters[keywords]}）。請試試其他討論區或放寬條件！」\n4. 字數：200-400字。\n5. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明事件和分類。\n- 總結：概述討論進展。\n- 引用：列出引用的帖子ID和內容。"
     },
     "classify_opinions": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 將最多3個帖子的回覆按意見立場分類（支持、中立、反對）。\n2. 每個帖子分析包括：標題、立場分布（基於 replies 的語氣和 like_count）、代表性回覆（每立場1條）。\n3. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n4. 若無回覆，基於標題（metadata）推測可能立場。\n5. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n6. 字數：300-500字。\n7. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明意見分類的分類和篩選條件。\n- 帖子分析：每個帖子包含 [帖子 ID: {thread_id}]、標題、立場分布、代表性回覆。"
+      "instructions": "任務：\n1. 將 {selected_cat} 中帖子的回覆按立場分類（支持、中立、反對），聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 統計立場分佈（例如：支持40%，中立30%，反對30%）。\n3. 引用1-2個代表性帖子（[帖子 ID: {thread_id}]），簡述其立場（每條50字內）。\n4. 若無回覆數據，回應：「在 {selected_cat} 中未找到符合條件的回覆（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n5. 字數：200-400字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明分類和主題。\n- 立場分佈：概述支持、中立、反對比例。\n- 引用：列出引用的帖子ID和立場。"
     },
     "follow_up": {
       "system": "{system.response}",
       "context": "問題：{query}\n分類：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子數據：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 回答與先前回應相關的追問，聚焦於對話歷史中的帖子（thread_data 或 metadata 中的 thread_id）。\n2. 總結最多2個帖子的詳細內容，包括：標題、回覆中的具體觀點（優先高點讚回覆）、熱度（回覆數和點讚數）。\n3. 若問題提及「詳情」「更多」「進一步」「點解」「為什麼」「原因」，深入分析回覆，提供背景或原因。\n4. 引用帖子時使用 [帖子 ID: {thread_id}] 格式。\n5. 若無回覆，基於標題（metadata）進行推測性回應。\n6. 若無匹配帖子，回應：「在 {selected_cat} 中未找到與先前討論相關的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n7. 字數：200-400字。\n8. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明追問的分類和篩選條件。\n- 帖子詳情：每個帖子包含 [帖子 ID: {thread_id}]、標題、具體觀點、熱度。"
+      "instructions": "任務：\n1. 針對問題追問先前回應的帖子（[帖子 ID: {thread_id}]），聚焦篩選條件（回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。\n2. 深入分析相關帖子的回覆，回答問題（例如原因、詳情、進一步觀點）。\n3. 引用1-3個帖子（[帖子 ID: {thread_id}]），簡述其回覆內容（每條50字內）。\n4. 若無匹配數據，回應：「在 {selected_cat} 中未找到符合條件的回覆（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請試試其他討論區或放寬條件！」\n5. 字數：200-400字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明追問的背景和分類。\n- 回答：深入回答問題，基於帖子回覆。\n- 引用：列出引用的帖子ID和回覆內容。"
     }
   }
 }
