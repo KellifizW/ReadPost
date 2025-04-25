@@ -1,3 +1,5 @@
+# lihkg_api.py
+
 """
 LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 提供速率限制管理、錯誤處理和日誌記錄功能。
@@ -197,7 +199,11 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
         last_reset = current_time
     
     for page in range(start_page, start_page + max_pages):
-        url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now&order=now"
+        # 根據分類設置 type 和 order 參數
+        if cat_id == "2":  # 熱門台
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id=1&page={page}&count=60&type=now&order=hot"
+        else:
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now"
         data, page_rate_limit_info = await api_client.get(url, "get_lihkg_topic_list")
         request_counter += 1
         rate_limit_info.extend(page_rate_limit_info)
