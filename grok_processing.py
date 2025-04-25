@@ -40,6 +40,21 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90
 
+def repair_json(json_str):
+    """嘗試修復無效 JSON（缺失引號、未終止字符串等）"""
+    try:
+        # 移除非法控制字符
+        json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
+        # 添加缺失的結束符
+        if not json_str.endswith('}'):
+            json_str += '"}'
+        # 修復缺少引號的屬性名
+        json_str = re.sub(r'(\w+):', r'"\1":', json_str)
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON repair failed: {str(e)}")
+        return None
+
 class PromptBuilder:
     def __init__(self, config_path=None):
         if config_path is None:
@@ -77,19 +92,16 @@ def clean_text(text, is_response=False):
     if not isinstance(text, str):
         text = str(text)
     try:
-        # 移除 HTML 標籤
         text = re.sub(r'<[^>]+>', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        # 處理特殊內容
         if not text or text.isspace():
             if "hkgmoji" in text:
                 return "[表情符號]"
             if any(ext in text.lower() for ext in ['.webp', '.jpg', '.png']):
                 return "[圖片]"
             if is_response and text in ["", " "]:
-                return ""  # 流式響應的空片段直接忽略
+                return ""
             return "[無內容]"
-        # 清理回應中的 post_id
         if is_response:
             text = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', text)
         return text
@@ -148,7 +160,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     query_words = set(extract_keywords(user_query))
     is_vague = len(query_words) < 2 and not any(kw in user_query for kw in ["分析", "總結", "討論", "主題", "時事"])
     
-    # 追問檢測
     is_follow_up = False
     referenced_thread_ids = []
     referenced_titles = []
@@ -350,7 +361,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                 return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced IDs"}
 
     prompt_builder = PromptBuilder()
-    limited_threads = threads[:30]
+    limited_threads = threads[:20]  # 減少到 20 個帖子
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
@@ -387,26 +398,37 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                         logger.warning(f"Prioritize failed: status={response.status}")
                         continue
                     content = await response.text()
-                    logger.debug(f"Prioritize raw response: {content[:1000]}")
+                    logger.debug(f"Prioritize raw response: {content}")  # 記錄完整響應
                     if not content.strip().startswith("{"):
                         logger.warning(f"Invalid JSON response: {content[:200]}")
                         continue
                     try:
                         data = json.loads(content)
-                        result = json.loads(data["choices"][0]["message"]["content"])
+                        inner_content = data["choices"][0]["message"]["content"]
+                        # 嘗試解析嵌套 JSON
+                        result = json.loads(inner_content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result:
-                            logger.warning(f"Invalid prioritize result: {content[:200]}")
+                            logger.warning(f"Invalid prioritize result: {inner_content[:200]}")
                             return {"top_thread_ids": [], "reason": "Invalid result format"}
+                        if not isinstance(result["top_thread_ids"], list):
+                            logger.warning(f"Invalid top_thread_ids: {result['top_thread_ids']}")
+                            return {"top_thread_ids": [], "reason": "top_thread_ids not a list"}
                         logger.info(f"Prioritized: {result}")
                         return result
                     except json.JSONDecodeError as e:
-                        logger.warning(f"JSON decode error: {str(e)}, content: {content[:200]}")
+                        logger.warning(f"JSON decode error: {str(e)}, content: {inner_content[:200]}")
+                        # 嘗試修復 JSON
+                        repaired_result = repair_json(inner_content)
+                        if repaired_result and isinstance(repaired_result, dict) and "top_thread_ids" in repaired_result:
+                            logger.info(f"Repaired JSON: {repaired_result}")
+                            return repaired_result
                         continue
         except Exception as e:
             logger.warning(f"Prioritize error: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)  # 增加重試間隔
                 continue
+        # 改進回退邏輯
         try:
             keyword_matched = [(t, sum(1 for kw in theme_keywords or [] if kw.lower() in t["title"].lower())) for t in threads]
             keyword_matched.sort(key=lambda x: x[1], reverse=True)
@@ -735,13 +757,14 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if progress_callback:
             progress_callback("重新分析帖子", 0.4)
         prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent, analysis.get("theme_keywords", []))
-        if not prioritization or not isinstance(prioritization, dict):
-            logger.warning("Prioritization failed, falling back to local sorting")
+        if not prioritization or not isinstance(prioritization, dict) or "top_thread_ids" not in prioritization:
+            logger.warning("Prioritization failed or invalid, falling back to local sorting")
             sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
         else:
             top_thread_ids = prioritization.get("top_thread_ids", [])
-            if not top_thread_ids:
+            if not top_thread_ids or not isinstance(top_thread_ids, list):
+                logger.warning("Invalid top_thread_ids, falling back to local sorting")
                 sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
                 top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
     
