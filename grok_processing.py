@@ -9,7 +9,7 @@ import logging
 import streamlit as st
 import os
 import pytz
-import tzlocal
+from tzlocal import get_localzone
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
 # 香港時區
@@ -33,7 +33,7 @@ file_handler = logging.FileHandler("grok_processing.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter")
+logger.info(f"System timezone: {get_localzone()}, using HongKongFormatter")
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -266,7 +266,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     theme = historical_theme if is_vague else "general"
                     theme_keywords = extract_keywords(user_query) or historical_keywords
                     post_limit = 10
-                    reply_limit = 100 if intent == "summarize_posts" else 0  # 為 summarize_posts 設置回覆抓取
+                    reply_limit = 100 if intent == "summarize_posts" else 0
                     data_type = "both"
                     processing = intent
                     min_likes = 0 if cat_id in ["5", "15"] else 5
@@ -321,7 +321,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 100,  # 默認抓取回覆
+                "reply_limit": 100,
                 "filters": {"min_replies": 0, "min_likes": min_likes, "keywords": historical_keywords},
                 "processing": "summarize",
                 "candidate_thread_ids": [],
@@ -350,7 +350,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                 return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced IDs"}
 
     prompt_builder = PromptBuilder()
-    limited_threads = threads[:50]
+    limited_threads = threads[:30]
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
@@ -359,6 +359,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in limited_threads],
             theme_keywords=theme_keywords
         )
+        logger.info(f"Prompt length: {len(prompt)} characters")
     except Exception as e:
         logger.error(f"Prioritize prompt failed: {str(e)}")
         return {"top_thread_ids": [], "reason": f"Prompt failed: {str(e)}"}
@@ -386,13 +387,16 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                         logger.warning(f"Prioritize failed: status={response.status}")
                         continue
                     content = await response.text()
-                    logger.debug(f"Prioritize raw response: {content[:500]}")
+                    logger.debug(f"Prioritize raw response: {content[:1000]}")
+                    if not content.strip().startswith("{"):
+                        logger.warning(f"Invalid JSON response: {content[:200]}")
+                        continue
                     try:
                         data = json.loads(content)
                         result = json.loads(data["choices"][0]["message"]["content"])
                         if not isinstance(result, dict) or "top_thread_ids" not in result:
                             logger.warning(f"Invalid prioritize result: {content[:200]}")
-                            return {"top_thread_ids": [], "reason": "Invalid result"}
+                            return {"top_thread_ids": [], "reason": "Invalid result format"}
                         logger.info(f"Prioritized: {result}")
                         return result
                     except json.JSONDecodeError as e:
@@ -401,15 +405,20 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         except Exception as e:
             logger.warning(f"Prioritize error: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 continue
+        try:
             keyword_matched = [(t, sum(1 for kw in theme_keywords or [] if kw.lower() in t["title"].lower())) for t in threads]
             keyword_matched.sort(key=lambda x: x[1], reverse=True)
             top_thread_ids = [t[0]["thread_id"] for t in keyword_matched[:5] if t[1] > 0]
             if not top_thread_ids:
                 sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
                 top_thread_ids = [t["thread_id"] for t in sorted_threads[:5]]
+            logger.info(f"Fallback to keyword/popularity: {top_thread_ids}")
             return {"top_thread_ids": top_thread_ids, "reason": "Fallback to keyword/popularity"}
+        except Exception as e:
+            logger.error(f"Fallback failed: {str(e)}")
+            return {"top_thread_ids": [], "reason": f"Fallback failed: {str(e)}"}
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     conversation_context = conversation_context or []
@@ -510,7 +519,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     min_tokens, max_tokens = 800, 3600
     target_tokens = min_tokens if total_replies_count == 0 else min(max(int(min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)), min_tokens), max_tokens)
     if intent == "summarize_posts":
-        target_tokens = max(target_tokens, 1200)  # 確保足夠 tokens 總結 3 帖
+        target_tokens = max(target_tokens, 1200)
     logger.info(f"Max tokens: {target_tokens}, replies: {total_replies_count}")
 
     thread_id_prompt = "\n回應含帖子ID，格式[帖子 ID: xxx]，禁[post_id: ...]。確保每帖總結完整，避免空內容。"
@@ -568,7 +577,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                             logger.warning(f"Moderation: {content}")
                                             raise ValueError("Moderation detected")
                                         cleaned_content = clean_text(content, is_response=True)
-                                        if cleaned_content:  # 僅輸出非空內容
+                                        if cleaned_content:
                                             response_content += cleaned_content
                                             yield cleaned_content
                                 except json.JSONDecodeError:
@@ -726,10 +735,15 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if progress_callback:
             progress_callback("重新分析帖子", 0.4)
         prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent, analysis.get("theme_keywords", []))
-        top_thread_ids = prioritization.get("top_thread_ids", [])
-        if not top_thread_ids:
+        if not prioritization or not isinstance(prioritization, dict):
+            logger.warning("Prioritization failed, falling back to local sorting")
             sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
             top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+        else:
+            top_thread_ids = prioritization.get("top_thread_ids", [])
+            if not top_thread_ids:
+                sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+                top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
     
     if reply_limit == 0:
         logger.info(f"Skipping replies: intent={intent}")
@@ -783,7 +797,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     candidate_threads.extend([item for item in filtered_items if str(item["thread_id"]) not in map(str, top_thread_ids)][:post_limit - len(candidate_threads)])
     
     tasks = []
-    for idx, item in enumerate(candidate_threads[:3]):  # 限制為 3 個帖子
+    for idx, item in enumerate(candidate_threads[:3]):
         thread_id = str(item["thread_id"])
         cache_key = thread_id
         cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
