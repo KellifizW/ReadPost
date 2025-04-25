@@ -18,29 +18,35 @@ from grok_processing import analyze_and_screen, stream_grok3_response, process_u
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 配置日誌記錄器，設置為香港時區
+# 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+logger.handlers.clear()
 
-# 自定義日誌格式器，將時間戳設為香港時區
+# 自定義日誌格式器
 class HongKongFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
         if datefmt:
             return dt.strftime(datefmt)
         else:
-            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
 
 formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
 
-# 清空默認處理器並添加新處理器
-logger.handlers.clear()
+# 檔案處理器
 file_handler = logging.FileHandler("app.log")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
+
+# 控制台處理器
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
+
+# 檢查系統時區
+import tzlocal
+logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter (Asia/Hong_Kong)")
 
 # 應用 asyncio 補丁
 nest_asyncio.apply()
@@ -126,12 +132,11 @@ async def main():
         selected_cat = "吹水台"
         cat_id = "1"
 
-    # 檢測分類變化並清理對話歷史（僅在實際切換時清空）
+    # 檢測分類變化並清理對話歷史
     if "last_selected_cat" not in st.session_state:
         st.session_state.last_selected_cat = selected_cat
 
     if st.session_state.last_selected_cat != selected_cat:
-        # 僅在用戶明確切換且有歷史記錄時清除
         if st.session_state.chat_history or st.session_state.conversation_context:
             st.session_state.chat_history = []
             st.session_state.conversation_context = []
@@ -191,12 +196,12 @@ async def main():
             st.markdown(user_query)
         st.session_state.awaiting_response = True
 
-        # 清理過舊上下文（超過1小時）
+        # 清理過舊上下文
         current_time = time.time()
         valid_context = []
         valid_timestamps = []
         for msg, ts in zip(st.session_state.conversation_context, st.session_state.context_timestamps):
-            if current_time - ts < 3600:  # 1小時
+            if current_time - ts < 3600:
                 valid_context.append(msg)
                 valid_timestamps.append(ts)
         st.session_state.conversation_context = valid_context[:20]
@@ -228,7 +233,7 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
-            # 重置聊天記錄（僅當話題完全無關）
+            # 重置聊天記錄
             if "last_user_query" not in st.session_state:
                 st.session_state.last_user_query = None
             if not st.session_state.last_user_query or len(set(user_query.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
