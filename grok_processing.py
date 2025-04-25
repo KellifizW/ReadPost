@@ -192,6 +192,7 @@ async def summarize_context(conversation_context):
     
     prompt = f"""
     你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
+    特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
     輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
     """
@@ -212,6 +213,7 @@ async def summarize_context(conversation_context):
                     return {"theme": "general", "keywords": []}
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
+                logger.info(f"Context summarized: theme={result['theme']}, keywords={result['keywords']}")
                 return result
     except Exception as e:
         logger.warning(f"Context summarization error: {str(e)}")
@@ -229,46 +231,42 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     historical_theme = context_summary.get("theme", "general")
     historical_keywords = context_summary.get("keywords", [])
     
-    # 定義意圖描述
-    intent_descriptions = {
-        "list_titles": "列出帖子標題或清單",
-        "summarize_posts": "總結帖子內容或討論",
-        "analyze_sentiment": "分析帖子或回覆的情緒",
-        "compare_categories": "比較不同討論區的話題",
-        "general_query": "與LIHKG無關或模糊的問題",
-        "find_themed": "尋找特定主題的帖子",
-        "fetch_dates": "提取帖子或回覆的日期資料",
-        "search_keywords": "根據關鍵詞搜索帖子",
-        "recommend_threads": "推薦相關或熱門帖子",
-        "monitor_events": "追蹤特定事件或話題的討論",
-        "classify_opinions": "將回覆按意見立場分類",
-        "follow_up": "追問之前回應中提到的帖子內容"
-    }
-    
-    # 放寬模糊查詢門檻
+    # 提取關鍵詞
     query_words = set(extract_keywords(user_query))
     is_vague = len(query_words) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
     
-    # 檢查是否為追問
+    # 增強追問檢測
     is_follow_up = False
     referenced_thread_ids = []
+    referenced_titles = []
     if conversation_context and len(conversation_context) >= 2:
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
-        common_words = set(extract_keywords(user_query)).intersection(set(extract_keywords(last_user_query + " " + last_response)))
-        if len(common_words) >= 1 or any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "深入", "接著"]):
+        
+        # 提取歷史回應中的帖子 ID 和標題
+        matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+        referenced_thread_ids = matches
+        for tid in referenced_thread_ids:
+            for thread in metadata or []:
+                if str(thread.get("thread_id")) == tid:
+                    referenced_titles.append(thread.get("title", ""))
+        
+        # 檢查語義關聯
+        common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
+        title_overlap = any(any(kw in title for kw in query_words) for title in referenced_titles)
+        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+        
+        if len(common_words) >= 1 or title_overlap or explicit_follow_up:
             is_follow_up = True
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-            referenced_thread_ids = matches
-            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}")
+            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
             if not referenced_thread_ids:
                 logger.info("No referenced thread IDs found, falling back to search_keywords")
                 is_follow_up = False
     
-    # 若無歷史ID且檢測到追問，改用 search_keywords
+    # 若無歷史 ID 且檢測到追問，改用 search_keywords
     if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
-        reason = "追問意圖無歷史帖子ID，回退到關鍵詞搜索"
+        reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
         return {
@@ -292,13 +290,26 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     semantic_prompt = f"""
     你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
     若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
-    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」等詞或與前問題/回應有重疊），選擇「follow_up」意圖。
+    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
     用戶問題：{user_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
     歷史主題：{historical_theme}
     歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
     意圖描述：
-    {json.dumps(intent_descriptions, ensure_ascii=False, indent=2)}
+    {json.dumps({
+        "list_titles": "列出帖子標題或清單",
+        "summarize_posts": "總結帖子內容或討論",
+        "analyze_sentiment": "分析帖子或回覆的情緒",
+        "compare_categories": "比較不同討論區的話題",
+        "general_query": "與LIHKG無關或模糊的問題",
+        "find_themed": "尋找特定主題的帖子",
+        "fetch_dates": "提取帖子或回覆的日期資料",
+        "search_keywords": "根據關鍵詞搜索帖子",
+        "recommend_threads": "推薦相關或熱門帖子",
+        "monitor_events": "追蹤特定事件或話題的討論",
+        "classify_opinions": "將回覆按意見立場分類",
+        "follow_up": "追問之前回應中提到的帖子內容"
+    }, ensure_ascii=False, indent=2)}
     輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
     """
     
@@ -352,7 +363,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
                     intent = result.get("intent", "summarize_posts")
-                    confidence = result.get("confidence_like_count", 0.7)
+                    confidence = result.get("confidence", 0.7)
                     reason = result.get("reason", "語義匹配")
                     
                     # 若問題模糊，延續歷史意圖或默認 summarize_posts
@@ -366,7 +377,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     # 若檢測到追問，強制設置為 follow_up
                     if is_follow_up:
                         intent = "follow_up"
-                        reason = "檢測到追問，與前問題或回應有語義重疊"
+                        reason = "檢測到追問，與前問題或回應的帖子標題有語義重疊"
                     
                     # 根據意圖設置參數
                     theme = historical_theme if is_vague else "general"
@@ -636,7 +647,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
-        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)
+        target_tokens = min_tokens + (assi
         target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"Dynamic max_tokens: {target_tokens}, based on total_replies_count: {total_replies_count}")
     
