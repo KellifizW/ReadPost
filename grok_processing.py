@@ -86,9 +86,7 @@ class PromptBuilder:
             query=query,
             cat_name=cat_name,
             cat_id=cat_id,
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False),
-            historical_theme="{historical_theme}",
-            historical_keywords=json.dumps("{historical_keywords}", ensure_ascii=False)
+            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
         data = config["data"].format(
             thread_titles=json.dumps(thread_titles or [], ensure_ascii=False),
@@ -128,32 +126,6 @@ class PromptBuilder:
             filters=json.dumps(filters, ensure_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
-        return prompt
-
-    def build_context(self, conversation_context):
-        config = self.config["context"]
-        context = config["context"].format(
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
-        )
-        prompt = f"{config['system']}\n{context}\n{config['instructions']}"
-        return prompt
-
-    def build_fetch_replies(self, query, intent):
-        config = self.config["fetch_config"]["replies"]
-        context = config["context"].format(
-            query=query,
-            intent=intent
-        )
-        prompt = f"{config['system']}\n{context}\n{config['instructions']}"
-        return prompt
-
-    def build_fetch_pages(self, query, intent):
-        config = self.config["fetch_config"]["pages"]
-        context = config["context"].format(
-            query=query,
-            intent=intent
-        )
-        prompt = f"{config['system']}\n{context}\n{config['instructions']}"
         return prompt
 
     def get_system_prompt(self, mode):
@@ -226,8 +198,12 @@ async def summarize_context(conversation_context):
         logger.error(f"Grok 3 API key missing: {str(e)}")
         return {"theme": "general", "keywords": []}
     
-    prompt_builder = PromptBuilder()
-    prompt = prompt_builder.build_context(conversation_context)
+    prompt = f"""
+    你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多6個）。
+    特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", ...]}}
+    """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -320,6 +296,33 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "theme_keywords": theme_keywords
         }
     
+    # 準備語義比較提示詞
+    semantic_prompt = f"""
+    你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
+    若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
+    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
+    用戶問題：{user_query}
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    歷史主題：{historical_theme}
+    歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
+    意圖描述：
+    {json.dumps({
+        "list_titles": "列出帖子標題或清單",
+        "summarize_posts": "總結帖子內容或討論",
+        "analyze_sentiment": "分析帖子或回覆的情緒",
+        "compare_categories": "比較不同討論區的話題",
+        "general_query": "與LIHKG無關或模糊的問題",
+        "find_themed": "尋找特定主題的帖子",
+        "fetch_dates": "提取帖子或回覆的日期資料",
+        "search_keywords": "根據關鍵詞搜索帖子",
+        "recommend_threads": "推薦相關或熱門帖子",
+        "monitor_events": "追蹤特定事件或話題的討論",
+        "classify_opinions": "將回覆按意見立場分類",
+        "follow_up": "追問之前回應中提到的帖子內容"
+    }, ensure_ascii=False, indent=2)}
+    輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
+    """
+    
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -342,22 +345,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         }
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
-    prompt = prompt_builder.build_analyze(
-        query=user_query,
-        cat_name=cat_name,
-        cat_id=cat_id,
-        conversation_context=conversation_context,
-        thread_titles=thread_titles,
-        metadata=metadata,
-        thread_data=thread_data
-    ).format(
-        historical_theme=historical_theme,
-        historical_keywords=historical_keywords
-    )
     messages = [
         {"role": "system", "content": prompt_builder.get_system_prompt("analyze")},
         *conversation_context,
-        {"role": "user", "content": prompt}
+        {"role": "user", "content": semantic_prompt}
     ]
     payload = {
         "model": "grok-3-beta",
@@ -599,9 +590,17 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
-    reply_count_prompt = prompt_builder.build_fetch_replies(user_query, intent)
-    
+    reply_count_prompt = f"""
+    你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。
+    僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
+    問題：{user_query}
+    意圖：{processing}
+    若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（200-500）。
+    若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
+    若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
+    默認：100 條。
+    輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
+    """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
@@ -626,6 +625,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
+    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
@@ -1155,7 +1155,18 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             pages_to_fetch = [1, 2]
             page_type = "latest"
         else:
-            page_prompt = prompt_builder.build_fetch_pages(user_query, intent)
+            page_prompt = f"""
+            你是資料抓取助手，請根據問題複雜度和意圖決定需要抓取的回覆頁數（1-5頁）以及頁數類型（最舊、中段、最新）。
+            僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
+            問題：{user_query}
+            意圖：{intent}
+            若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（3-5），偏向最新頁。
+            若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。
+            若意圖為「follow_up」，優先抓取未下載的最新頁（3-5頁）。
+            若意圖為「general_query」或「introduce」，建議 0 頁。
+            默認：首頁+末頁（[1, 總頁數]）。
+            輸出格式：{{"pages": [頁數列表], "page_type": "oldest/middle/latest", "reason": "決定原因"}}
+            """
             
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
             payload = {
