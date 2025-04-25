@@ -99,23 +99,47 @@ async def main():
     if "last_selected_cat" not in st.session_state:
         st.session_state.last_selected_cat = None
 
+    # 日誌記錄頁面重新整理
+    logger.info(f"Page reloaded, last_selected_cat: {st.session_state.get('last_selected_cat', 'None')}")
+
     # 分類選擇
     cat_id_map = {
         "吹水台": 1, "熱門台": 2, "時事台": 5, "上班台": 14,
         "財經台": 15, "成人台": 29, "創意台": 31
     }
-    selected_cat = st.selectbox("選擇分類", options=list(cat_id_map.keys()), index=0)
-    cat_id = str(cat_id_map[selected_cat])
+
+    # 添加 selectbox 的 key 和 on_change 回調
+    def on_category_change():
+        logger.info(f"Category selectbox changed to {st.session_state.cat_select}")
+
+    try:
+        selected_cat = st.selectbox(
+            "選擇分類",
+            options=list(cat_id_map.keys()),
+            index=0,
+            key="cat_select",
+            on_change=on_category_change
+        )
+        cat_id = str(cat_id_map[selected_cat])
+    except Exception as e:
+        logger.error(f"Category selection error: {str(e)}")
+        selected_cat = "吹水台"
+        cat_id = "1"
 
     # 檢測分類變化並清理對話歷史（僅在實際切換時清空）
-    if st.session_state.last_selected_cat != selected_cat:
-        st.session_state.chat_history = []
-        st.session_state.conversation_context = []
-        st.session_state.context_timestamps = []
-        st.session_state.thread_cache = {}
-        st.session_state.last_user_query = None
+    if "last_selected_cat" not in st.session_state:
         st.session_state.last_selected_cat = selected_cat
-        logger.info(f"Category changed to {selected_cat}, cleared conversation history")
+
+    if st.session_state.last_selected_cat != selected_cat:
+        # 僅在用戶明確切換且有歷史記錄時清除
+        if st.session_state.chat_history or st.session_state.conversation_context:
+            st.session_state.chat_history = []
+            st.session_state.conversation_context = []
+            st.session_state.context_timestamps = []
+            st.session_state.thread_cache = {}
+            st.session_state.last_user_query = None
+            logger.info(f"Category changed to {selected_cat}, cleared conversation history due to explicit switch")
+        st.session_state.last_selected_cat = selected_cat
     else:
         logger.info(f"Category unchanged: {selected_cat}, preserving conversation history")
 
@@ -138,7 +162,7 @@ async def main():
     st.markdown("#### 速率限制狀態")
     st.markdown(f"- 請求計數: {st.session_state.request_counter}")
     st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
-    st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S if st.session_state.rate_limit_until > time.time() else '無限制'}")
+    st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else '無限制'}")
 
     # 顯示聊天記錄
     for idx, chat in enumerate(st.session_state.chat_history):
