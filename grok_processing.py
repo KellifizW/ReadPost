@@ -47,12 +47,14 @@ def repair_json(json_str):
         json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
         # 添加缺失的結束符
         if not json_str.endswith('}'):
-            json_str += '"}'
+            json_str += '}'
         # 修復缺少引號的屬性名
         json_str = re.sub(r'(\w+):', r'"\1":', json_str)
+        # 確保字符串值有引號
+        json_str = re.sub(r':\s*([^"{}\[\],\s][^,}]*)(?=[,\}])', r': "\1"', json_str)
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        logger.warning(f"JSON repair failed: {str(e)}")
+        logger.warning(f"JSON repair failed: {str(e)}, input: {json_str[:200]}")
         return None
 
 class PromptBuilder:
@@ -143,9 +145,13 @@ async def summarize_context(conversation_context):
                     logger.warning(f"Context summary failed: status={response.status}")
                     return {"theme": "general", "keywords": []}
                 data = await response.json()
-                result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"Context theme: {result['theme']}, keywords: {result['keywords']}")
-                return result
+                try:
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    logger.info(f"Context theme: {result['theme']}, keywords: {result['keywords']}")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Context summary JSON decode error: {str(e)}")
+                    return {"theme": "general", "keywords": []}
     except Exception as e:
         logger.warning(f"Context summary error: {str(e)}")
         return {"theme": "general", "keywords": []}
@@ -262,63 +268,67 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         logger.warning(f"Intent analysis failed: status={response.status}")
                         continue
                     data = await response.json()
-                    result = json.loads(data["choices"][0]["message"]["content"])
-                    intent = result.get("intent", "summarize_posts")
-                    confidence = result.get("confidence", 0.7)
-                    reason = result.get("reason", "語義匹配")
-                    
-                    if is_vague:
-                        intent = "summarize_posts"
-                        reason = f"模糊問題，{'延續歷史：' + historical_theme if historical_theme != 'general' else '默認總結'}"
-                    if is_follow_up:
-                        intent = "follow_up"
-                        reason = "檢測追問，與歷史標題重疊"
-                    
-                    theme = historical_theme if is_vague else "general"
-                    theme_keywords = extract_keywords(user_query) or historical_keywords
-                    post_limit = 10
-                    reply_limit = 100 if intent == "summarize_posts" else 0
-                    data_type = "both"
-                    processing = intent
-                    min_likes = 0 if cat_id in ["5", "15"] else 5
-                    if intent in ["search_keywords", "find_themed"]:
-                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-                    elif intent == "monitor_events":
-                        theme = "事件追蹤"
-                    elif intent == "classify_opinions":
-                        theme = "意見分類"
-                        data_type = "replies"
-                    elif intent == "recommend_threads":
-                        theme = "帖子推薦"
-                        post_limit = 5
-                    elif intent == "fetch_dates":
-                        theme = "日期資料"
-                        post_limit = 5
-                    elif intent == "follow_up":
-                        theme = historical_theme
-                        reply_limit = 500
-                        data_type = "replies"
-                        post_limit = min(len(referenced_thread_ids), 2) or 2
-                    elif intent in ["general_query", "introduce"]:
-                        reply_limit = 0
-                        data_type = "none"
-                    
-                    return {
-                        "direct_response": intent in ["general_query", "introduce"],
-                        "intent": intent,
-                        "theme": theme,
-                        "category_ids": [cat_id],
-                        "data_type": data_type,
-                        "post_limit": post_limit,
-                        "reply_limit": reply_limit,
-                        "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "relevance", "keywords": theme_keywords},
-                        "processing": intent,
-                        "candidate_thread_ids": [],
-                        "top_thread_ids": referenced_thread_ids,
-                        "needs_advanced_analysis": confidence < 0.7,
-                        "reason": reason,
-                        "theme_keywords": theme_keywords
-                    }
+                    try:
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        intent = result.get("intent", "summarize_posts")
+                        confidence = result.get("confidence", 0.7)
+                        reason = result.get("reason", "語義匹配")
+                        
+                        if is_vague:
+                            intent = "summarize_posts"
+                            reason = f"模糊問題，{'延續歷史：' + historical_theme if historical_theme != 'general' else '默認總結'}"
+                        if is_follow_up:
+                            intent = "follow_up"
+                            reason = "檢測追問，與歷史標題重疊"
+                        
+                        theme = historical_theme if is_vague else "general"
+                        theme_keywords = extract_keywords(user_query) or historical_keywords
+                        post_limit = 10
+                        reply_limit = 100 if intent == "summarize_posts" else 0
+                        data_type = "both"
+                        processing = intent
+                        min_likes = 0 if cat_id in ["5", "15"] else 5
+                        if intent in ["search_keywords", "find_themed"]:
+                            theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
+                        elif intent == "monitor_events":
+                            theme = "事件追蹤"
+                        elif intent == "classify_opinions":
+                            theme = "意見分類"
+                            data_type = "replies"
+                        elif intent == "recommend_threads":
+                            theme = "帖子推薦"
+                            post_limit = 5
+                        elif intent == "fetch_dates":
+                            theme = "日期資料"
+                            post_limit = 5
+                        elif intent == "follow_up":
+                            theme = historical_theme
+                            reply_limit = 500
+                            data_type = "replies"
+                            post_limit = min(len(referenced_thread_ids), 2) or 2
+                        elif intent in ["general_query", "introduce"]:
+                            reply_limit = 0
+                            data_type = "none"
+                        
+                        return {
+                            "direct_response": intent in ["general_query", "introduce"],
+                            "intent": intent,
+                            "theme": theme,
+                            "category_ids": [cat_id],
+                            "data_type": data_type,
+                            "post_limit": post_limit,
+                            "reply_limit": reply_limit,
+                            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "relevance", "keywords": theme_keywords},
+                            "processing": intent,
+                            "candidate_thread_ids": [],
+                            "top_thread_ids": referenced_thread_ids,
+                            "needs_advanced_analysis": confidence < 0.7,
+                            "reason": reason,
+                            "theme_keywords": theme_keywords
+                        }
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Intent analysis JSON decode error: {str(e)}")
+                        continue
         except Exception as e:
             logger.warning(f"Intent analysis error: {str(e)}")
             if attempt < 2:
@@ -361,7 +371,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                 return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced IDs"}
 
     prompt_builder = PromptBuilder()
-    limited_threads = threads[:20]  # 減少到 20 個帖子
+    limited_threads = threads[:20]
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
@@ -398,14 +408,13 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                         logger.warning(f"Prioritize failed: status={response.status}")
                         continue
                     content = await response.text()
-                    logger.debug(f"Prioritize raw response: {content}")  # 記錄完整響應
+                    logger.debug(f"Prioritize raw response: {content}")
                     if not content.strip().startswith("{"):
                         logger.warning(f"Invalid JSON response: {content[:200]}")
                         continue
                     try:
                         data = json.loads(content)
                         inner_content = data["choices"][0]["message"]["content"]
-                        # 嘗試解析嵌套 JSON
                         result = json.loads(inner_content)
                         if not isinstance(result, dict) or "top_thread_ids" not in result:
                             logger.warning(f"Invalid prioritize result: {inner_content[:200]}")
@@ -417,7 +426,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                         return result
                     except json.JSONDecodeError as e:
                         logger.warning(f"JSON decode error: {str(e)}, content: {inner_content[:200]}")
-                        # 嘗試修復 JSON
                         repaired_result = repair_json(inner_content)
                         if repaired_result and isinstance(repaired_result, dict) and "top_thread_ids" in repaired_result:
                             logger.info(f"Repaired JSON: {repaired_result}")
@@ -426,9 +434,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         except Exception as e:
             logger.warning(f"Prioritize error: {str(e)}")
             if attempt < 2:
-                await asyncio.sleep(5)  # 增加重試間隔
+                await asyncio.sleep(5)
                 continue
-        # 改進回退邏輯
         try:
             keyword_matched = [(t, sum(1 for kw in theme_keywords or [] if kw.lower() in t["title"].lower())) for t in threads]
             keyword_matched.sort(key=lambda x: x[1], reverse=True)
@@ -472,7 +479,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 if response.status == 200:
                     content = await response.text()
-                    logger.debug(f"Reply count raw response: {content[:200]}")
+                    logger.debug(f"Reply count raw response: {content}")
                     try:
                         data = json.loads(content)
                         result = json.loads(data["choices"][0]["message"]["content"])
@@ -480,6 +487,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         logger.info(f"Replies: {max_replies_per_thread}, reason: {result.get('reason')}")
                     except json.JSONDecodeError as e:
                         logger.warning(f"Reply count JSON decode error: {str(e)}, content: {content[:200]}")
+                        repaired_result = repair_json(content)
+                        if repaired_result and "replies_per_thread" in repaired_result:
+                            max_replies_per_thread = min(repaired_result.get("replies_per_thread", max_replies_per_thread), 500)
+                            logger.info(f"Repaired reply count JSON: {repaired_result}")
                 else:
                     logger.warning(f"Reply count API failed: status={response.status}")
     except Exception as e:
@@ -496,7 +507,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filtered_thread_data = {}
     total_replies_count = 0
     for tid, data in thread_data.items():
-        replies = data.get("replies", [])
+        replies = data.get("replies", [])[:50]  # 限制回覆數量
         keywords = extract_keywords(user_query)
         sorted_replies = sorted(
             [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "") for kw in keywords)],
@@ -524,7 +535,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if not filtered_thread_data and metadata:
         intent = "general_query"
         filtered_thread_data = {
-            tid: {
+            str(data["thread_id"]): {
                 "thread_id": str(data["thread_id"]),
                 "title": data["title"],
                 "no_of_reply": data.get("no_of_reply", 0),
@@ -588,6 +599,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     async for line in response.content:
                         if line and not line.isspace():
                             line_str = line.decode('utf-8').strip()
+                            logger.debug(f"Stream chunk: {line_str[:200]}")
                             if line_str == "data: [DONE]":
                                 break
                             if line_str.startswith("data: "):
@@ -602,8 +614,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         if cleaned_content:
                                             response_content += cleaned_content
                                             yield cleaned_content
-                                except json.JSONDecodeError:
-                                    logger.warning("Stream chunk JSON decode error")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"Stream chunk JSON decode error: {str(e)}, chunk: {line_str[:200]}")
+                                    repaired_chunk = repair_json(line_str[6:])
+                                    if repaired_chunk and "choices" in repaired_chunk:
+                                        content = repaired_chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                        if content:
+                                            cleaned_content = clean_text(content, is_response=True)
+                                            if cleaned_content:
+                                                response_content += cleaned_content
+                                                yield cleaned_content
                                     continue
                     if response_content:
                         logger.info(f"Response length: {len(response_content)}")
@@ -731,6 +751,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     
     filtered_items = [item for item in initial_threads if item.get("no_of_reply", 0) >= min_replies and str(item["thread_id"]) not in previous_thread_ids]
     
+    logger.info(f"Initial threads: {len(initial_threads)}, filtered: {len(filtered_items)}")
+    
     for item in initial_threads:
         thread_id = str(item["thread_id"])
         if thread_id not in st.session_state.thread_cache:
@@ -768,6 +790,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 sorted_items = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
                 top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
     
+    logger.info(f"Top thread IDs: {top_thread_ids}")
+    
     if reply_limit == 0:
         logger.info(f"Skipping replies: intent={intent}")
         thread_data = [st.session_state.thread_cache[str(tid)]["data"] for tid in top_thread_ids if str(tid) in st.session_state.thread_cache]
@@ -801,12 +825,19 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         async with aiohttp.ClientSession() as session:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    result = json.loads(data["choices"][0]["message"]["content"])
-                    pages_to_fetch = result.get("pages", [1, 2, 3] if intent == "summarize_posts" else [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2])[:5]
-                    page_type = result.get("page_type", "latest")
-                    logger.info(f"Pages: {pages_to_fetch}, type: {page_type}")
+                    content = await response.text()
+                    try:
+                        data = json.loads(content)
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        pages_to_fetch = result.get("pages", [1, 2, 3] if intent == "summarize_posts" else [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2])[:5]
+                        page_type = result.get("page_type", "latest")
+                        logger.info(f"Pages: {pages_to_fetch}, type: {page_type}")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Page selection JSON decode error: {str(e)}, content: {content[:200]}")
+                        pages_to_fetch = [1, 2, 3] if intent == "summarize_posts" else [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
+                        page_type = "latest"
                 else:
+                    logger.warning(f"Page selection API failed: status={response.status}")
                     pages_to_fetch = [1, 2, 3] if intent == "summarize_posts" else [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
                     page_type = "latest"
     
@@ -893,6 +924,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     
     if progress_callback:
         progress_callback("準備最終數據", 0.8)
+    
+    logger.info(f"Thread data: {len(thread_data)} threads")
     
     return {
         "selected_cat": selected_cat,
