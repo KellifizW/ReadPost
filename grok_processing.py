@@ -495,7 +495,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         except Exception as e:
             logger.warning(f"Thread prioritization error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2)
+                awaits asyncio.sleep(2)
                 continue
             # 回退到流行度排序
             sorted_threads = sorted(
