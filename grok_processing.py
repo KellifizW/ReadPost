@@ -1151,7 +1151,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 pages_to_fetch = [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
                                 page_type = "latest"
                             else:
-                                pages_to_fetch = result.get")"pages", [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2])[:5]
+                                pages_to_fetch = result.get("pages", [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2])[:5]
                                 page_type = result.get("page_type", "latest")
                                 logger.info(f"Dynamic pages selected: {pages_to_fetch}, type: {page_type}, reason: {result.get('reason', 'Default')}")
                         except json.JSONDecodeError as e:
