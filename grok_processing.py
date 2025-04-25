@@ -8,7 +8,6 @@ import time
 import logging
 import streamlit as st
 import os
-import tzlocal
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 
@@ -336,7 +335,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
     except KeyError:
         logger.error("Grok 3 API key missing")
         return {"top_thread_ids": [], "reason": "Missing API key"}
-    
+
     if intent == "follow_up":
         context = st.session_state.get("conversation_context", [])
         if context:
@@ -346,26 +345,28 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             if referenced_thread_ids:
                 logger.info(f"Follow-up: using IDs={referenced_thread_ids}")
                 return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced IDs"}
-    
+
     prompt_builder = PromptBuilder()
+    # 限制帖子數量，避免提示詞過長
+    limited_threads = threads[:50]  # 最多處理 50 個帖子
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
             cat_name=cat_name,
             cat_id=cat_id,
-            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads],
+            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in limited_threads],
             theme_keywords=theme_keywords
         )
     except Exception as e:
         logger.error(f"Prioritize prompt failed: {str(e)}")
         return {"top_thread_ids": [], "reason": f"Prompt failed: {str(e)}"}
-    
+
     weights = {"relevance": 0.8, "popularity": 0.2}
     if "熱門" in user_query:
         weights = {"relevance": 0.4, "popularity": 0.6}
     elif "最新" in user_query:
         weights = {"relevance": 0.2, "last_reply_time": 0.8}
-    
+
     prompt += f"\n權重：相關性{weights.get('relevance', 0.8)*100}%，熱度{weights.get('popularity', 0.2)*100}%，最新{weights.get('last_reply_time', 0)*100}%"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     payload = {
@@ -374,7 +375,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         "max_tokens": 300,
         "temperature": 0.7
     }
-    
+
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as session:
@@ -382,22 +383,28 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     if response.status != 200:
                         logger.warning(f"Prioritize failed: status={response.status}")
                         continue
-                    data = await response.json()
-                    content = data["choices"][0]["message"]["content"]
-                    result = json.loads(content)
-                    if not isinstance(result, dict) or "top_thread_ids" not in result:
-                        logger.warning(f"Invalid prioritize result: {content}")
-                        return {"top_thread_ids": [], "reason": "Invalid result"}
-                    logger.info(f"Prioritized: {result}")
-                    return result
+                    content = await response.text()  # 獲取原始響應
+                    logger.debug(f"Prioritize raw response: {content[:500]}")  # 記錄部分響應
+                    try:
+                        data = json.loads(content)
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        if not isinstance(result, dict) or "top_thread_ids" not in result:
+                            logger.warning(f"Invalid prioritize result: {content[:200]}")
+                            return {"top_thread_ids": [], "reason": "Invalid result"}
+                        logger.info(f"Prioritized: {result}")
+                        return result
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON decode error: {str(e)}, content: {content[:200]}")
+                        continue
         except Exception as e:
             logger.warning(f"Prioritize error: {str(e)}")
             if attempt < 2:
                 await asyncio.sleep(2)
                 continue
+            # 改進回退邏輯
             keyword_matched = [(t, sum(1 for kw in theme_keywords or [] if kw.lower() in t["title"].lower())) for t in threads]
             keyword_matched.sort(key=lambda x: x[1], reverse=True)
-            top_thread_ids = [t[0]["thread_id"] for t in keyword_matched[:5]]
+            top_thread_ids = [t[0]["thread_id"] for t in keyword_matched[:5] if t[1] > 0]  # 確保至少有關鍵詞匹配
             if not top_thread_ids:
                 sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
                 top_thread_ids = [t["thread_id"] for t in sorted_threads[:5]]
@@ -409,14 +416,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     prompt_builder = PromptBuilder()
     context_summary = await summarize_context(conversation_context)
     historical_theme = context_summary.get("theme", "general")
-    
+
     try:
         api_key = st.secrets["grok3key"]
     except KeyError:
         logger.error("Grok 3 API key missing")
         yield "錯誤: 缺少 API 密鑰"
         return
-    
+
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     reply_count_prompt = f"決定回覆數(0/25/50/100/200/250/500)。問題：{user_query}\n意圖：{intent}\n深入分析(情緒/意見/追問)用200-500，簡單(標題/日期)用25-50，general/introduce用0，默認100。\n輸出：{{'replies_per_thread': int, 'reason': str}}"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
@@ -426,19 +433,29 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "max_tokens": 100,
         "temperature": 0.5
     }
-    
+
     max_replies_per_thread = 100
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    result = json.loads(data["choices"][0]["message"]["content"])
-                    max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
-                    logger.info(f"Replies: {max_replies_per_thread}, reason: {result.get('reason')}")
+                    content = await response.text()
+                    logger.debug(f"Reply count raw response: {content[:200]}")
+                    try:
+                        data = json.loads(content)
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
+                        logger.info(f"Replies: {max_replies_per_thread}, reason: {result.get('reason')}")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Reply count JSON decode error: {str(e)}, content: {content[:200]}")
+                        max_replies_per_thread = 100  # 默認值
+                else:
+                    logger.warning(f"Reply count API failed: status={response.status}")
+                    max_replies_per_thread = 100
     except Exception as e:
         logger.warning(f"Replies selection failed: {str(e)}")
-    
+        max_replies_per_thread = 100
+
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
@@ -446,7 +463,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
         prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
         thread_data = {**prioritized_thread_data, **{tid: data for tid, data in thread_data.items() if str(tid) not in map(str, referenced_thread_ids)}}
-    
+
     filtered_thread_data = {}
     total_replies_count = 0
     for tid, data in thread_data.items():
@@ -474,21 +491,24 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "replies": sorted_replies,
             "fetched_pages": data.get("fetched_pages", [])
         }
-    
-    if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
+
+    # 如果無有效數據，回退到 general 意圖
+    if not filtered_thread_data and metadata:
+        intent = "general_query"
         filtered_thread_data = {
             tid: {k: v for k, v in data.items() if k != "replies"} | {"replies": [], "fetched_pages": data.get("fetched_pages", [])}
             for tid, data in thread_data.items()
         }
         total_replies_count = 0
-    
+        logger.info("No valid thread data, falling back to general_query")
+
     min_tokens, max_tokens = 600, 3600
     target_tokens = min_tokens if total_replies_count == 0 else min(max(int(min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)), min_tokens), max_tokens)
     logger.info(f"Max tokens: {target_tokens}, replies: {total_replies_count}")
-    
+
     thread_id_prompt = "\n回應含帖子ID，格式[帖子 ID: xxx]，禁[post_id: ...]。"
     prompt = prompt_builder.build_response(intent, user_query, selected_cat, conversation_context, metadata, filtered_thread_data, filters) + thread_id_prompt
-    
+
     if len(prompt) > GROK3_TOKEN_LIMIT:
         max_replies_per_thread //= 2
         filtered_thread_data = {
@@ -499,7 +519,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         prompt = prompt_builder.build_response(intent, user_query, selected_cat, conversation_context, metadata, filtered_thread_data, filters) + thread_id_prompt
         target_tokens = min(max(int(min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)), min_tokens), max_tokens)
         logger.info(f"Truncated prompt, new tokens: {target_tokens}")
-    
+
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     messages = [
         {"role": "system", "content": prompt_builder.get_system_prompt("response")},
@@ -513,7 +533,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "temperature": 0.7,
         "stream": True
     }
-    
+
     logger.info(f"Generating response for query: {user_query}")
     response_content = ""
     async with aiohttp.ClientSession() as session:
@@ -560,18 +580,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         payload["max_tokens"] = min_tokens
                         await asyncio.sleep(2 + attempt * 2)
                         continue
+                    # 改進回退響應
                     if metadata:
-                        fallback_prompt = prompt_builder.build_response("summarize", user_query, selected_cat, conversation_context, metadata, {}, filters) + thread_id_prompt
-                        payload["messages"][-1]["content"] = fallback_prompt
-                        payload["max_tokens"] = min_tokens
-                        async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as fallback_response:
-                            if fallback_response.status == 200:
-                                data = await fallback_response.json()
-                                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                                if content:
-                                    yield clean_text(content, is_response=True)
-                                    return
-                    yield clean_text(f"{selected_cat}概述：多主題討論，觀點多元。[帖子 ID: {list(thread_data.keys())[0] if thread_data else '無'}]", is_response=True)
+                        top_thread = sorted(metadata, key=lambda x: x.get("no_of_reply", 0), reverse=True)[:1]
+                        fallback_content = f"{selected_cat}熱門話題概述：近期討論活躍，涵蓋多主題。[帖子 ID: {top_thread[0]['thread_id']}] {top_thread[0]['title']}"
+                        yield clean_text(fallback_content, is_response=True)
+                        return
+                    yield clean_text(f"{selected_cat}無足夠數據，請嘗試其他分類或關鍵詞", is_response=True)
                     return
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
                 logger.warning(f"Response error: {str(e)}")
