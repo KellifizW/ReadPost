@@ -413,28 +413,34 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "theme_keywords": historical_keywords
             }
 
-async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
+async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts", conversation_context=None):
     """
-    使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化錯誤處理。
+    使用 Grok 3 根據問題語義排序帖子，確保 follow_up 意圖優先選擇對話歷史中的帖子 ID。
     """
+    conversation_context = conversation_context or []
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
         logger.error(f"Grok 3 API key missing: {str(e)}")
         return {"top_thread_ids": [], "reason": "Missing API key"}
 
-    # 若為 follow_up 意圖且有歷史ID，直接返回
-    if intent == "follow_up":
-        referenced_thread_ids = []
-        context = st.session_state.get("conversation_context", [])
-        if context:
-            last_response = context[-1].get("content", "")
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-            referenced_thread_ids = [int(tid) for tid in matches if any(t["thread_id"] == int(tid) for t in threads)]
-        if referenced_thread_ids:
-            logger.info(f"Follow-up intent, using referenced thread IDs: {referenced_thread_ids}")
-            return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced thread IDs for follow_up"}
+    # 提取對話歷史中的帖子 ID
+    referenced_thread_ids = []
+    if intent == "follow_up" and conversation_context:
+        last_response = conversation_context[-1].get("content", "") if conversation_context else ""
+        matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+        referenced_thread_ids = [int(tid) for tid in matches if any(t["thread_id"] == int(tid) for t in threads)]
+        logger.info(f"Follow-up intent, referenced thread IDs from context: {referenced_thread_ids}")
 
+    # 若為 follow_up 意圖且有歷史ID，直接優先返回
+    if intent == "follow_up" and referenced_thread_ids:
+        top_thread_ids = referenced_thread_ids[:2]  # 限制最多 2 個帖子
+        return {
+            "top_thread_ids": top_thread_ids,
+            "reason": f"Follow-up intent, prioritized referenced thread IDs: {top_thread_ids}"
+        }
+
+    # 若無歷史ID或非 follow_up 意圖，執行正常排序
     prompt_builder = PromptBuilder()
     try:
         prompt = prompt_builder.build_prioritize(
@@ -797,7 +803,7 @@ def unix_to_readable(timestamp):
 
 async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
-    處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數。
+    處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數，確保 follow_up 意圖下載歷史帖子 ID。
     """
     try:
         logger.info(f"Processing user question: {user_query}, category: {selected_cat}")
@@ -829,6 +835,14 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
         intent = analysis.get("intent", "summarize_posts")
+        
+        # 提取對話歷史中的帖子 ID
+        referenced_thread_ids = []
+        if intent == "follow_up" and conversation_context:
+            last_response = conversation_context[-1].get("content", "") if conversation_context else ""
+            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            referenced_thread_ids = matches
+            logger.info(f"Follow-up intent, referenced thread IDs: {referenced_thread_ids}")
         
         # 若 reply_limit=0，跳過回覆抓取
         if reply_limit == 0:
@@ -891,7 +905,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
             else:
                 if not top_thread_ids and filtered_items:
-                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
+                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent, conversation_context)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
                         sorted_items = sorted(
@@ -990,7 +1004,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             if not top_thread_ids and filtered_items:
                 if progress_callback:
                     progress_callback("正在重新分析帖子選擇", 0.4)
-                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
+                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent, conversation_context)
                 if not isinstance(prioritization, dict):
                     logger.error(f"Invalid prioritization result: {prioritization}")
                     prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
@@ -1006,6 +1020,12 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     logger.info(f"Fallback to popularity sorting: {top_thread_ids}")
                 else:
                     logger.info(f"Grok prioritized threads: {top_thread_ids}")
+            
+            # 確保 follow_up 意圖包含歷史帖子 ID
+            if intent == "follow_up" and referenced_thread_ids:
+                top_thread_ids = list(set(top_thread_ids + [int(tid) for tid in referenced_thread_ids]))
+                top_thread_ids = top_thread_ids[:post_limit]
+                logger.info(f"Follow-up intent, merged top_thread_ids with referenced IDs: {top_thread_ids}")
             
             if not top_thread_ids and filtered_items:
                 if sort_method == "popular":
@@ -1075,7 +1095,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             pages_to_fetch = [1, 2]
                             page_type = "latest"
                     else:
-                        logger.warning(f"Dynamic page selection API failed: status={response.status}")
+                        logger.warning(f"Dynamic page selection API failed: {response.status}")
                         pages_to_fetch = [1, 2]
                         page_type = "latest"
         
