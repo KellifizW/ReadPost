@@ -15,21 +15,42 @@ import random
 import hashlib
 import logging
 import json
+import pytz
+
+# 香港時區
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+logger.handlers.clear()
 
-# 檔案處理器：寫入 app.log
-file_handler = logging.FileHandler("app.log")
+# 自定義日誌格式器，添加 HKT 標記
+class HongKongFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        else:
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
+
+formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# 檔案處理器：寫入 lihkg_api.log
+file_handler = logging.FileHandler("lihkg_api.log")
+file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 # 控制台處理器：輸出到 stdout
 stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
+
+# 檢查系統時區
+import tzlocal
+logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter (Asia/Hong_Kong)")
 
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
@@ -113,7 +134,7 @@ class ApiClient:
                         )
                         if response.status == 429:
                             wait_time = int(response.headers.get("Retry-After", "5"))
-                            rate_limit_info.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit hit, waiting {wait_time:.2f} seconds")
+                            rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit hit, waiting {wait_time:.2f} seconds")
                             logger.warning(f"Rate limit hit for {function_name}, url={url}")
                             await asyncio.sleep(wait_time)
                             continue
@@ -164,8 +185,8 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counte
     current_time = time.time()
     
     if current_time < rate_limit_until:
-        rate_limit_info.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
-        logger.warning(f"Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
+        logger.warning(f"Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
         return {
             "items": items, "rate_limit_info": rate_limit_info, "request_counter": request_counter,
             "last_reset": last_reset, "rate_limit_until": rate_limit_until
@@ -212,7 +233,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, la
     max_replies = max(max_replies, 250)
     
     if current_time < rate_limit_until:
-        rate_limit_info.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} - Rate limit active until {datetime.fromtimestamp(rate_limit_until)}")
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
         logger.warning(f"Rate limit active for thread_id={thread_id}")
         return {
             "replies": replies, "title": thread_title, "total_replies": total_replies,
