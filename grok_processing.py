@@ -1202,11 +1202,82 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         content_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for idx, content_result in enumerate(content_results):
-            if isinstance                if isinstance(content_result, Exception):
+            if isinstance(content_result, Exception):
                 logger.warning(f"Failed to fetch thread_id={candidate_threads[idx]['thread_id']}: {str(content_result)}")
                 continue
             
             request_counter = content_result.get("request_counter", request_counter)
             last_reset = content_result.get("last_reset", last_reset)
             rate_limit_until = content_result.get("rate_limit_until", rate_limit_until)
-            rate_limit_info.extend(content_result.get("rate_limit_info",
+            rate_limit_info.extend(content_result.get("rate_limit_info", []))
+            
+            thread_id = str(candidate_threads[idx]["thread_id"])
+            replies = content_result.get("replies", [])
+            fetched_pages = content_result.get("fetched_pages", [])
+            total_pages = content_result.get("total_pages", 10)
+            
+            cleaned_replies = []
+            for reply in replies:
+                msg = clean_html(reply.get("msg", ""))
+                if msg and msg != "[無內容]":
+                    cleaned_replies.append({
+                        "msg": msg,
+                        "like_count": reply.get("like_count", 0),
+                        "dislike_count": reply.get("dislike_count", 0),
+                        "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                    })
+            
+            thread_data.append({
+                "thread_id": thread_id,
+                "title": candidate_threads[idx]["title"],
+                "no_of_reply": candidate_threads[idx].get("no_of_reply", 0),
+                "last_reply_time": candidate_threads[idx]["last_reply_time"],
+                "like_count": candidate_threads[idx].get("like_count", 0),
+                "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                "replies": cleaned_replies,
+                "fetched_pages": fetched_pages,
+                "total_pages": total_pages
+            })
+            
+            st.session_state.thread_cache[thread_id] = {
+                "data": {
+                    "thread_id": thread_id,
+                    "title": candidate_threads[idx]["title"],
+                    "no_of_reply": candidate_threads[idx].get("no_of_reply", 0),
+                    "last_reply_time": candidate_threads[idx]["last_reply_time"],
+                    "like_count": candidate_threads[idx].get("like_count", 0),
+                    "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                    "replies": cleaned_replies,
+                    "fetched_pages": fetched_pages,
+                    "total_pages": total_pages
+                },
+                "timestamp": time.time()
+            }
+            
+            if progress_callback:
+                progress_callback(f"已抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
+        
+        if progress_callback:
+            progress_callback("帖子內容抓取完成", 0.8)
+        
+        return {
+            "selected_cat": selected_cat,
+            "thread_data": thread_data,
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
+        }
+    
+    except Exception as e:
+        logger.error(f"Error processing user question: {str(e)}")
+        return {
+            "selected_cat": selected_cat,
+            "thread_data": [],
+            "rate_limit_info": [{"message": f"Processing error: {str(e)}", "until": rate_limit_until}],
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
+        }
