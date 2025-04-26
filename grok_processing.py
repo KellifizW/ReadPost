@@ -24,9 +24,9 @@ if "thread_cache" not in st.session_state:
 # 配置日誌記錄器
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-if not logger.handlers:  # 防止重複添加處理器
+if not logger.handlers:
     logger.handlers.clear()
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
@@ -50,7 +50,12 @@ async def make_api_call(url, headers, payload, retries=3, timeout=API_TIMEOUT):
                     if response.status != 200:
                         logger.warning(f"API 呼叫失敗: status={response.status}, attempt={attempt + 1}")
                         continue
-                    return await response.json()
+                    try:
+                        data = await response.json()
+                        return data
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON 解析錯誤: {str(e)}, 回應內容: {await response.text()}")
+                        return None
         except Exception as e:
             logger.warning(f"API 呼叫錯誤: {str(e)}, attempt={attempt + 1}")
             if attempt < retries - 1:
@@ -169,6 +174,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
 
     query_words = set(extract_keywords(user_query))
     is_vague = len(query_words) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
+
+    # 檢測功能展示查詢
+    if any(keyword in user_query.lower() for keyword in ["示範", "展示", "功能", "可以做", "能力"]):
+        return {
+            "direct_response": True, "intent": "introduce", "theme": "功能展示", "category_ids": [cat_id], "data_type": "none",
+            "post_limit": 0, "reply_limit": 0, "filters": {"min_replies": 0, "min_likes": 0, "sort": "relevance", "keywords": []},
+            "processing": "introduce", "candidate_thread_ids": [], "top_thread_ids": [], "needs_advanced_analysis": False, "reason": "功能展示查詢", "theme_keywords": []
+        }
 
     # 追問檢測
     is_follow_up = False
@@ -314,9 +327,19 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     """生成流式回應，優化追問處理"""
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
+    filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 0}  # 放寬篩選條件
     prompt_builder = PromptBuilder()
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
+
+    if intent == "introduce":
+        yield ("作為 LIHKG 論壇數據助手，我可以：\n"
+               "- 搜尋並總結熱門帖子\n"
+               "- 分析討論趨勢和網民意見\n"
+               "- 根據關鍵詞或篩選條件查找帖子\n"
+               "- 提供分類概述或事件追蹤\n"
+               "- 解答與論壇相關的問題\n"
+               f"例如，在「{selected_cat}」，我可以列出最新或最熱門的帖子。請提供具體話題或分類以試試！")
+        return
 
     try:
         api_key = st.secrets["grok3key"]
@@ -391,14 +414,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     response_content = ""
                     async for line in response.content:
                         if line and not line.isspace() and line.decode('utf-8').strip().startswith("data: "):
-                            chunk = json.loads(line.decode('utf-8').strip()[6:])
-                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if content:
-                                if "###" in content and ("Content Moderation" in content or "Blocked" in content):
-                                    raise ValueError("檢測到內容審核")
-                                cleaned_content = clean_response(content)
-                                response_content += cleaned_content
-                                yield cleaned_content
+                            try:
+                                chunk = json.loads(line.decode('utf-8').strip()[6:])
+                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    if "###" in content and ("Content Moderation" in content or "Blocked" in content):
+                                        raise ValueError("檢測到內容審核")
+                                    cleaned_content = clean_response(content)
+                                    response_content += cleaned_content
+                                    yield cleaned_content
+                            except json.JSONDecodeError:
+                                logger.warning(f"無法解析流式回應塊: {line.decode('utf-8')}")
+                                continue
                     if response_content:
                         logger.info(f"回應生成: 長度={len(response_content)}")
                         return
@@ -456,10 +483,10 @@ def configure_lihkg_api_logger():
     if not lihkg_logger.handlers:
         lihkg_logger.handlers.clear()
         lihkg_handler = logging.StreamHandler()
-        lihkg_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s"))
+        lihkg_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         lihkg_logger.addHandler(lihkg_handler)
         file_handler = logging.FileHandler("lihkg_api.log")
-        file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s"))
+        file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         lihkg_logger.addHandler(file_handler)
 
 async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
@@ -469,6 +496,12 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     if rate_limit_until > time.time():
         return {
             "selected_cat": selected_cat, "thread_data": [], "rate_limit_info": [{"message": "速率限制生效", "until": rate_limit_until}],
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until, "analysis": analysis
+        }
+
+    if analysis.get("intent") == "introduce":
+        return {
+            "selected_cat": selected_cat, "thread_data": [], "rate_limit_info": [],
             "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until, "analysis": analysis
         }
 
