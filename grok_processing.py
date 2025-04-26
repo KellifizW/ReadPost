@@ -96,7 +96,7 @@ class PromptBuilder:
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
 
-    def build_prioritize(self, query, cat_name, cat_id, threads, theme_keywords=None):
+    def build_prioritize(self, query, cat_name, cat_id, threads):
         config = self.config.get("prioritize", None)
         if not config:
             logger.error("Prompt configuration for 'prioritize' not found in prompts.json")
@@ -104,8 +104,7 @@ class PromptBuilder:
         context = config["context"].format(
             query=query,
             cat_name=cat_name,
-            cat_id=cat_id,
-            theme_keywords=json.dumps(theme_keywords or [], ensure_ascii=False)
+            cat_id=cat_id
         )
         data = config["data"].format(
             threads=json.dumps(threads, ensure_ascii=False)
@@ -174,16 +173,11 @@ def clean_response(response):
 
 def extract_keywords(query):
     """
-    提取查詢中的關鍵詞，過濾停用詞，動態擴展相關詞。
+    提取查詢中的關鍵詞，過濾停用詞。
     """
     stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問"}
     words = re.findall(r'\w+', query)
-    keywords = [word for word in words if word not in stop_words][:3]
-    
-    # 動態擴展主題相關關鍵詞
-    if "美股" in query:
-        keywords.extend(["美國股市", "納斯達克", "道瓊斯", "股票", "SP500"])
-    return list(set(keywords))[:6]
+    return [word for word in words if word not in stop_words][:3]
 
 async def summarize_context(conversation_context):
     """
@@ -199,10 +193,10 @@ async def summarize_context(conversation_context):
         return {"theme": "general", "keywords": []}
     
     prompt = f"""
-    你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多6個）。
+    你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
     特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", ...]}}
+    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
     """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -287,7 +281,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "data_type": "both",
             "post_limit": 2,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "relevance", "keywords": theme_keywords},
+            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
             "processing": intent,
             "candidate_thread_ids": [],
             "top_thread_ids": [],
@@ -391,7 +385,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     
                     # 根據意圖設置參數
                     theme = historical_theme if is_vague else "general"
-                    theme_keywords = extract_keywords(user_query) or historical_keywords
+                    theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
                     post_limit = 10
                     reply_limit = 0
                     data_type = "both"
@@ -429,7 +423,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "data_type": data_type,
                         "post_limit": post_limit,
                         "reply_limit": reply_limit,
-                        "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "relevance", "keywords": theme_keywords},
+                        "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
                         "processing": intent,
                         "candidate_thread_ids": [],
                         "top_thread_ids": referenced_thread_ids,
@@ -461,12 +455,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "theme_keywords": historical_keywords
             }
 
-async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts", theme_keywords=None):
+async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
     """
-    使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化語義優先。
+    使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化錯誤處理。
     """
-    logger.info(f"Sorting threads for query: {user_query}, intent: {intent}, keywords: {theme_keywords}")
-    
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -492,21 +484,11 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             query=user_query,
             cat_name=cat_name,
             cat_id=cat_id,
-            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads],
-            theme_keywords=theme_keywords
+            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
         logger.error(f"Failed to build prioritize prompt: {str(e)}")
         return {"top_thread_ids": [], "reason": f"Prompt building failed: {str(e)}"}
-    
-    # 動態權重
-    weights = {"relevance": 0.8, "popularity": 0.2}
-    if "熱門" in user_query:
-        weights = {"relevance": 0.4, "popularity": 0.6}
-    elif "最新" in user_query:
-        weights = {"relevance": 0.2, "last_reply_time": 0.8}
-    
-    prompt += f"\n權重：標題相關性{weights.get('relevance', 0.8)*100}%，熱度(no_of_reply+like_count){weights.get('popularity', 0.2)*100}%，若查詢含‘最新’，則last_reply_time權重{weights.get('last_reply_time', 0)*100}%。"
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -535,11 +517,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                         if not isinstance(result, dict) or "top_thread_ids" not in result or "reason" not in result:
                             logger.warning(f"Invalid prioritization result format: {content}")
                             return {"top_thread_ids": [], "reason": "Invalid result format: missing required keys"}
-                        top_thread_ids = result["top_thread_ids"]
-                        reason = result["reason"]
                         logger.info(f"Thread prioritization succeeded: {result}")
-                        excluded_threads = [t["thread_id"] for t in threads if t["thread_id"] not in top_thread_ids]
-                        logger.info(f"Excluded threads: {excluded_threads}")
                         return result
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse prioritization result as JSON: {content}, error: {str(e)}")
@@ -549,27 +527,15 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            # 回退排序：基於關鍵詞匹配
-            keyword_matched_threads = []
-            for thread in threads:
-                title = thread["title"].lower()
-                score = sum(1 for kw in theme_keywords or [] if kw.lower() in title)
-                if score > 0:
-                    keyword_matched_threads.append((thread, score))
-            keyword_matched_threads.sort(key=lambda x: x[1], reverse=True)
-            top_thread_ids = [t[0]["thread_id"] for t in keyword_matched_threads[:5]]
-            if not top_thread_ids:
-                sorted_threads = sorted(
-                    threads,
-                    key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                    reverse=True
-                )
-                top_thread_ids = [t["thread_id"] for t in sorted_threads[:5]]
-            excluded_threads = [t["thread_id"] for t in threads if t["thread_id"] not in top_thread_ids]
-            logger.info(f"Excluded threads: {excluded_threads}")
+            sorted_threads = sorted(
+                threads,
+                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                reverse=True
+            )
+            top_thread_ids = [t["thread_id"] for t in sorted_threads[:5]]
             return {
                 "top_thread_ids": top_thread_ids,
-                "reason": f"Prioritization failed after {max_retries} attempts, fallback to keyword matching or popularity sorting"
+                "reason": f"Prioritization failed after {max_retries} attempts, fallback to popularity sorting"
             }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
@@ -629,7 +595,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
-            prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent, filters.get("keywords", []))
+            prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
             logger.info(f"No referenced IDs in context, using prioritized IDs: {referenced_thread_ids}")
         prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
@@ -944,8 +910,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         reply_limit = analysis.get("reply_limit", 0)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 0)
-        min_likes = 0  # 放寬篩選條件
-        sort_method = filters.get("sort", "relevance")
+        min_likes = filters.get("min_likes", 0 if cat_id in ["5", "15"] else 5)
+        sort_method = filters.get("sort", "popular")
         time_range = filters.get("time_range", "recent")
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
@@ -982,7 +948,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             filtered_items = [
                 item for item in initial_threads
-                if item.get("no_of_reply", 0) >= min_replies and str(item["thread_id"]) not in previous_thread_ids
+                if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes) and str(item["thread_id"]) not in previous_thread_ids
             ]
             
             for item in initial_threads:
@@ -1011,9 +977,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
             else:
                 if not top_thread_ids and filtered_items:
-                    prioritization = await prioritize_threads_with_grok(
-                        user_query, filtered_items, selected_cat, cat_id, intent, analysis.get("theme_keywords", [])
-                    )
+                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
                         sorted_items = sorted(
@@ -1075,8 +1039,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             no_of_reply = item.get("no_of_reply", 0)
+            like_count = int(item.get("like_count", 0))
             
-            if no_of_reply >= min_replies and thread_id not in previous_thread_ids:
+            if no_of_reply >= min_replies and (cat_id in ["5", "15"] or like_count >= min_likes) and thread_id not in previous_thread_ids:
                 filtered_items.append(item)
         
         for item in initial_threads:
@@ -1110,9 +1075,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             if not top_thread_ids and filtered_items:
                 if progress_callback:
                     progress_callback("正在重新分析帖子選擇", 0.4)
-                prioritization = await prioritize_threads_with_grok(
-                    user_query, filtered_items, selected_cat, cat_id, intent, analysis.get("theme_keywords", [])
-                )
+                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
                 if not isinstance(prioritization, dict):
                     logger.error(f"Invalid prioritization result: {prioritization}")
                     prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
@@ -1130,10 +1093,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     logger.info(f"Grok prioritized threads: {top_thread_ids}")
             
             if not top_thread_ids and filtered_items:
-                if sort_method == "relevance":
+                if sort_method == "popular":
                     sorted_items = sorted(
                         filtered_items,
-                        key=lambda x: sum(1 for kw in analysis.get("theme_keywords", []) if kw.lower() in x["title"].lower()),
+                        key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                         reverse=True
                     )
                 else:
@@ -1325,7 +1288,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             rate_limit_info.extend(content_result.get("rate_limit_info", []))
             request_counter = content_result.get("request_counter", request_counter)
-            last_reset = result.get("last_reset", last_reset)
+            last_reset = content_result.get("last_reset", last_reset)
             rate_limit_until = content_result.get("rate_limit_until", rate_limit_until)
         
         if progress_callback:
