@@ -220,7 +220,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     比較問題與意圖，選擇最匹配意圖。若模糊，延續歷史主題（{historical_theme}）。
     問題：{user_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    意圖：{json.dumps({"list_titles": "列出標題", "summarize_posts": "總結帖子", "analyze_sentiment": "情緒分析", "compare_categories": "比較版塊", "general_query": "一般問題", "find_themed": "主題搜索", "fetch_dates": "提取日期", "search_keywords": "關鍵詞搜索", "recommend_threads": "推薦帖子", "monitor_events": "事件追蹤", "classify_opinions": "意見分類", "follow_up": "追問"}, ensure_ascii=False)}
+    意圖：{json.dumps({"list_titles": "列出標題", "summarize_posts": "總結帖子", "analyze_sentiment": "情緒分析", "compare_categories": "比較版塊", "general_query": "一般問題", "find_themed": "主題搜索", "fetch_dates": "提取日期", "search_keywords": "關鍵詞搜索", "recommend_threads": "推薦帖子", "monitor_events": "事件追蹤", "classify_opinions": "意見分類", "follow_up": "追問", "introduce": "功能展示"}, ensure_ascii=False)}
     輸出：{{"intent": "意圖", "confidence": 0.0-1.0, "reason": "原因"}}
     """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
@@ -330,16 +330,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 0}  # 放寬篩選條件
     prompt_builder = PromptBuilder()
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
-
-    if intent == "introduce":
-        yield ("作為 LIHKG 論壇數據助手，我可以：\n"
-               "- 搜尋並總結熱門帖子\n"
-               "- 分析討論趨勢和網民意見\n"
-               "- 根據關鍵詞或篩選條件查找帖子\n"
-               "- 提供分類概述或事件追蹤\n"
-               "- 解答與論壇相關的問題\n"
-               f"例如，在「{selected_cat}」，我可以列出最新或最熱門的帖子。請提供具體話題或分類以試試！")
-        return
 
     try:
         api_key = st.secrets["grok3key"]
