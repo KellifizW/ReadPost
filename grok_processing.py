@@ -327,7 +327,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     """生成流式回應，優化追問處理"""
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 0}  # 放寬篩選條件
+    filters = filters or {"min_replies": 0, "min_likes": 0}  # 放寬篩選條件
     prompt_builder = PromptBuilder()
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
 
@@ -403,19 +403,23 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         continue
                     response_content = ""
                     async for line in response.content:
-                        if line and not line.isspace() and line.decode('utf-8').strip().startswith("data: "):
-                            try:
-                                chunk = json.loads(line.decode('utf-8').strip()[6:])
-                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    if "###" in content and ("Content Moderation" in content or "Blocked" in content):
-                                        raise ValueError("檢測到內容審核")
-                                    cleaned_content = clean_response(content)
-                                    response_content += cleaned_content
-                                    yield cleaned_content
-                            except json.JSONDecodeError:
-                                logger.warning(f"無法解析流式回應塊: {line.decode('utf-8')}")
-                                continue
+                        if line and not line.isspace():
+                            line_str = line.decode('utf-8').strip()
+                            if line_str == "data: [DONE]":
+                                continue  # 跳過結束標記
+                            if line_str.startswith("data: "):
+                                try:
+                                    chunk = json.loads(line_str[6:])
+                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        if "###" in content and ("Content Moderation" in content or "Blocked" in content):
+                                            raise ValueError("檢測到內容審核")
+                                        cleaned_content = clean_response(content)
+                                        response_content += cleaned_content
+                                        yield cleaned_content
+                                except json.JSONDecodeError:
+                                    logger.warning(f"無法解析流式回應塊: {line_str}")
+                                    continue
                     if response_content:
                         logger.info(f"回應生成: 長度={len(response_content)}")
                         return
