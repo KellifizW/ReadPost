@@ -444,17 +444,16 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "theme": theme,
                         "category_ids": [cat_id],
                         "data_type": data_type,
- msgid: 3, metadata: {'artifact_id': '0ad8b8b1-fe8e-49d3-b103-9b3ce6ff3c5d', 'artifact_version_id': '9f2c3d8a-5e7f-4b8a-9c2d-3e4f5b6a7c1e', 'title': 'grok_processing.py', 'contentType': 'text/python', 'line': 317, 'char': 0}
-            "post_limit": post_limit,
-            "reply_limit": reply_limit,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
-            "processing": intent,
-            "candidate_thread_ids": [],
-            "top_thread_ids": referenced_thread_ids,
-            "needs_advanced_analysis": confidence < 0.7,
-            "reason": reason,
-            "theme_keywords": theme_keywords
-        }
+ 				        "post_limit": post_limit,
+       			        "reply_limit": reply_limit,
+   			            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
+      	   		        "processing": intent,
+     		 	        "candidate_thread_ids": [],
+      			        "top_thread_ids": referenced_thread_ids,
+     			        "needs_advanced_analysis": confidence < 0.7,
+    			        "reason": reason,
+         			    "theme_keywords": theme_keywords
+       				 }
         except Exception as e:
             logger.warning(f"Semantic intent analysis error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
