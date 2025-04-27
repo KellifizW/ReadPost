@@ -129,31 +129,21 @@ class PromptBuilder:
         return self.config["system"].get(mode, "")
 
 def clean_html(text):
-    """
-    清理 HTML 標籤，保留短文本和表情符號，簡化日誌記錄。
-    """
     if not isinstance(text, str):
         text = str(text)
     try:
-        # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
-        # 規範化空白
         text = re.sub(r'\s+', ' ', text).strip()
-        # 檢查清理後內容
         if not text:
             if "hkgmoji" in text.lower():
-                logger.info("HTML cleaning: replaced with [表情符號]")
                 return "[表情符號]"
             elif any(ext in text.lower() for ext in ['.webp', '.jpg', '.png']):
-                logger.info("HTML cleaning: filtered image")
                 return "[圖片]"
             else:
-                logger.info("HTML cleaning: empty after cleaning")
                 return "[無內容]"
         return text
-    except Exception as e:
-        logger.error(f"HTML cleaning failed: {str(e)}")
+    except Exception:
         return text
 
 def clean_response(response):
