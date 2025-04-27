@@ -12,8 +12,11 @@ import streamlit as st
 import os
 import hashlib
 import pytz
-from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
+from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content, get_lihkg_thread_content_batch
 from logging_config import configure_logger
+### 修改：導入 cachetools 用於 LRU 緩存
+from cachetools import LRUCache
+### 修改結束
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -25,6 +28,11 @@ logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
+
+### 修改：初始化 LRU 緩存，限制大小為 500MB
+# 假設每個帖子數據平均 1MB，限制 500 個帖子
+thread_cache = LRUCache(maxsize=500)
+### 修改結束
 
 class PromptBuilder:
     """
@@ -54,12 +62,15 @@ class PromptBuilder:
 
     def build_analyze(self, query, cat_name, cat_id, conversation_context=None, thread_titles=None, metadata=None, thread_data=None):
         config = self.config["analyze"]
+        ### 修改：限制 conversation_context 為最近 3 條
+        limited_context = (conversation_context or [])[-3:]
         context = config["context"].format(
             query=query,
             cat_name=cat_name,
             cat_id=cat_id,
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
+            conversation_context=json.dumps(limited_context, ensure_ascii=False)
         )
+        ### 修改結束
         data = config["data"].format(
             thread_titles=json.dumps(thread_titles or [], ensure_ascii=False),
             metadata=json.dumps(metadata or [], ensure_ascii=False),
@@ -86,11 +97,14 @@ class PromptBuilder:
 
     def build_response(self, intent, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
         config = self.config["response"].get(intent, self.config["response"]["general"])
+        ### 修改：限制 conversation_context 為最近 3 條
+        limited_context = (conversation_context or [])[-3:]
         context = config["context"].format(
             query=query,
             selected_cat=selected_cat,
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
+            conversation_context=json.dumps(limited_context, ensure_ascii=False)
         )
+        ### 修改結束
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
@@ -155,8 +169,11 @@ async def summarize_context(conversation_context):
     """
     使用 Grok 3 提煉對話歷史主題。
     """
+    ### 修改：限制 conversation_context 為最近 3 條
     if not conversation_context:
         return {"theme": "general", "keywords": []}
+    limited_context = conversation_context[-3:]
+    ### 修改結束
     
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -167,7 +184,7 @@ async def summarize_context(conversation_context):
     prompt = f"""
     你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
     特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
-    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    對話歷史：{json.dumps(limited_context, ensure_ascii=False)}
     輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
     """
     
@@ -197,7 +214,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     """
     分析用戶問題，使用語義嵌入識別意圖，放寬語義要求，動態設置篩選條件。
     """
-    conversation_context = conversation_context or []
+    ### 修改：限制 conversation_context 為最近 3 條
+    conversation_context = (conversation_context or [])[-3:]
+    ### 修改結束
     prompt_builder = PromptBuilder()
     
     # 提煉對話歷史主題
@@ -514,7 +533,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     """
     使用 Grok 3 API 生成流式回應，確保包含帖子 ID，優化 follow_up 意圖。
     """
-    conversation_context = conversation_context or []
+    ### 修改：限制 conversation_context 為最近 3 條
+    conversation_context = (conversation_context or [])[-3:]
+    ### 修改結束
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
     
@@ -821,10 +842,10 @@ def clean_cache(max_age=3600):
     """
     清理過期緩存數據，防止記憶體膨脹。
     """
-    current_time = time.time()
-    expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
-    for key in expired_keys:
-        del st.session_state.thread_cache[key]
+    ### 修改：使用 LRU 緩存，移除原有的時間戳清理邏輯
+    # 由於 thread_cache 已使用 LRUCache，無需手動清理
+    logger.info(f"LRU cache stats: size={len(thread_cache)}, maxsize={thread_cache.maxsize}")
+    ### 修改結束
 
 def unix_to_readable(timestamp):
     """
@@ -913,8 +934,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             for item in initial_threads:
                 thread_id = str(item["thread_id"])
-                if thread_id not in st.session_state.thread_cache:
-                    st.session_state.thread_cache[thread_id] = {
+                if thread_id not in thread_cache:
+                    thread_cache[thread_id] = {
                         "data": {
                             "thread_id": thread_id,
                             "title": item["title"],
@@ -949,8 +970,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             for thread_id in top_thread_ids:
                 thread_id_str = str(thread_id)
-                if thread_id_str in st.session_state.thread_cache:
-                    thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
+                if thread_id_str in thread_cache:
+                    thread_data.append(thread_cache[thread_id_str]["data"])
                 else:
                     for item in filtered_items:
                         if str(item["thread_id"]) == thread_id_str:
@@ -964,7 +985,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "replies": [],
                                 "fetched_pages": []
                             })
-                            st.session_state.thread_cache[thread_id_str] = {
+                            thread_cache[thread_id_str] = {
                                 "data": thread_data[-1],
                                 "timestamp": time.time()
                             }
@@ -1021,8 +1042,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             for item in initial_threads:
                 thread_id = str(item["thread_id"])
-                if thread_id not in st.session_state.thread_cache:
-                    st.session_state.thread_cache[thread_id] = {
+                if thread_id not in thread_cache:
+                    thread_cache[thread_id] = {
                         "data": {
                             "thread_id": thread_id,
                             "title": item["title"],
@@ -1063,35 +1084,31 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
         
-        tasks = []
-        pages_to_fetch = [] if intent in ["summarize_posts", "list_titles", "recommend_threads"] else [1]
-        
+        ### 修改：使用批量抓取帖子內容
+        thread_ids_to_fetch = []
         for item in candidate_threads:
             thread_id = str(item["thread_id"])
-            if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
-                thread_data.append(st.session_state.thread_cache[thread_id]["data"])
-                continue
-            tasks.append(get_lihkg_thread_content(
-                thread_id=thread_id,
+            if thread_id in thread_cache and thread_cache[thread_id]["data"].get("replies"):
+                thread_data.append(thread_cache[thread_id]["data"])
+            else:
+                thread_ids_to_fetch.append(thread_id)
+        
+        if thread_ids_to_fetch:
+            batch_result = await get_lihkg_thread_content_batch(
+                thread_ids=thread_ids_to_fetch,
                 cat_id=cat_id,
                 max_replies=reply_limit,
                 fetch_last_pages=0,
-                specific_pages=pages_to_fetch,
+                specific_pages=[1] if intent not in ["summarize_posts", "list_titles", "recommend_threads"] else [],
                 start_page=1
-            ))
-        
-        if tasks:
-            content_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for idx, result in enumerate(content_results):
-                if isinstance(result, Exception):
-                    logger.warning(f"Failed to fetch content for thread {candidate_threads[idx]['thread_id']}: {str(result)}")
-                    continue
-                request_counter = result.get("request_counter", request_counter)
-                last_reset = result.get("last_reset", last_reset)
-                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                rate_limit_info.extend(result.get("rate_limit_info", []))
-                
-                thread_id = str(candidate_threads[idx]["thread_id"])
+            )
+            request_counter = batch_result.get("request_counter", request_counter)
+            last_reset = batch_result.get("last_reset", last_reset)
+            rate_limit_until = batch_result.get("rate_limit_until", rate_limit_until)
+            rate_limit_info.extend(batch_result.get("rate_limit_info", []))
+            
+            for result in batch_result.get("results", []):
+                thread_id = result["thread_id"]
                 if result.get("title"):
                     cleaned_replies = [
                         {
@@ -1108,17 +1125,18 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "thread_id": thread_id,
                         "title": result.get("title"),
                         "no_of_reply": result.get("total_replies", 0),
-                        "last_reply_time": unix_to_readable(candidate_threads[idx].get("last_reply_time", "0")),
-                        "like_count": candidate_threads[idx].get("like_count", 0),
-                        "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                        "last_reply_time": unix_to_readable(next((item.get("last_reply_time", "0") for item in candidate_threads if str(item["thread_id"]) == thread_id), "0")),
+                        "like_count": next((item.get("like_count", 0) for item in candidate_threads if str(item["thread_id"]) == thread_id), 0),
+                        "dislike_count": next((item.get("dislike_count", 0) for item in candidate_threads if str(item["thread_id"]) == thread_id), 0),
                         "replies": cleaned_replies,
                         "fetched_pages": result.get("fetched_pages", [])
                     }
                     thread_data.append(thread_info)
-                    st.session_state.thread_cache[thread_id] = {
+                    thread_cache[thread_id] = {
                         "data": thread_info,
                         "timestamp": time.time()
                     }
+        ### 修改結束
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
