@@ -82,8 +82,7 @@ class PromptBuilder:
                 cat_id=cat_id
             )
             data = config["data"].format(
-                threads=json.dumps( rise=True).format(
-                    threads=json.dumps(threads, ensure_ascii=False)
+                threads=json.dumps(threads, ensure_ascii=False)
             )
             return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         
