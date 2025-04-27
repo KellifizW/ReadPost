@@ -666,12 +666,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    min_tokens = 600
+    min_tokens = 1200  # 提高下限以避免截斷
     max_tokens = 3600
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
         target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)
+        if intent == "recommend_threads":
+            target_tokens = max(target_tokens, 1800)  # 為推薦意圖增加 token
         target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"Dynamic max_tokens: {target_tokens}, based on total_replies_count: {total_replies_count}")
     
