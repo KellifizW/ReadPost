@@ -105,6 +105,110 @@ class ApiClient:
             "X-LI-REQUEST-TIME": str(timestamp),
             "X-LI-DIGEST": digest,
             "Cookie": self.cookie,
+            "Accept #LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
+提供速率限制管理、錯誤處理和日誌記錄功能。
+主要函數：
+- get_lihkg_topic_list：抓取指定分類的帖子標題。
+- get_lihkg_thread_content：抓取指定帖子的回覆內容。
+- get_category_name：返回分類名稱。
+"""
+
+import aiohttp
+import asyncio
+import time
+from datetime import datetime
+import random
+import hashlib
+import logging
+import json
+import pytz
+from logging_config import configure_logger
+
+# 香港時區
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
+
+# 配置日誌記錄器
+logger = configure_logger(__name__, "lihkg_api.log")
+
+# LIHKG API 基礎配置
+LIHKG_BASE_URL = "https://lihkg.com"
+LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
+
+# 用戶代理列表
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
+]
+
+class RateLimiter:
+    """
+    速率限制器，控制 API 請求頻率，動態調整延遲。
+    """
+    def __init__(self, max_requests: int, period: float):
+        self.max_requests = max_requests
+        self.period = period
+        self.requests = []
+        self.request_counter = 0
+        self.last_reset = time.time()
+        self.rate_limit_until = 0
+        self.last_response_time = 1.0
+
+    async def acquire(self):
+        now = time.time()
+        # 重置計數器
+        if now - self.last_reset >= self.period:
+            self.request_counter = 0
+            self.last_reset = now
+        # 檢查速率限制
+        if now < self.rate_limit_until:
+            wait_time = self.rate_limit_until - now
+            logger.warning(f"Rate limit active, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+            return False, {
+                "request_counter": self.request_counter,
+                "last_reset": self.last_reset,
+                "rate_limit_until": self.rate_limit_until
+            }
+        # 清理過期請求
+        self.requests = [t for t in self.requests if now - t < self.period]
+        if len(self.requests) >= self.max_requests:
+            wait_time = self.period - (now - self.requests[0])
+            logger.warning(f"Rate limit reached, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+            self.requests = self.requests[1:]
+        self.requests.append(now)
+        self.request_counter += 1
+        await asyncio.sleep(max(0.5, min(self.last_response_time, 2.0)))
+        return True, {
+            "request_counter": self.request_counter,
+            "last_reset": self.last_reset,
+            "rate_limit_until": self.rate_limit_until
+        }
+
+    def update_rate_limit(self, retry_after):
+        self.rate_limit_until = time.time() + int(retry_after)
+
+class ApiClient:
+    """
+    LIHKG API 客戶端，處理共用請求邏輯。
+    """
+    def __init__(self, rate_limiter: RateLimiter):
+        self.rate_limiter = rate_limiter
+        self.base_url = LIHKG_BASE_URL
+        self.device_id = LIHKG_DEVICE_ID
+        self.cookie = LIHKG_COOKIE
+
+    def generate_headers(self, url: str, timestamp: int):
+        digest = hashlib.sha1(f"jeams$get${url.replace('[', '%5b').replace(']', '%5d').replace(',', '%2c')}${timestamp}".encode()).hexdigest()
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
+            "X-LI-DEVICE": self.device_id,
+            "X-LI-REQUEST-TIME": str(timestamp),
+            "X-LI-DIGEST": digest,
+            "Cookie": self.cookie,
             "Accept": "application/json",
             "Accept-Language": "zh-HK,zh-Hant;q=0.9,en;q=0.8",
             "Connection": "keep-alive",
