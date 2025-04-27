@@ -11,42 +11,15 @@ import time
 from datetime import datetime
 import pytz
 import nest_asyncio
-import logging
 from streamlit.components.v1 import html
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
+from logging_config import configure_logger
 
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.handlers.clear()
-
-# 自定義日誌格式器
-class HongKongFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
-        if datefmt:
-            return dt.strftime(datefmt)
-        else:
-            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
-
-formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
-
-# 檔案處理器
-file_handler = logging.FileHandler("app.log")
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-
-# 控制台處理器
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
-
-# 檢查系統時區
-import tzlocal
-logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter (Asia/Hong_Kong)")
+logger = configure_logger(__name__, "app.log")
 
 # 應用 asyncio 補丁
 nest_asyncio.apply()
