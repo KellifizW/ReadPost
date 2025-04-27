@@ -845,6 +845,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     min_likes = filters.get("min_likes", 0)
     sort = filters.get("sort", "popular")
 
+    logger.info(f"過濾條件: keywords={keywords}, min_replies={min_replies}, min_likes={min_likes}, sort={sort}")
+
     for item in items:
         title = item.get("title", "")
         no_of_reply = item.get("no_of_reply", 0)
@@ -852,6 +854,13 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if no_of_reply >= min_replies and like_count >= min_likes:
             if not keywords or any(kw in title for kw in keywords):
                 filtered_items.append(item)
+            else:
+                logger.debug(f"帖子未通過關鍵詞過濾: thread_id={item.get('thread_id')}, title={title}, keywords={keywords}")
+        else:
+            logger.debug(f"帖子未通過數量過濾: thread_id={item.get('thread_id')}, title={title}, no_of_reply={no_of_reply}, like_count={like_count}, min_replies={min_replies}, min_likes={min_likes}")
+
+    if not filtered_items:
+        logger.warning(f"無帖子通過過濾: 總帖子數={len(items)}, keywords={keywords}, min_replies={min_replies}, min_likes={min_likes}")
 
     # 排序帖子
     if sort == "popular":
