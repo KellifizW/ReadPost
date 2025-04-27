@@ -650,8 +650,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    min_tokens = 600
-    max_tokens = 3600  # 放寬到 3600（約 2400 字）
+    min_tokens = 1000
+    max_tokens = 3600 
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
