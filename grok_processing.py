@@ -411,6 +411,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         reply_limit = 500
                         data_type = "replies"
                         post_limit = min(len(referenced_thread_ids), 2) or 2
+                    elif intent == "summarize_posts":
+                        reply_limit = 200 
+                        data_type = "both"
                     elif intent in ["general_query", "introduce"]:
                         reply_limit = 0
                         data_type = "none"
