@@ -196,7 +196,7 @@ async def summarize_context(conversation_context):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，使用語義嵌入識別意圖，放寬語義要求，動態設置篩選條件。
+    分析用戶問題，使用語義嵌入識別意圖，智能設置回覆抓取條件。
     """
     conversation_context = (conversation_context or [])[-3:]
     prompt_builder = PromptBuilder()
@@ -207,6 +207,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     
     query_words = set(extract_keywords(user_query))
     is_vague = len(query_words) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
+    
+    # 檢測是否需要詳細內容
+    detail_keywords = ["講多D", "更多", "詳細", "詳情", "深入", "內容", "討論"]
+    needs_details = any(keyword in user_query.lower() for keyword in detail_keywords)
     
     is_follow_up = False
     referenced_thread_ids = []
@@ -224,7 +228,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         
         common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
         title_overlap = any(any(kw in title.lower() for kw in query_words) for title in referenced_titles)
-        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+        explicit_follow_up = any(keyword in user_query.lower() for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
         
         if len(common_words) >= 1 or title_overlap or explicit_follow_up:
             is_follow_up = True
@@ -353,28 +357,43 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     data_type = "both"
                     processing = intent
                     min_likes = 0 if cat_id in ["5", "15"] else 5
-                    if intent in ["search_keywords", "find_themed"]:
-                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-                        theme_keywords = extract_keywords(user_query) or historical_keywords
-                    elif intent == "monitor_events":
-                        theme = "事件追蹤"
-                    elif intent == "classify_opinions":
-                        theme = "意見分類"
+                    
+                    # 智能設置 reply_limit
+                    if intent in ["list_titles", "fetch_dates", "general_query", "introduce"]:
+                        reply_limit = 0
+                        data_type = "none" if intent in ["general_query", "introduce"] else "metadata"
+                        reason += "，無需抓取回覆，僅處理元數據"
+                    elif intent == "summarize_posts":
+                        reply_limit = 200 if needs_details else 100
+                        data_type = "both"
+                        reason += "，總結帖子需要回覆數據" + ("，檢測到需要詳細內容" if needs_details else "")
+                    elif intent in ["analyze_sentiment", "classify_opinions"]:
+                        reply_limit = 500
                         data_type = "replies"
-                    elif intent == "recommend_threads":
-                        theme = "帖子推薦"
-                        post_limit = 5
-                    elif intent == "fetch_dates":
-                        theme = "日期相關資料"
-                        post_limit = 5
+                        reason += "，情緒分析或意見分類需要大量回覆數據"
                     elif intent == "follow_up":
-                        theme = historical_theme
                         reply_limit = 500
                         data_type = "replies"
                         post_limit = min(len(referenced_thread_ids), 2) or 2
-                    elif intent in ["general_query", "introduce"]:
-                        reply_limit = 0
-                        data_type = "none"
+                        reason += "，追問需要深入回覆數據"
+                    elif intent in ["search_keywords", "find_themed"]:
+                        reply_limit = 200
+                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
+                        theme_keywords = extract_keywords(user_query) or historical_keywords
+                        reason += "，關鍵詞搜索需要回覆數據"
+                    elif intent == "monitor_events":
+                        reply_limit = 200
+                        theme = "事件追蹤"
+                        reason += "，事件追蹤需要回覆數據"
+                    elif intent == "recommend_threads":
+                        reply_limit = 100
+                        theme = "帖子推薦"
+                        post_limit = 5
+                        reason += "，推薦帖子需要少量回覆數據"
+                    elif intent == "compare_categories":
+                        reply_limit = 100
+                        data_type = "both"
+                        reason += "，分類比較需要部分回覆數據"
                     
                     return {
                         "direct_response": intent in ["general_query", "introduce"],
@@ -405,7 +424,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 0,
+                "reply_limit": 100,
                 "filters": {"min_replies": 0, "min_likes": min_likes, "keywords": historical_keywords},
                 "processing": "summarize",
                 "candidate_thread_ids": [],
@@ -500,7 +519,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     """
-    使用 Grok 3 API 生成流式回應，確保包含帖子 ID，優化 follow_up 意圖。
+    使用 Grok 3 API 生成流式回應，確保包含帖子 ID，優化回退邏輯。
     """
     conversation_context = (conversation_context or [])[-3:]
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
@@ -621,6 +640,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(f"Dynamic max_tokens: {target_tokens}, based on total_replies_count: {total_replies_count}")
     
     thread_id_prompt = "\n請在回應中明確包含相關帖子 ID，格式為 [帖子 ID: xxx]。禁止包含 [post_id: ...] 格式。"
+    thread_ids = [data["thread_id"] for data in filtered_thread_data.values()]
+    if thread_ids:
+        thread_id_prompt += f"\n至少包含以下帖子 ID 之一：{', '.join(map(str, thread_ids))}"
+    
     prompt = prompt_builder.build_response(
         intent=intent,
         query=user_query,
@@ -738,27 +761,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 payload["max_tokens"] = min_tokens
                                 await asyncio.sleep(2 + attempt * 2)
                                 continue
-                            if metadata:
-                                fallback_prompt = prompt_builder.build_response(
-                                    intent="summarize",
-                                    query=user_query,
-                                    selected_cat=selected_cat,
-                                    conversation_context=conversation_context,
-                                    metadata=metadata,
-                                    thread_data={},
-                                    filters=filters
-                                ) + thread_id_prompt
-                                payload["messages"][-1]["content"] = fallback_prompt
-                                payload["max_tokens"] = min_tokens
-                                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as fallback_response:
-                                    if fallback_response.status == 200:
-                                        data = await fallback_response.json()
-                                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                                        if content:
-                                            response_content = clean_response(content)
-                                            yield response_content
-                                            return
-                            response_content = clean_response(f"以下是 {selected_cat} 的通用概述：討論涵蓋多主題，網民觀點多元。[帖子 ID: {list(thread_data.keys())[0] if thread_data else '無'}]")
+                            fallback_thread_id = thread_ids[0] if thread_ids else "無"
+                            response_content = clean_response(
+                                f"未能抓取 {selected_cat} 中與「{user_query}」相關的回覆內容，以下是相關帖子概述："
+                                f"討論聚焦於相關話題，網民觀點多元。[帖子 ID: {fallback_thread_id}]"
+                            )
                             yield response_content
                             return
                         logger.info(f"Response generation completed: length={len(response_content)}")
@@ -866,9 +873,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         previous_thread_ids = previous_thread_ids or []
         intent = analysis.get("intent", "summarize_posts")
         
+        thread_data = []
+        rate_limit_info = []
+        
         if reply_limit == 0:
             logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
-            thread_data = []
             initial_threads = []
             for page in range(1, 6):
                 result = await get_lihkg_topic_list(
@@ -966,8 +975,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
-        thread_data = []
-        rate_limit_info = []
+        logger.info(f"Fetching replies for intent: {intent}, reply_limit: {reply_limit}")
         candidate_threads = []
         
         if top_thread_ids:
@@ -1100,6 +1108,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "data": thread_info,
                         "timestamp": time.time()
                     }
+                    logger.info(f"Fetched {len(cleaned_replies)} replies for thread_id={thread_id}, title={result.get('title')}")
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
