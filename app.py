@@ -77,6 +77,19 @@ def render_copy_button(content, key):
     """
     html(html_code, height=30)
 
+def render_new_conversation_button():
+    """
+    渲染新對話按鈕，樣式與複製按鈕一致。
+    """
+    html_code = """
+    <button onclick="window.location.reload()"
+            title="開始新對話"
+            style="border: none; background: none; cursor: pointer; font-size: 20px;">
+        🆕
+    </button>
+    """
+    html(html_code, height=30)
+
 async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
@@ -154,14 +167,8 @@ async def main():
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
     # 新對話按鈕
-    if st.button("🆕", help="開始新對話"):
-        st.session_state.chat_history = []
-        st.session_state.conversation_context = []
-        st.session_state.context_timestamps = []
-        st.session_state.thread_cache = {}
-        st.session_state.last_user_query = None
-        logger.info("New conversation started, cleared history")
-        st.rerun()
+    st.markdown("#### 操作")
+    render_new_conversation_button()
 
     # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
@@ -249,7 +256,7 @@ async def main():
                 cat_id=cat_id,
                 conversation_context=st.session_state.conversation_context
             )
-            logger.info(f"Analysis completed: intent={analysis.get('intent')}, analysis_type={analysis.get('analysis_type')}")
+            logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
             # 處理問題
             update_progress("正在處理查詢", 0.2)
@@ -273,20 +280,23 @@ async def main():
             # 顯示回應
             response = ""
             with st.chat_message("assistant"):
-                grok_container = st.empty()
-                update_progress("正在生成回應", 0.8)  # 調整進度，反映更快處理速度
-                logger.info(f"Starting stream_grok3_response for query: {user_query}, intent: {analysis.get('intent')}, analysis_type: {analysis.get('analysis_type')}")
+                col1, col2 = st.columns([0.95, 0.05])
+                with col1:
+                    grok_container = st.empty()
+                with col2:
+                    copy_container = st.empty()
+                update_progress("正在生成回應", 0.9)
+                logger.info(f"Starting stream_grok3_response for query: {user_query}, intent: {analysis.get('intent')}")
                 async for chunk in stream_grok3_response(
                     user_query=user_query,
                     metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0)} for item in result.get("thread_data", [])],
                     thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
-                    processing=analysis,  # 傳遞完整 analysis 物件，包含 intent 和 analysis_type
+                    processing=analysis.get("processing", "general"),
                     selected_cat=selected_cat,
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
                     reason=analysis.get("reason", ""),
-                    filters=analysis.get("filters", {}),
-                    cat_id=cat_id  # 新增 cat_id 傳遞，確保篩選條件正確
+                    filters=analysis.get("filters", {})
                 ):
                     response += chunk
                     grok_container.markdown(response)
@@ -294,6 +304,8 @@ async def main():
                     logger.warning(f"No response generated for query: {user_query}")
                     response = "無法生成回應，請稍後重試。"
                     grok_container.markdown(response)
+                copy_container.empty()  # 清空佔位符
+                render_copy_button(response, key=f"copy_new_{len(st.session_state.chat_history)}")
 
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_query})
