@@ -625,9 +625,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         replies = data.get("replies", [])
         keywords = extract_keywords(user_query)
         sorted_replies = sorted(
-            [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "") for kw in keywords)],
-            key=lambda x: x.get("like_count", 0),
-            reverse=True
+        [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],  # 移除關鍵詞限制
+                key=lambda x: x.get("like_count", 0),
+                reverse=True
         )[:max_replies_per_thread]
         
         if not sorted_replies and replies:
