@@ -138,7 +138,7 @@ def clean_response(response):
     """
     if not isinstance(response, str):
         return response
-    cleaned = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', response)
+    cleaned = re.sub(r'$$ post_id: [a-f0-9]{40} $$', '[回覆]', response)
     if cleaned != response:
         logger.info(f"Cleaned response: removed post_id strings")
     return cleaned
@@ -215,7 +215,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
         
-        matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+        matches = re.findall(r"$$ 帖子 ID: (\d+) $$", last_response)
         referenced_thread_ids = matches
         for tid in referenced_thread_ids:
             for thread in metadata or []:
@@ -430,7 +430,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         context = st.session_state.get("conversation_context", [])
         if context:
             last_response = context[-1].get("content", "")
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            matches = re.findall(r"$$ 帖子 ID: (\d+) $$", last_response)
             referenced_thread_ids = [int(tid) for tid in matches if any(t["thread_id"] == int(tid) for t in threads)]
         if referenced_thread_ids:
             logger.info(f"Follow-up intent, using referenced thread IDs: {referenced_thread_ids}")
@@ -554,7 +554,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     if intent == "follow_up":
-        referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
+        referenced_thread_ids = re.findall(r"$$ 帖子 ID: (\d+) $$", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
@@ -762,7 +762,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             yield response_content
                             return
                         logger.info(f"Response generation completed: length={len(response_content)}")
-                        logger.info(f"Referenced thread IDs: {re.findall(r'\[帖子 ID: (\d+)\]', response_content)}")
+                        logger.info(f"Referenced thread IDs: {re.findall(r'$$ 帖子 ID: (\d+) $$', response_content)}")
                         return
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
                     logger.warning(f"Response generation error: {str(e)}, attempt={attempt + 1}")
@@ -819,7 +819,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:MM:SS")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
         return "1970-01-01 00:00:00"
@@ -988,7 +988,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 last_reset = result.get("last_reset", last_reset)
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(result.get("rate_limit_info", []))
-                items 42
                 items = result.get("items", [])
                 for item in items:
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
