@@ -1,5 +1,12 @@
+# lihkg_api.py
+
 """
-LIHKG API 模組，負責抓取帖子標題和回覆內容，內嵌日誌配置。
+LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
+提供速率限制管理、錯誤處理和日誌記錄功能。
+主要函數：
+- get_lihkg_topic_list：抓取指定分類的帖子標題。
+- get_lihkg_thread_content：抓取指定帖子的回覆內容。
+- get_category_name：返回分類名稱。
 """
 
 import aiohttp
@@ -11,31 +18,20 @@ import hashlib
 import logging
 import json
 import pytz
+from logging_config import configure_logger
 
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 日誌配置
-class HongKongFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
-        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
+# 配置日誌記錄器
+logger = configure_logger(__name__, "lihkg_api.log")
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.handlers.clear()
-formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-file_handler = logging.FileHandler("lihkg_api.log")
-file_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
-logger.addHandler(file_handler)
-
-# LIHKG API 配置
+# LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
 LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
+
+# 用戶代理列表
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -44,7 +40,9 @@ USER_AGENTS = [
 ]
 
 class RateLimiter:
-    """速率限制器"""
+    """
+    速率限制器，控制 API 請求頻率，動態調整延遲。
+    """
     def __init__(self, max_requests: int, period: float):
         self.max_requests = max_requests
         self.period = period
@@ -56,9 +54,11 @@ class RateLimiter:
 
     async def acquire(self):
         now = time.time()
+        # 重置計數器
         if now - self.last_reset >= self.period:
             self.request_counter = 0
             self.last_reset = now
+        # 檢查速率限制
         if now < self.rate_limit_until:
             wait_time = self.rate_limit_until - now
             logger.warning(f"Rate limit active, waiting {wait_time:.2f} seconds")
@@ -68,6 +68,7 @@ class RateLimiter:
                 "last_reset": self.last_reset,
                 "rate_limit_until": self.rate_limit_until
             }
+        # 清理過期請求
         self.requests = [t for t in self.requests if now - t < self.period]
         if len(self.requests) >= self.max_requests:
             wait_time = self.period - (now - self.requests[0])
@@ -87,7 +88,9 @@ class RateLimiter:
         self.rate_limit_until = time.time() + int(retry_after)
 
 class ApiClient:
-    """LIHKG API 客戶端"""
+    """
+    LIHKG API 客戶端，處理共用請求邏輯。
+    """
     def __init__(self, rate_limiter: RateLimiter):
         self.rate_limiter = rate_limiter
         self.base_url = LIHKG_BASE_URL
@@ -135,6 +138,7 @@ class ApiClient:
                             wait_time = response.headers.get("Retry-After", "5")
                             self.rate_limiter.update_rate_limit(wait_time)
                             rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit hit, waiting {wait_time:.2f} seconds")
+                            logger.warning(f"Rate limit hit for {function_name}, url={url}")
                             continue
                         if response.status != 200:
                             logger.error(f"Fetch failed: {function_name}, url={url}, status={response.status}")
@@ -160,12 +164,14 @@ class ApiClient:
                 break
         return None, rate_limit_info, rate_limit_data
 
-# 初始化
+# 初始化速率限制器和客戶端
 rate_limiter = RateLimiter(max_requests=50, period=60)
 api_client = ApiClient(rate_limiter)
 
 def get_category_name(cat_id):
-    """返回分類名稱"""
+    """
+    根據分類 ID 返回分類名稱。
+    """
     categories = {
         "1": "吹水台", "2": "熱門台", "5": "時事台", "14": "上班台",
         "15": "財經台", "29": "成人台", "31": "創意台"
@@ -173,12 +179,15 @@ def get_category_name(cat_id):
     return categories.get(str(cat_id), "未知分類")
 
 async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
-    """抓取帖子標題列表"""
+    """
+    抓取指定分類的帖子標題列表。
+    """
     items = []
     rate_limit_info = []
     
     for page in range(start_page, start_page + max_pages):
-        if cat_id == "2":
+        # 根據分類設置 type 和 order 參數
+        if cat_id == "2":  # 熱門台
             url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id=1&page={page}&count=60&type=now&order=hot"
         else:
             url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now"
@@ -203,7 +212,9 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
     }
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
-    """抓取帖子回覆內容"""
+    """
+    抓取指定帖子的回覆內容，支援動態頁數選擇。
+    """
     replies = []
     fetched_pages = []
     thread_title = None
@@ -212,6 +223,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     rate_limit_info = []
     max_replies = max(max_replies, 250)
     
+    # 抓取第一頁
     url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/1?order=reply_time"
     data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_thread_content")
     rate_limit_info.extend(page_rate_limit_info)
@@ -240,6 +252,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             "rate_limit_until": rate_limit_data["rate_limit_until"]
         }
     
+    # 確定後續頁面
     pages_to_fetch = []
     if specific_pages:
         pages_to_fetch = [p for p in specific_pages if 1 <= p <= total_pages and p not in fetched_pages]
@@ -256,6 +269,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     
     pages_to_fetch = sorted(set(pages_to_fetch))
     
+    # 抓取後續頁面
     for page in pages_to_fetch:
         if len(replies) >= max_replies:
             logger.info(f"Stopped fetching: thread_id={thread_id}, replies={len(replies)} reached max {max_replies}")
