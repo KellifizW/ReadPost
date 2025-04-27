@@ -270,24 +270,6 @@ async def main():
             st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
 
-            # 檢查無數據情況
-            if not result.get("thread_data") and analysis.get("intent") not in ["general_query", "introduce"]:
-                response = f"在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{analysis['filters']['min_replies']}，點讚數≥{analysis['filters']['min_likes']}）。請試試其他討論區或放寬條件！"
-                logger.warning(f"No threads found for query: {user_query}, filters: {analysis['filters']}")
-                with st.chat_message("assistant"):
-                    st.markdown(response)
-                st.session_state.chat_history[-1]["answer"] = response
-                st.session_state.conversation_context.append({"role": "user", "content": user_query})
-                st.session_state.conversation_context.append({"role": "assistant", "content": response})
-                st.session_state.context_timestamps.append(time.time())
-                st.session_state.context_timestamps.append(time.time())
-                update_progress("完成", 1.0)
-                time.sleep(0.5)
-                status_text.empty()
-                progress_bar.empty()
-                st.session_state.awaiting_response = False
-                return
-
             # 顯示回應
             response = ""
             with st.chat_message("assistant"):
@@ -310,7 +292,7 @@ async def main():
                     grok_container.markdown(response)
                 if not response:
                     logger.warning(f"No response generated for query: {user_query}")
-                    response = f"在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{analysis['filters']['min_replies']}，點讚數≥{analysis['filters']['min_likes']}）。請試試其他討論區或放寬條件！"
+                    response = "無法生成回應，請稍後重試。"
                     grok_container.markdown(response)
 
             st.session_state.chat_history[-1]["answer"] = response
