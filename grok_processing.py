@@ -797,5 +797,3 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         except Exception as e:
             logger.error(f"Response generation failed: {str(e)}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
-        finally:
-            pass
