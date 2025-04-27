@@ -14,9 +14,7 @@ import hashlib
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content, get_lihkg_thread_content_batch
 from logging_config import configure_logger
-### 修改：導入 cachetools 用於 LRU 緩存
 from cachetools import LRUCache
-### 修改結束
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -29,10 +27,8 @@ GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
 
-### 修改：初始化 LRU 緩存，限制大小為 500MB
-# 假設每個帖子數據平均 1MB，限制 500 個帖子
+# 初始化 LRU 緩存，限制大小為 500MB
 thread_cache = LRUCache(maxsize=500)
-### 修改結束
 
 class PromptBuilder:
     """
@@ -62,7 +58,6 @@ class PromptBuilder:
 
     def build_analyze(self, query, cat_name, cat_id, conversation_context=None, thread_titles=None, metadata=None, thread_data=None):
         config = self.config["analyze"]
-        ### 修改：限制 conversation_context 為最近 3 條
         limited_context = (conversation_context or [])[-3:]
         context = config["context"].format(
             query=query,
@@ -70,7 +65,6 @@ class PromptBuilder:
             cat_id=cat_id,
             conversation_context=json.dumps(limited_context, ensure_ascii=False)
         )
-        ### 修改結束
         data = config["data"].format(
             thread_titles=json.dumps(thread_titles or [], ensure_ascii=False),
             metadata=json.dumps(metadata or [], ensure_ascii=False),
@@ -97,14 +91,12 @@ class PromptBuilder:
 
     def build_response(self, intent, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
         config = self.config["response"].get(intent, self.config["response"]["general"])
-        ### 修改：限制 conversation_context 為最近 3 條
         limited_context = (conversation_context or [])[-3:]
         context = config["context"].format(
             query=query,
             selected_cat=selected_cat,
             conversation_context=json.dumps(limited_context, ensure_ascii=False)
         )
-        ### 修改結束
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
@@ -124,12 +116,9 @@ def clean_html(text):
         text = str(text)
     try:
         original_text = text
-        # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
-        # 規範化空白
         text = re.sub(r'\s+', ' ', text).strip()
-        # 若清空後無內容，檢查是否為表情符號或圖片
         if not text:
             if "hkgmoji" in original_text:
                 text = "[表情符號]"
@@ -151,7 +140,6 @@ def clean_response(response):
     """
     if not isinstance(response, str):
         return response
-    # 移除 [post_id: ...] 格式的字串
     cleaned = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', response)
     if cleaned != response:
         logger.info(f"Cleaned response: removed post_id strings")
@@ -165,34 +153,65 @@ def extract_keywords(query):
     words = re.findall(r'\w+', query)
     return [word for word in words if word not in stop_words][:3]
 
-async def summarize_context(conversation_context):
+async def summarize_context(conversation_context, current_query=""):
     """
-    使用 Grok 3 提煉對話歷史主題。
+    使用 Grok 3 提煉對話歷史主題，優先匹配當前查詢的關鍵詞。
     """
-    ### 修改：限制 conversation_context 為最近 3 條
-    if not conversation_context:
-        return {"theme": "general", "keywords": []}
+    ### 修改：增強上下文摘要，匹配當前查詢的關鍵詞
+    if not conversation_context or not current_query:
+        return {"theme": "general", "keywords": [], "referenced_thread_id": None, "referenced_title": None}
+    
     limited_context = conversation_context[-3:]
-    ### 修改結束
+    query_keywords = extract_keywords(current_query)
+    
+    # 提取歷史回應中的帖子 ID 和標題
+    referenced_thread_id = None
+    referenced_title = None
+    last_response = next((msg.get("content", "") for msg in limited_context[::-1] if msg.get("role") == "assistant"), "")
+    thread_id_matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+    
+    if thread_id_matches:
+        # 從緩存或歷史數據中查找帖子標題
+        for thread_id in thread_id_matches:
+            if thread_id in thread_cache:
+                title = thread_cache[thread_id]["data"].get("title", "")
+                # 檢查標題是否包含當前查詢的關鍵詞
+                if any(kw in title for kw in query_keywords):
+                    referenced_thread_id = thread_id
+                    referenced_title = title
+                    break
+    
+    # 若未找到匹配標題，則使用第一個帖子 ID
+    if not referenced_thread_id and thread_id_matches:
+        referenced_thread_id = thread_id_matches[0]
+        if referenced_thread_id in thread_cache:
+            referenced_title = thread_cache[referenced_thread_id]["data"].get("title", "")
     
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
         logger.error(f"Grok 3 API key missing: {str(e)}")
-        return {"theme": "general", "keywords": []}
+        return {"theme": "general", "keywords": [], "referenced_thread_id": None, "referenced_title": None}
     
     prompt = f"""
     你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
-    特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
+    當前用戶查詢：{current_query}
+    特別注意當前查詢中的關鍵詞（{json.dumps(query_keywords, ensure_ascii=False)}）與歷史回應中的帖子標題的語義關聯。
+    若歷史回應包含帖子 ID（如 [帖子 ID: xxx]），優先提取與當前查詢關鍵詞匹配的帖子標題作為主題。
     對話歷史：{json.dumps(limited_context, ensure_ascii=False)}
-    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
+    輸出格式：{{
+        "theme": "主要主題",
+        "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
+        "referenced_thread_id": "帖子ID或null",
+        "referenced_title": "帖子標題或null"
+    }}
     """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3-beta",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
+        "max_tokens": 150,
         "temperature": 0.5
     }
     
@@ -201,28 +220,42 @@ async def summarize_context(conversation_context):
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 if response.status != 200:
                     logger.warning(f"Context summarization failed: status={response.status}")
-                    return {"theme": "general", "keywords": []}
+                    return {
+                        "theme": "general",
+                        "keywords": query_keywords,
+                        "referenced_thread_id": referenced_thread_id,
+                        "referenced_title": referenced_title
+                    }
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"Context summarized: theme={result['theme']}, keywords={result['keywords']}")
+                result["referenced_thread_id"] = referenced_thread_id or result.get("referenced_thread_id")
+                result["referenced_title"] = referenced_title or result.get("referenced_title")
+                logger.info(f"Context summarized: theme={result['theme']}, keywords={result['keywords']}, thread_id={result['referenced_thread_id']}")
                 return result
     except Exception as e:
         logger.warning(f"Context summarization error: {str(e)}")
-        return {"theme": "general", "keywords": []}
+        return {
+            "theme": "general",
+            "keywords": query_keywords,
+            "referenced_thread_id": referenced_thread_id,
+            "referenced_title": referenced_title
+        }
+    ### 修改結束
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，使用語義嵌入識別意圖，放寬語義要求，動態設置篩選條件。
+    分析用戶問題，使用語義嵌入識別意圖，增強追問檢測。
     """
-    ### 修改：限制 conversation_context 為最近 3 條
+    ### 修改：改進追問檢測，匹配當前查詢與歷史帖子標題
     conversation_context = (conversation_context or [])[-3:]
-    ### 修改結束
     prompt_builder = PromptBuilder()
     
-    # 提煉對話歷史主題
-    context_summary = await summarize_context(conversation_context)
+    # 提煉對話歷史主題，傳入當前查詢以增強匹配
+    context_summary = await summarize_context(conversation_context, user_query)
     historical_theme = context_summary.get("theme", "general")
     historical_keywords = context_summary.get("keywords", [])
+    referenced_thread_id = context_summary.get("referenced_thread_id")
+    referenced_title = context_summary.get("referenced_title")
     
     # 提取關鍵詞
     query_words = set(extract_keywords(user_query))
@@ -231,38 +264,43 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     # 增強追問檢測
     is_follow_up = False
     referenced_thread_ids = []
-    referenced_titles = []
     if conversation_context and len(conversation_context) >= 2:
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
         
-        # 提取歷史回應中的帖子 ID 和標題
+        # 提取歷史回應中的帖子 ID
         matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-        referenced_thread_ids = matches
-        for tid in referenced_thread_ids:
-            for thread in metadata or []:
-                if str(thread.get("thread_id")) == tid:
-                    referenced_titles.append(thread.get("title", ""))
+        thread_id_matches = list(set(matches))  # 去重
         
-        # 檢查語義關聯
-        common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
-        title_overlap = any(any(kw in title for kw in query_words) for title in referenced_titles)
-        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+        # 檢查當前查詢是否與歷史帖子標題匹配
+        if thread_id_matches and metadata:
+            for thread_id in thread_id_matches:
+                for thread in metadata:
+                    if str(thread.get("thread_id")) == thread_id:
+                        title = thread.get("title", "")
+                        if any(kw in title for kw in query_words):
+                            referenced_thread_ids = [thread_id]
+                            is_follow_up = True
+                            logger.info(f"Follow-up detected: query keywords {query_words} matched title '{title}' for thread_id={thread_id}")
+                            break
+                if is_follow_up:
+                    break
         
-        if len(common_words) >= 1 or title_overlap or explicit_follow_up:
-            is_follow_up = True
-            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
-            if not referenced_thread_ids:
-                logger.info("No referenced thread IDs found, falling back to search_keywords")
-                is_follow_up = False
+        # 若無標題匹配，檢查語義關聯或顯式追問詞
+        if not is_follow_up:
+            common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
+            explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+            if len(common_words) >= 1 or explicit_follow_up:
+                is_follow_up = True
+                referenced_thread_ids = thread_id_matches[:2] if thread_id_matches else []
+                logger.info(f"Follow-up detected: common_words={common_words}, explicit_follow_up={explicit_follow_up}, thread_ids={referenced_thread_ids}")
     
-    # 若無歷史 ID 且檢測到追問，改用 search_keywords
+    # 若檢測到追問但無有效帖子 ID，回退到關鍵詞搜索
     if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
-        reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
-        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-        theme_keywords = extract_keywords(user_query) or historical_keywords
-        # 時事台和財經台放寬篩選條件
+        reason = "追問意圖無匹配帖子 ID，回退到關鍵詞搜索"
+        theme = query_words.pop() if query_words else historical_theme
+        theme_keywords = list(query_words) or historical_keywords
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
@@ -281,15 +319,17 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "theme_keywords": theme_keywords
         }
     
-    # 準備語義比較提示詞
+    # 準備語義分析提示詞
     semantic_prompt = f"""
     你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
-    若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
-    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
+    若問題模糊，優先延續對話歷史的主題（歷史主題：{historical_theme}）。
+    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞，或與歷史回應的帖子標題有語義重疊），選擇「follow_up」意圖。
     用戶問題：{user_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
     歷史主題：{historical_theme}
     歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
+    歷史帖子 ID：{json.dumps(referenced_thread_ids, ensure_ascii=False)}
+    歷史帖子標題：{referenced_title or '無'}
     意圖描述：
     {json.dumps({
         "list_titles": "列出帖子標題或清單",
@@ -372,20 +412,19 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     # 若檢測到追問，強制設置為 follow_up
                     if is_follow_up:
                         intent = "follow_up"
-                        reason = "檢測到追問，與前問題或回應的帖子標題有語義重疊"
+                        reason = f"檢測到追問，查詢關鍵詞與歷史帖子標題匹配，thread_id={referenced_thread_ids}"
                     
                     # 根據意圖設置參數
-                    theme = historical_theme if is_vague else "general"
-                    theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
+                    theme = historical_theme if is_vague else referenced_title or "general"
+                    theme_keywords = historical_keywords if is_vague else list(query_words) or historical_keywords
                     post_limit = 10
                     reply_limit = 0
                     data_type = "both"
                     processing = intent
-                    # 時事台和財經台放寬篩選條件
                     min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
-                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-                        theme_keywords = extract_keywords(user_query) or historical_keywords
+                        theme = list(query_words)[0] if query_words else historical_theme
+                        theme_keywords = list(query_words) or historical_keywords
                     elif intent == "monitor_events":
                         theme = "事件追蹤"
                     elif intent == "classify_opinions":
@@ -398,10 +437,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         theme = "日期相關資料"
                         post_limit = 5
                     elif intent == "follow_up":
-                        theme = historical_theme
-                        reply_limit = 500
+                        theme = referenced_title or historical_theme
+                        reply_limit = 200  # 為追問抓取更多回覆
                         data_type = "replies"
-                        post_limit = min(len(referenced_thread_ids), 2) or 2
+                        post_limit = min(len(referenced_thread_ids), 1) or 1  # 限制為單個帖子
                     elif intent in ["general_query", "introduce"]:
                         reply_limit = 0
                         data_type = "none"
@@ -427,7 +466,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            # 時事台和財經台放寬篩選條件
             min_likes = 0 if cat_id in ["5", "15"] else 5
             return {
                 "direct_response": False,
@@ -445,10 +483,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "reason": f"Semantic analysis failed, defaulting to historical theme: {historical_theme}",
                 "theme_keywords": historical_keywords
             }
+    ### 修改結束
 
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
     """
-    使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化錯誤處理。
+    使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID。
     """
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -531,15 +570,13 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     """
-    使用 Grok 3 API 生成流式回應，確保包含帖子 ID，優化 follow_up 意圖。
+    使用 Grok 3 API 生成流式回應，確保包含帖子 ID。
     """
-    ### 修改：限制 conversation_context 為最近 3 條
     conversation_context = (conversation_context or [])[-3:]
-    ### 修改結束
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
     
-    context_summary = await summarize_context(conversation_context)
+    context_summary = await summarize_context(conversation_context, user_query)
     historical_theme = context_summary.get("theme", "general")
     
     try:
@@ -589,8 +626,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
-            referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
-            logger.info(f"No referenced IDs in context, using prioritized IDs: {referenced_thread_ids}")
+            referenced_thread_ids = prioritization.get("top_thread_ids", [])[:1]  # 限制為單個帖子
+            logger.info(f"No referenced IDs in context, using prioritized ID: {referenced_thread_ids}")
         prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
         supplemental_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) not in map(str, referenced_thread_ids)}
         thread_data = {**prioritized_thread_data, **supplemental_thread_data}
@@ -644,7 +681,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_replies_count = 0
     
     min_tokens = 1200
-    max_tokens = 3600  # 放寬到 3600（約 2400 字）
+    max_tokens = 3600
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
@@ -842,10 +879,7 @@ def clean_cache(max_age=3600):
     """
     清理過期緩存數據，防止記憶體膨脹。
     """
-    ### 修改：使用 LRU 緩存，移除原有的時間戳清理邏輯
-    # 由於 thread_cache 已使用 LRUCache，無需手動清理
     logger.info(f"LRU cache stats: size={len(thread_cache)}, maxsize={thread_cache.maxsize}")
-    ### 修改結束
 
 def unix_to_readable(timestamp):
     """
@@ -869,6 +903,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     """
     處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數。
     """
+    ### 修改：為 follow_up 意圖聚焦單個帖子並抓取更多回覆
     configure_lihkg_api_logger()
     try:
         logger.info(f"Processing user question: {user_query}, category: {selected_cat}")
@@ -1084,14 +1119,18 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
         
-        ### 修改：使用批量抓取帖子內容
+        # 為 follow_up 意圖聚焦單個帖子並抓取更多回覆
         thread_ids_to_fetch = []
-        for item in candidate_threads:
-            thread_id = str(item["thread_id"])
-            if thread_id in thread_cache and thread_cache[thread_id]["data"].get("replies"):
-                thread_data.append(thread_cache[thread_id]["data"])
-            else:
-                thread_ids_to_fetch.append(thread_id)
+        if intent == "follow_up" and top_thread_ids:
+            thread_ids_to_fetch = top_thread_ids[:1]  # 僅抓取第一個匹配的帖子
+            logger.info(f"Follow-up intent: fetching single thread_id={thread_ids_to_fetch}")
+        else:
+            for item in candidate_threads:
+                thread_id = str(item["thread_id"])
+                if thread_id in thread_cache and thread_cache[thread_id]["data"].get("replies"):
+                    thread_data.append(thread_cache[thread_id]["data"])
+                else:
+                    thread_ids_to_fetch.append(thread_id)
         
         if thread_ids_to_fetch:
             batch_result = await get_lihkg_thread_content_batch(
