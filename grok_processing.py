@@ -82,7 +82,8 @@ class PromptBuilder:
                 cat_id=cat_id
             )
             data = config["data"].format(
-                threads=json.dumps(threads, ensure_ascii=False)
+                threads=json.dumps( rise=True).format(
+                    threads=json.dumps(threads, ensure_ascii=False)
             )
             return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         
@@ -672,6 +673,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     response_content = ""
     async with aiohttp.ClientSession() as session:
         try:
+            try:
+                GROK3_API_KEY = st.secrets["grok3key"]
+            except KeyError as e:
+                logger.error(f"Grok 3 API 金鑰缺失: {str(e)}")
+                yield "錯誤: 缺少 API 密鑰"
+                return
+            
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+            
             for attempt in range(3):
                 try:
                     async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
