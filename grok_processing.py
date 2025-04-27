@@ -163,14 +163,18 @@ def clean_html(text):
 
 def clean_response(response):
     """
-    清理回應，移除 [post_id: ...] 字串，保留其他格式。
+    清理回應，移除 [post_id: ...] 字串和 {intro}, {content}, {summary} 標籤，保留其他格式。
     """
     if not isinstance(response, str):
         return response
-    # 移除 [post_id: ...] 格式的字串
+    # 移除 [post_id: ...] 格式
     cleaned = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', response)
+    # 移除 {intro}, {content}, {summary} 標籤
+    cleaned = re.sub(r'\{intro\}|\{content\}|\{summary\}', '', cleaned)
+    # 清理多餘空白
+    cleaned = re.sub(r'\n\s*\n', '\n', cleaned).strip()
     if cleaned != response:
-        logger.info(f"Cleaned response: removed post_id strings")
+        logger.info(f"Cleaned response: removed post_id strings and structural tags")
     return cleaned
 
 def extract_keywords(query):
