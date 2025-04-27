@@ -1218,13 +1218,15 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 
                 content_result = await get_lihkg_thread_content(
                     thread_id=thread_id,
-                    pages=pages_to_fetch_adjusted,
+                    cat_id=cat_id,  # 新增 cat_id 傳遞
                     request_counter=request_counter,
                     last_reset=last_reset,
-                    rate_limit_until=rate_limit_until
+                    rate_limit_until=rate_limit_until,
+                    max_replies=reply_limit,
+                    specific_pages=pages_to_fetch_adjusted  # 使用 specific_pages 參數
                 )
                 
-                request_counter.update(content_result.get("request_counter", request_counter))
+                request_counter = content_result.get("request_counter", request_counter)  # 更新全局變數
                 last_reset = content_result.get("last_reset", last_reset)
                 rate_limit_until = content_result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(content_result.get("rate_limit_info", []))
