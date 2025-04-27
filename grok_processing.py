@@ -130,32 +130,31 @@ class PromptBuilder:
 
 def clean_html(text):
     """
-    清理 HTML 標籤，保留短文本和表情符號，記錄圖片過濾為 INFO。
+    清理 HTML 標籤，保留短文本和表情符號，簡化日誌記錄。
     """
     if not isinstance(text, str):
         text = str(text)
     try:
-        original_text = text
         # 移除 HTML 標籤
         clean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
         # 規範化空白
         text = re.sub(r'\s+', ' ', text).strip()
-        # 若清空後無內容，檢查是否為表情符號或圖片
+        # 檢查清理後內容
         if not text:
-            if "hkgmoji" in original_text:
-                text = "[表情符號]"
-                logger.info(f"HTML cleaning: replaced with [表情符號], original: {original_text}")
-            elif any(ext in original_text.lower() for ext in ['.webp', '.jpg', '.png']):
-                text = "[圖片]"
-                logger.info(f"HTML cleaning: filtered image, original: {original_text}")
+            if "hkgmoji" in text.lower():
+                logger.info("HTML cleaning: replaced with [表情符號]")
+                return "[表情符號]"
+            elif any(ext in text.lower() for ext in ['.webp', '.jpg', '.png']):
+                logger.info("HTML cleaning: filtered image")
+                return "[圖片]"
             else:
-                logger.info(f"HTML cleaning: empty after cleaning, original: {original_text}")
-                text = "[無內容]"
+                logger.info("HTML cleaning: empty after cleaning")
+                return "[無內容]"
         return text
     except Exception as e:
-        logger.error(f"HTML cleaning failed: {str(e)}, original: {original_text}")
-        return original_text
+        logger.error(f"HTML cleaning failed: {str(e)}")
+        return text
 
 def clean_response(response):
     """
