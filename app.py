@@ -77,19 +77,6 @@ def render_copy_button(content, key):
     """
     html(html_code, height=30)
 
-def render_new_conversation_button():
-    """
-    渲染新對話按鈕，樣式與複製按鈕一致。
-    """
-    html_code = """
-    <button onclick="window.location.reload()"
-            title="開始新對話"
-            style="border: none; background: none; cursor: pointer; font-size: 20px;">
-        🆕
-    </button>
-    """
-    html(html_code, height=30)
-
 async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
@@ -167,8 +154,14 @@ async def main():
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
 
     # 新對話按鈕
-    st.markdown("#### 操作")
-    render_new_conversation_button()
+    if st.button("🆕", help="開始新對話"):
+        st.session_state.chat_history = []
+        st.session_state.conversation_context = []
+        st.session_state.context_timestamps = []
+        st.session_state.thread_cache = {}
+        st.session_state.last_user_query = None
+        logger.info("New conversation started, cleared history")
+        st.rerun()
 
     # 顯示速率限制狀態
     st.markdown("#### 速率限制狀態")
@@ -280,11 +273,7 @@ async def main():
             # 顯示回應
             response = ""
             with st.chat_message("assistant"):
-                col1, col2 = st.columns([0.95, 0.05])
-                with col1:
-                    grok_container = st.empty()
-                with col2:
-                    copy_container = st.empty()
+                grok_container = st.empty()
                 update_progress("正在生成回應", 0.9)
                 logger.info(f"Starting stream_grok3_response for query: {user_query}, intent: {analysis.get('intent')}")
                 async for chunk in stream_grok3_response(
@@ -304,8 +293,6 @@ async def main():
                     logger.warning(f"No response generated for query: {user_query}")
                     response = "無法生成回應，請稍後重試。"
                     grok_container.markdown(response)
-                copy_container.empty()  # 清空佔位符
-                render_copy_button(response, key=f"copy_new_{len(st.session_state.chat_history)}")
 
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_query})
