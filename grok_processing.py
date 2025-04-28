@@ -12,7 +12,8 @@ import hashlib
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from logging_config import configure_logger
-from nltk.corpus import wordnet  # 新增用於同義詞提取
+import nltk
+from nltk.corpus import wordnet
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -24,6 +25,22 @@ logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90  # 秒
+
+# 自動下載 wordnet
+def ensure_nltk_wordnet():
+    try:
+        nltk.data.find('corpora/wordnet')
+        logger.info("WordNet is already available.")
+    except LookupError:
+        logger.info("Downloading WordNet...")
+        try:
+            nltk.download('wordnet', quiet=True)
+            logger.info("WordNet downloaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to download WordNet: {str(e)}")
+
+# 在程式啟動時執行
+ensure_nltk_wordnet()
 
 class PromptBuilder:
     """
@@ -144,28 +161,33 @@ def clean_response(response):
 
 def extract_keywords(query):
     """
-    提取查詢中的關鍵詞，支援同義詞，過濾停用詞，支援粵語詞。
+    提取查詢中的關鍵詞，支援同義詞，過濾停用詞，支援粵語詞，回退邏輯若 wordnet 不可用。
     """
     stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問", "想睇", "多D", "個", "講D咩"}
     words = re.findall(r'\w+', query)
     keywords = [word for word in words if word not in stop_words]
     
-    # 添加同義詞以提升匹配靈活性
+    # 嘗試添加同義詞
     expanded_keywords = set(keywords)
-    for word in keywords:
-        synonyms = []
-        for syn in wordnet.synsets(word, lang='cmn'):  # 使用中文詞網
-            for lemma in syn.lemmas(lang='cmn'):
-                syn_word = lemma.name()
-                if syn_word not in stop_words:
-                    synonyms.append(syn_word)
-        expanded_keywords.update(synonyms[:3])  # 限制每個詞最多3個同義詞
+    try:
+        for word in keywords:
+            synonyms = []
+            for syn in wordnet.synsets(word, lang='cmn'):
+                for lemma in syn.lemmas(lang='cmn'):
+                    syn_word = lemma.name()
+                    if syn_word not in stop_words:
+                        synonyms.append(syn_word)
+            expanded_keywords.update(synonyms[:3])  # 限制每個詞最多3個同義詞
+    except Exception as e:
+        logger.warning(f"WordNet unavailable, skipping synonym expansion: {str(e)}")
+        # 回退到基本關鍵詞
+        expanded_keywords = set(keywords)
     
     return list(expanded_keywords) or ["general"]
 
 async def summarize_context(conversation_context, current_query):
     """
-    使用 Grok 3 提煉對話歷史主題，優先提取當前查詢關鍵詞，放寬匹配閾值。
+    使用 Grok 3 提煉對話歷史主題，優先提取當前查詢關鍵詞，放寬匹配閾值，處理 wordnet 錯誤。
     """
     if not conversation_context and not current_query:
         return {"theme": "general", "keywords": []}
@@ -215,7 +237,12 @@ async def summarize_context(conversation_context, current_query):
                 return result
     except Exception as e:
         logger.warning(f"Context summarization error: {str(e)}")
-        return {"theme": "general", "keywords": []}
+        # 回退到基本關鍵詞提取
+        keywords = extract_keywords(current_query)
+        return {
+            "theme": keywords[0] if keywords else "general",
+            "keywords": keywords[:5]
+        }
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
@@ -272,7 +299,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "category_ids": [cat_id],
             "data_type": "both",
             "post_limit": 5,
-            "reply_limit": 100,  # 默認抓取100條回覆
+            "reply_limit": 100,
             "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
             "processing": intent,
             "candidate_thread_ids": [],
@@ -379,7 +406,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     theme = historical_theme if is_vague else extract_keywords(user_query)[0] if extract_keywords(user_query) else "general"
                     theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
                     post_limit = 10 if intent in ["monitor_events", "classify_opinions"] else 5
-                    reply_limit = 100  # 默認抓取100條回覆
+                    reply_limit = 100
                     data_type = "both"
                     processing = intent
                     min_likes = 0 if cat_id in ["5", "15"] else 5
@@ -441,7 +468,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "category_ids": [cat_id],
                 "data_type": "both",
                 "post_limit": 5,
-                "reply_limit": 100,  # 默認抓取100條回覆
+                "reply_limit": 100,
                 "filters": {"min_replies": 0, "min_likes": min_likes, "keywords": historical_keywords},
                 "processing": "summarize",
                 "candidate_thread_ids": [],
@@ -888,7 +915,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             progress_callback("正在抓取帖子列表", 0.1)
         
         post_limit = min(analysis.get("post_limit", 5), 20)
-        reply_limit = analysis.get("reply_limit", 100)  # 默認100條回覆
+        reply_limit = analysis.get("reply_limit", 100)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 0)
         min_likes = filters.get("min_likes", 0 if cat_id in ["5", "15"] else 5)
