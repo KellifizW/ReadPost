@@ -230,15 +230,26 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         common_words = query_words.intersection(last_response_keywords)
         title_overlap = any(any(kw in title.lower() for kw in query_words) for title in referenced_titles)
         explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+        context_contains_post = "post" in user_query.lower() and referenced_thread_ids
         
-        if (len(common_words) >= 1 or title_overlap or explicit_follow_up) and referenced_thread_ids:
+        # 強制檢查上下文帖子 ID
+        if context_contains_post:
             is_follow_up = True
-            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
+            logger.info(f"Follow-up intent triggered: query contains 'post' and context has thread IDs: {referenced_thread_ids}")
+        elif (len(common_words) >= 1 or title_overlap or explicit_follow_up) and referenced_thread_ids:
+            is_follow_up = True
+            logger.info(f"Follow-up intent detected: common_words={common_words}, title_overlap={title_overlap}, explicit_follow_up={explicit_follow_up}, referenced_thread_ids={referenced_thread_ids}")
+        
+        # 日誌增強：記錄未觸發 follow_up 的原因
+        if not is_follow_up and referenced_thread_ids:
+            logger.info(f"Follow-up intent not triggered: common_words={common_words}, title_overlap={title_overlap}, explicit_follow_up={explicit_follow_up}, context_contains_post={context_contains_post}, referenced_thread_ids={referenced_thread_ids}")
     
     # 若無歷史 ID 或語義關聯，回退到 search_keywords
     if not is_follow_up or not referenced_thread_ids:
         intent = "search_keywords"
         reason = "無上下文帖子 ID 或語義關聯，回退到關鍵詞搜索"
+        if not referenced_thread_ids:
+            logger.info(f"Follow-up intent not triggered: no referenced thread IDs in context")
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
         min_likes = 0 if cat_id in ["5", "15"] else 5
@@ -277,10 +288,10 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "candidate_thread_ids": referenced_thread_ids,
         "top_thread_ids": referenced_thread_ids[:2],
         "needs_advanced_analysis": False,
-        "reason": "檢測到追問，問題與上下文帖子標題或回應內容有語義關聯",
+        "reason": "檢測到追問，問題與上下文帖子標題或回應內容有語義關聯或包含 'post' 且有上下文帖子 ID",
         "theme_keywords": theme_keywords
     }
-
+    
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化錯誤處理。
