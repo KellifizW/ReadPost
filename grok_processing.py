@@ -1,5 +1,3 @@
-# grok_processing.py
-
 import aiohttp
 import asyncio
 import json
@@ -145,17 +143,18 @@ def clean_response(response):
 
 def extract_keywords(query):
     """
-    提取查詢中的關鍵詞，過濾停用詞。
+    提取查詢中的關鍵詞，過濾停用詞，支援粵語詞。
     """
-    stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問"}
+    stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問", "想睇", "多D", "個", "講D咩"}
     words = re.findall(r'\w+', query)
-    return [word for word in words if word not in stop_words][:3]
+    keywords = [word for word in words if word not in stop_words]
+    return keywords or ["general"]
 
-async def summarize_context(conversation_context):
+async def summarize_context(conversation_context, current_query):
     """
-    使用 Grok 3 提煉對話歷史主題。
+    使用 Grok 3 提煉對話歷史主題，優先提取當前查詢關鍵詞。
     """
-    if not conversation_context:
+    if not conversation_context and not current_query:
         return {"theme": "general", "keywords": []}
     
     try:
@@ -165,10 +164,12 @@ async def summarize_context(conversation_context):
         return {"theme": "general", "keywords": []}
     
     prompt = f"""
-    你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
-    特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
+    你是對話摘要助手，請分析對話歷史並結合當前問題，提煉主要主題和關鍵詞（最多5個）。
+    優先提取當前問題中的實體詞（如人名、事件），並確保主題與當前問題語義相關。
+    若歷史上下文與當前問題無關，僅基於當前問題生成主題。
+    當前問題：{current_query}
     對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
+    輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", ...]}}
     """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -187,7 +188,16 @@ async def summarize_context(conversation_context):
                     return {"theme": "general", "keywords": []}
                 data = await response.json()
                 result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"Context summarized: theme={result['theme']}, keywords={result['keywords']}")
+                # 驗證主題與查詢相關性
+                query_keywords = set(extract_keywords(current_query))
+                result_keywords = set(result.get("keywords", []))
+                if not query_keywords.intersection(result_keywords) and current_query:
+                    logger.warning(f"Context theme {result['theme']} not related to query keywords {query_keywords}")
+                    result = {
+                        "theme": query_keywords.pop() if query_keywords else "general",
+                        "keywords": list(query_keywords)[:5]
+                    }
+                logger.info(f"Context summarized for query '{current_query}': theme={result['theme']}, keywords={result['keywords']}")
                 return result
     except Exception as e:
         logger.warning(f"Context summarization error: {str(e)}")
@@ -200,8 +210,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    # 提煉對話歷史主題
-    context_summary = await summarize_context(conversation_context)
+    # 提煉對話歷史主題，傳入當前查詢
+    context_summary = await summarize_context(conversation_context, user_query)
     historical_theme = context_summary.get("theme", "general")
     historical_keywords = context_summary.get("keywords", [])
     
@@ -233,17 +243,20 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         if len(common_words) >= 1 or title_overlap or explicit_follow_up:
             is_follow_up = True
             logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
-            if not referenced_thread_ids:
+            # 驗證歷史帖子標題與查詢的語義關聯
+            if referenced_thread_ids and not title_overlap:
+                logger.info(f"No title overlap for referenced thread IDs {referenced_thread_ids}, falling back to search_keywords")
+                is_follow_up = False
+            elif not referenced_thread_ids:
                 logger.info("No referenced thread IDs found, falling back to search_keywords")
                 is_follow_up = False
     
-    # 若無歷史 ID 且檢測到追問，改用 search_keywords
+    # 若無有效歷史 ID 或無語義關聯，改用 search_keywords
     if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
-        reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
+        reason = "追問意圖無歷史帖子 ID或無語義關聯，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
-        # 時事台和財經台放寬篩選條件
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
@@ -356,13 +369,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         reason = "檢測到追問，與前問題或回應的帖子標題有語義重疊"
                     
                     # 根據意圖設置參數
-                    theme = historical_theme if is_vague else "general"
+                    theme = historical_theme if is_vague else extract_keywords(user_query)[0] if extract_keywords(user_query) else "general"
                     theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
                     post_limit = 10
                     reply_limit = 0
                     data_type = "both"
                     processing = intent
-                    # 時事台和財經台放寬篩選條件
                     min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
                         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
@@ -379,7 +391,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         theme = "日期相關資料"
                         post_limit = 5
                     elif intent == "follow_up":
-                        theme = historical_theme
+                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
                         reply_limit = 500
                         data_type = "replies"
                         post_limit = min(len(referenced_thread_ids), 2) or 2
@@ -408,7 +420,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            # 時事台和財經台放寬篩選條件
             min_likes = 0 if cat_id in ["5", "15"] else 5
             return {
                 "direct_response": False,
@@ -518,7 +529,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
     
-    context_summary = await summarize_context(conversation_context)
+    context_summary = await summarize_context(conversation_context, user_query)
     historical_theme = context_summary.get("theme", "general")
     
     try:
@@ -587,7 +598,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         )[:max_replies_per_thread]
         
         if not sorted_replies and replies:
-            logger.info(f"No keyword-matched replies for thread_id={tid}, using raw replies")
+            logger.info(f"No keyword-matched replies for thread_id={tid}, using raw replies, keywords={keywords}")
             sorted_replies = sorted(
                 [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],
                 key=lambda x: x.get("like_count", 0),
@@ -623,7 +634,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_replies_count = 0
     
     min_tokens = 1200
-    max_tokens = 3600  # 放寬到 3600（約 2400 字）
+    max_tokens = 3600
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
@@ -1064,7 +1075,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             progress_callback("正在抓取帖子內容", 0.3)
         
         tasks = []
-        pages_to_fetch = [] if intent in ["summarize_posts", "list_titles", "recommend_threads"] else [1]
+        pages_to_fetch = [1, 2, 3] if intent == "follow_up" else [1]
         
         for item in candidate_threads:
             thread_id = str(item["thread_id"])
