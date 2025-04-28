@@ -3,3 +3,4 @@ aiohttp
 nest_asyncio
 pytz
 tzlocal
+nltk
