@@ -7,6 +7,7 @@ LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 - get_lihkg_topic_list：抓取指定分類的帖子標題。
 - get_lihkg_thread_content：抓取指定帖子的回覆內容。
 - get_category_name：返回分類名稱。
+- get_lihkg_thread_content_batch：批量抓取多個帖子的回覆內容。
 """
 
 import aiohttp
@@ -289,7 +290,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             page_replies = page_replies[:remaining_slots]
             replies.extend(page_replies)
             fetched_pages.append(page)
-            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
+            logger_info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
         await asyncio.sleep(1)
     
     return {
@@ -299,3 +300,71 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         "last_reset": rate_limit_data["last_reset"],
         "rate_limit_until": rate_limit_data["rate_limit_until"]
     }
+
+### 修改：添加批量抓取帖子內容的函數
+async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
+    """
+    批量抓取多個帖子的回覆內容，減少 API 請求次數。
+    Args:
+        thread_ids: List[str]，帖子 ID 列表
+        cat_id: str，分類 ID
+        max_replies: int，每個帖子的最大回覆數
+        fetch_last_pages: int，抓取最後幾頁
+        specific_pages: List[int]，指定頁數
+        start_page: int，起始頁數
+    Returns:
+        Dict: 包含所有帖子的回覆數據
+    """
+    results = []
+    rate_limit_info = []
+    max_replies = max(max_replies, 250)
+    
+    tasks = []
+    for thread_id in thread_ids:
+        tasks.append(get_lihkg_thread_content(
+            thread_id=thread_id,
+            cat_id=cat_id,
+            max_replies=max_replies,
+            fetch_last_pages=fetch_last_pages,
+            specific_pages=specific_pages,
+            start_page=start_page
+        ))
+    
+    content_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for idx, result in enumerate(content_results):
+        thread_id = thread_ids[idx]
+        if isinstance(result, Exception):
+            logger.warning(f"Failed to fetch content for thread {thread_id}: {str(result)}")
+            results.append({
+                "thread_id": thread_id,
+                "replies": [],
+                "title": None,
+                "total_replies": 0,
+                "total_pages": 0,
+                "fetched_pages": [],
+                "rate_limit_info": [{"message": f"Fetch error: {str(result)}"}],
+                "request_counter": 0,
+                "last_reset": time.time(),
+                "rate_limit_until": 0
+            })
+            continue
+        
+        result["thread_id"] = thread_id
+        rate_limit_info.extend(result.get("rate_limit_info", []))
+        results.append(result)
+    
+    aggregated_rate_limit_data = {
+        "request_counter": max([r.get("request_counter", 0) for r in results]),
+        "last_reset": min([r.get("last_reset", time.time()) for r in results]),
+        "rate_limit_until": max([r.get("rate_limit_until", 0) for r in results])
+    }
+    
+    return {
+        "results": results,
+        "rate_limit_info": rate_limit_info,
+        "request_counter": aggregated_rate_limit_data["request_counter"],
+        "last_reset": aggregated_rate_limit_data["last_reset"],
+        "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
+    }
+### 修改結束
