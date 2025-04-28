@@ -16,13 +16,41 @@ import hashlib
 import logging
 import json
 import pytz
-from logging_config import configure_logger
 
 # 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
-logger = configure_logger(__name__, "lihkg_api.log")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+
+# 自定義日誌格式器，添加 HKT 標記
+class HongKongFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        else:
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
+
+formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# 檔案處理器：寫入 lihkg_api.log
+file_handler = logging.FileHandler("lihkg_api.log")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 控制台處理器：輸出到 stdout
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+# 檢查系統時區
+import tzlocal
+logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter (Asia/Hong_Kong)")
 
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
@@ -45,28 +73,10 @@ class RateLimiter:
         self.max_requests = max_requests
         self.period = period
         self.requests = []
-        self.request_counter = 0
-        self.last_reset = time.time()
-        self.rate_limit_until = 0
-        self.last_response_time = 1.0
+        self.last_response_time = 1.0  # 初始延遲 1 秒
 
     async def acquire(self):
         now = time.time()
-        # 重置計數器
-        if now - self.last_reset >= self.period:
-            self.request_counter = 0
-            self.last_reset = now
-        # 檢查速率限制
-        if now < self.rate_limit_until:
-            wait_time = self.rate_limit_until - now
-            logger.warning(f"Rate limit active, waiting {wait_time:.2f} seconds")
-            await asyncio.sleep(wait_time)
-            return False, {
-                "request_counter": self.request_counter,
-                "last_reset": self.last_reset,
-                "rate_limit_until": self.rate_limit_until
-            }
-        # 清理過期請求
         self.requests = [t for t in self.requests if now - t < self.period]
         if len(self.requests) >= self.max_requests:
             wait_time = self.period - (now - self.requests[0])
@@ -74,16 +84,7 @@ class RateLimiter:
             await asyncio.sleep(wait_time)
             self.requests = self.requests[1:]
         self.requests.append(now)
-        self.request_counter += 1
         await asyncio.sleep(max(0.5, min(self.last_response_time, 2.0)))
-        return True, {
-            "request_counter": self.request_counter,
-            "last_reset": self.last_reset,
-            "rate_limit_until": self.rate_limit_until
-        }
-
-    def update_rate_limit(self, retry_after):
-        self.rate_limit_until = time.time() + int(retry_after)
 
 class ApiClient:
     """
@@ -110,16 +111,15 @@ class ApiClient:
         }
 
     async def get(self, url: str, function_name: str, params=None, max_retries=3, timeout=10):
+        timestamp = int(time.time())
+        headers = self.generate_headers(url, timestamp)
         rate_limit_info = []
         for attempt in range(max_retries):
-            success, rate_limit_data = await self.rate_limiter.acquire()
-            if not success:
-                rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_data['rate_limit_until'], tz=HONG_KONG_TZ)}")
-                return None, rate_limit_info, rate_limit_data
             try:
+                await self.rate_limiter.acquire()
                 start_time = time.time()
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=self.generate_headers(url, int(time.time())), params=params, timeout=timeout) as response:
+                    async with session.get(url, headers=headers, params=params, timeout=timeout) as response:
                         response_time = time.time() - start_time
                         self.rate_limiter.last_response_time = response_time
                         logger.info(f"API response time: {response_time:.2f} seconds for {function_name}")
@@ -133,10 +133,10 @@ class ApiClient:
                             }, ensure_ascii=False)
                         )
                         if response.status == 429:
-                            wait_time = response.headers.get("Retry-After", "5")
-                            self.rate_limiter.update_rate_limit(wait_time)
+                            wait_time = int(response.headers.get("Retry-After", "5"))
                             rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit hit, waiting {wait_time:.2f} seconds")
                             logger.warning(f"Rate limit hit for {function_name}, url={url}")
+                            await asyncio.sleep(wait_time)
                             continue
                         if response.status != 200:
                             logger.error(f"Fetch failed: {function_name}, url={url}, status={response.status}")
@@ -145,7 +145,7 @@ class ApiClient:
                         if not data.get("success"):
                             logger.error(f"API error: {function_name}, url={url}, message={data.get('error_message', 'Unknown')}")
                             break
-                        return data, rate_limit_info, rate_limit_data
+                        return data, rate_limit_info
             except Exception as e:
                 logger.error(
                     json.dumps({
@@ -160,7 +160,7 @@ class ApiClient:
                     await asyncio.sleep(2)
                     continue
                 break
-        return None, rate_limit_info, rate_limit_data
+        return None, rate_limit_info
 
 # 初始化速率限制器和客戶端
 rate_limiter = RateLimiter(max_requests=50, period=60)
@@ -176,20 +176,30 @@ def get_category_name(cat_id):
     }
     return categories.get(str(cat_id), "未知分類")
 
-async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
+async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, request_counter=0, last_reset=0, rate_limit_until=0):
     """
     抓取指定分類的帖子標題列表。
     """
     items = []
     rate_limit_info = []
+    current_time = time.time()
+    
+    if current_time < rate_limit_until:
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
+        logger.warning(f"Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
+        return {
+            "items": items, "rate_limit_info": rate_limit_info, "request_counter": request_counter,
+            "last_reset": last_reset, "rate_limit_until": rate_limit_until
+        }
+    
+    if current_time - last_reset >= 60:
+        request_counter = 0
+        last_reset = current_time
     
     for page in range(start_page, start_page + max_pages):
-        # 根據分類設置 type 和 order 參數
-        if cat_id == "2":  # 熱門台
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id=1&page={page}&count=60&type=now&order=hot"
-        else:
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now"
-        data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_topic_list")
+        url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now&order=now"
+        data, page_rate_limit_info = await api_client.get(url, "get_lihkg_topic_list")
+        request_counter += 1
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response", {}).get("items"):
@@ -204,12 +214,12 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
     return {
         "items": items[:90],
         "rate_limit_info": rate_limit_info,
-        "request_counter": rate_limit_data["request_counter"],
-        "last_reset": rate_limit_data["last_reset"],
-        "rate_limit_until": rate_limit_data["rate_limit_until"]
+        "request_counter": request_counter,
+        "last_reset": last_reset,
+        "rate_limit_until": rate_limit_until
     }
 
-async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
+async def get_lihkg_thread_content(thread_id, cat_id=None, request_counter=0, last_reset=0, rate_limit_until=0, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
     抓取指定帖子的回覆內容，支援動態頁數選擇。
     """
@@ -219,11 +229,26 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     total_replies = None
     total_pages = None
     rate_limit_info = []
+    current_time = time.time()
     max_replies = max(max_replies, 250)
+    
+    if current_time < rate_limit_until:
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ)}")
+        logger.warning(f"Rate limit active for thread_id={thread_id}")
+        return {
+            "replies": replies, "title": thread_title, "total_replies": total_replies,
+            "total_pages": total_pages, "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
+        }
+    
+    if current_time - last_reset >= 60:
+        request_counter = 0
+        last_reset = current_time
     
     # 抓取第一頁
     url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/1?order=reply_time"
-    data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_thread_content")
+    data, page_rate_limit_info = await api_client.get(url, "get_lihkg_thread_content")
+    request_counter += 1
     rate_limit_info.extend(page_rate_limit_info)
     
     if data and data.get("response"):
@@ -245,9 +270,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         return {
             "replies": [], "title": None, "total_replies": 0, "total_pages": 0,
             "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
-            "request_counter": rate_limit_data["request_counter"],
-            "last_reset": rate_limit_data["last_reset"],
-            "rate_limit_until": rate_limit_data["rate_limit_until"]
+            "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
         }
     
     # 確定後續頁面
@@ -274,7 +297,8 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             break
         
         url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{page}?order=reply_time"
-        data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "fetch_thread_page")
+        data, page_rate_limit_info = await api_client.get(url, "fetch_thread_page")
+        request_counter += 1
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response"):
@@ -293,7 +317,5 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     return {
         "replies": replies, "title": thread_title, "total_replies": total_replies,
         "total_pages": total_pages, "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
-        "request_counter": rate_limit_data["request_counter"],
-        "last_reset": rate_limit_data["last_reset"],
-        "rate_limit_until": rate_limit_data["rate_limit_until"]
+        "request_counter": request_counter, "last_reset": last_reset, "rate_limit_until": rate_limit_until
     }

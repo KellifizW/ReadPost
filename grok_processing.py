@@ -1,5 +1,3 @@
-# grok_processing.py
-
 import aiohttp
 import asyncio
 import json
@@ -13,13 +11,41 @@ import os
 import hashlib
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
-from logging_config import configure_logger
 
 # 設置香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
-logger = configure_logger(__name__, "grok_processing.log")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+
+# 自定義日誌格式器，將時間戳設為香港時區
+class HongKongFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.datetime.fromtimestamp(record.created, tz=HONG_KONG_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        else:
+            return dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3] + " HKT"
+
+formatter = HongKongFormatter("%(asctime)s - %(levelname)s - %(funcName)s - %(message)s")
+
+# 控制台處理器
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+# 檔案處理器
+file_handler = logging.FileHandler("grok_processing.log")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 檢查系統時區
+import tzlocal
+logger.info(f"System timezone: {tzlocal.get_localzone()}, using HongKongFormatter (Asia/Hong_Kong)")
 
 # Grok 3 API 配置
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -226,42 +252,32 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     referenced_titles.append(thread.get("title", ""))
         
         # 檢查語義關聯
-        last_response_keywords = set(extract_keywords(last_response))
-        common_words = query_words.intersection(last_response_keywords)
-        title_overlap = any(any(kw in title.lower() for kw in query_words) for title in referenced_titles)
+        common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
+        title_overlap = any(any(kw in title for kw in query_words) for title in referenced_titles)
         explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
-        context_contains_post = "post" in user_query.lower() and referenced_thread_ids
         
-        # 強制檢查上下文帖子 ID
-        if context_contains_post:
+        if len(common_words) >= 1 or title_overlap or explicit_follow_up:
             is_follow_up = True
-            logger.info(f"Follow-up intent triggered: query contains 'post' and context has thread IDs: {referenced_thread_ids}")
-        elif (len(common_words) >= 1 or title_overlap or explicit_follow_up) and referenced_thread_ids:
-            is_follow_up = True
-            logger.info(f"Follow-up intent detected: common_words={common_words}, title_overlap={title_overlap}, explicit_follow_up={explicit_follow_up}, referenced_thread_ids={referenced_thread_ids}")
-        
-        # 日誌增強：記錄未觸發 follow_up 的原因
-        if not is_follow_up and referenced_thread_ids:
-            logger.info(f"Follow-up intent not triggered: common_words={common_words}, title_overlap={title_overlap}, explicit_follow_up={explicit_follow_up}, context_contains_post={context_contains_post}, referenced_thread_ids={referenced_thread_ids}")
+            logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
+            if not referenced_thread_ids:
+                logger.info("No referenced thread IDs found, falling back to search_keywords")
+                is_follow_up = False
     
-    # 若無歷史 ID 或語義關聯，回退到 search_keywords
-    if not is_follow_up or not referenced_thread_ids:
+    # 若無歷史 ID 且檢測到追問，改用 search_keywords
+    if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
-        reason = "無上下文帖子 ID 或語義關聯，回退到關鍵詞搜索"
-        if not referenced_thread_ids:
-            logger.info(f"Follow-up intent not triggered: no referenced thread IDs in context")
+        reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
-        min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
             "intent": intent,
             "theme": theme,
             "category_ids": [cat_id],
             "data_type": "both",
-            "post_limit": 5,
+            "post_limit": 2,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
+            "filters": {"min_replies": 0, "min_likes": 5, "sort": "popular", "keywords": theme_keywords},
             "processing": intent,
             "candidate_thread_ids": [],
             "top_thread_ids": [],
@@ -270,32 +286,177 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "theme_keywords": theme_keywords
         }
     
-    # 設置 follow_up 參數
-    intent = "follow_up"
-    theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else "追問相關內容"
-    theme_keywords = extract_keywords(user_query)
-    min_likes = 0 if cat_id in ["5", "15"] else 5
-    return {
-        "direct_response": False,
-        "intent": intent,
-        "theme": theme,
-        "category_ids": [cat_id],
-        "data_type": "replies",
-        "post_limit": min(len(referenced_thread_ids), 2),
-        "reply_limit": 500,
-        "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
-        "processing": intent,
-        "candidate_thread_ids": referenced_thread_ids,
-        "top_thread_ids": referenced_thread_ids[:2],
-        "needs_advanced_analysis": False,
-        "reason": "檢測到追問，問題與上下文帖子標題或回應內容有語義關聯或包含 'post' 且有上下文帖子 ID",
-        "theme_keywords": theme_keywords
+    # 準備語義比較提示詞
+    semantic_prompt = f"""
+    你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
+    若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
+    若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
+    用戶問題：{user_query}
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    歷史主題：{historical_theme}
+    歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
+    意圖描述：
+    {json.dumps({
+        "list_titles": "列出帖子標題或清單",
+        "summarize_posts": "總結帖子內容或討論",
+        "analyze_sentiment": "分析帖子或回覆的情緒",
+        "compare_categories": "比較不同討論區的話題",
+        "general_query": "與LIHKG無關或模糊的問題",
+        "find_themed": "尋找特定主題的帖子",
+        "fetch_dates": "提取帖子或回覆的日期資料",
+        "search_keywords": "根據關鍵詞搜索帖子",
+        "recommend_threads": "推薦相關或熱門帖子",
+        "monitor_events": "追蹤特定事件或話題的討論",
+        "classify_opinions": "將回覆按意見立場分類",
+        "follow_up": "追問之前回應中提到的帖子內容"
+    }, ensure_ascii=False, indent=2)}
+    輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
+    """
+    
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+    except KeyError as e:
+        logger.error(f"Grok 3 API key missing: {str(e)}")
+        return {
+            "direct_response": True,
+            "intent": "general_query",
+            "theme": historical_theme,
+            "category_ids": [],
+            "data_type": "none",
+            "post_limit": 5,
+            "reply_limit": 0,
+            "filters": {},
+            "processing": "general",
+            "candidate_thread_ids": [],
+            "top_thread_ids": [],
+            "needs_advanced_analysis": False,
+            "reason": "Missing API key",
+            "theme_keywords": historical_keywords
+        }
+    
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    messages = [
+        {"role": "system", "content": prompt_builder.get_system_prompt("analyze")},
+        *conversation_context,
+        {"role": "user", "content": semantic_prompt}
+    ]
+    payload = {
+        "model": "grok-3-beta",
+        "messages": messages,
+        "max_tokens": 200,
+        "temperature": 0.5
     }
     
+    logger.info(f"Starting semantic intent analysis for query: {user_query}")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status != 200:
+                        logger.warning(f"Semantic intent analysis failed: status={response.status}, attempt={attempt + 1}")
+                        continue
+                    data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"Semantic intent analysis failed: missing choices, attempt={attempt + 1}")
+                        continue
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    intent = result.get("intent", "summarize_posts")
+                    confidence = result.get("confidence", 0.7)
+                    reason = result.get("reason", "語義匹配")
+                    
+                    # 若問題模糊，延續歷史意圖或默認 summarize_posts
+                    if is_vague and historical_theme != "general":
+                        intent = "summarize_posts"
+                        reason = f"問題模糊，延續歷史主題：{historical_theme}"
+                    elif is_vague:
+                        intent = "summarize_posts"
+                        reason = "問題模糊，默認總結帖子"
+                    
+                    # 若檢測到追問，強制設置為 follow_up
+                    if is_follow_up:
+                        intent = "follow_up"
+                        reason = "檢測到追問，與前問題或回應的帖子標題有語義重疊"
+                    
+                    # 根據意圖設置參數
+                    theme = historical_theme if is_vague else "general"
+                    theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
+                    post_limit = 10
+                    reply_limit = 0
+                    data_type = "both"
+                    processing = intent
+                    if intent in ["search_keywords", "find_themed"]:
+                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
+                        theme_keywords = extract_keywords(user_query) or historical_keywords
+                    elif intent == "monitor_events":
+                        theme = "事件追蹤"
+                    elif intent == "classify_opinions":
+                        theme = "意見分類"
+                        data_type = "replies"
+                    elif intent == "recommend_threads":
+                        theme = "帖子推薦"
+                        post_limit = 5
+                    elif intent == "fetch_dates":
+                        theme = "日期相關資料"
+                        post_limit = 5
+                    elif intent == "follow_up":
+                        theme = historical_theme
+                        reply_limit = 500
+                        data_type = "replies"
+                        post_limit = min(len(referenced_thread_ids), 2) or 2
+                    elif intent in ["general_query", "introduce"]:
+                        reply_limit = 0
+                        data_type = "none"
+                    
+                    return {
+                        "direct_response": intent in ["general_query", "introduce"],
+                        "intent": intent,
+                        "theme": theme,
+                        "category_ids": [cat_id],
+                        "data_type": data_type,
+                        "post_limit": post_limit,
+                        "reply_limit": reply_limit,
+                        "filters": {"min_replies": 0, "min_likes": 5, "sort": "popular", "keywords": theme_keywords},
+                        "processing": intent,
+                        "candidate_thread_ids": [],
+                        "top_thread_ids": referenced_thread_ids,
+                        "needs_advanced_analysis": confidence < 0.7,
+                        "reason": reason,
+                        "theme_keywords": theme_keywords
+                    }
+        except Exception as e:
+            logger.warning(f"Semantic intent analysis error: {str(e)}, attempt={attempt + 1}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+                continue
+            return {
+                "direct_response": False,
+                "intent": "summarize_posts",
+                "theme": historical_theme,
+                "category_ids": [cat_id],
+                "data_type": "both",
+                "post_limit": 5,
+                "reply_limit": 0,
+                "filters": {"min_replies": 0, "min_likes": 5, "keywords": historical_keywords},
+                "processing": "summarize",
+                "candidate_thread_ids": [],
+                "top_thread_ids": [],
+                "needs_advanced_analysis": False,
+                "reason": f"Semantic analysis failed, defaulting to historical theme: {historical_theme}",
+                "theme_keywords": historical_keywords
+            }
+
 async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
     """
     使用 Grok 3 根據問題語義排序帖子，返回最相關的帖子ID，強化錯誤處理。
     """
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+    except KeyError as e:
+        logger.error(f"Grok 3 API key missing: {str(e)}")
+        return {"top_thread_ids": [], "reason": "Missing API key"}
+
     if intent == "follow_up":
         referenced_thread_ids = []
         context = st.session_state.get("conversation_context", [])
@@ -307,14 +468,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             logger.info(f"Follow-up intent, using referenced thread IDs: {referenced_thread_ids}")
             return {"top_thread_ids": referenced_thread_ids[:2], "reason": "Using referenced thread IDs for follow_up"}
         else:
-            logger.info(f"No referenced thread IDs for follow_up, falling back to keyword-based prioritization")
-    
-    try:
-        GROK3_API_KEY = st.secrets["grok3key"]
-    except KeyError as e:
-        logger.error(f"Grok 3 API key missing: {str(e)}")
-        return {"top_thread_ids": [], "reason": "Missing API key"}
-    
+            logger.info(f"No referenced thread IDs for follow_up, proceeding with prioritization")
+
     prompt_builder = PromptBuilder()
     try:
         prompt = prompt_builder.build_prioritize(
@@ -380,7 +535,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     使用 Grok 3 API 生成流式回應，確保包含帖子 ID，優化 follow_up 意圖。
     """
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
+    filters = filters or {"min_replies": 0, "min_likes": 5}
     prompt_builder = PromptBuilder()
     
     context_summary = await summarize_context(conversation_context)
@@ -393,83 +548,83 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
-    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
-    max_replies_per_thread = 500 if intent == "follow_up" else 100
+    reply_count_prompt = f"""
+    你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。
+    僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
+    問題：{user_query}
+    意圖：{processing}
+    若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（200-500）。
+    若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
+    若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
+    默認：100 條。
+    輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
+    """
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    payload = {
+        "model": "grok-3-beta",
+        "messages": [{"role": "user", "content": reply_count_prompt}],
+        "max_tokens": 100,
+        "temperature": 0.5
+    }
     
+    max_replies_per_thread = 100
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
+                    logger.info(f"Grok selected replies_per_thread: {max_replies_per_thread}, reason: {result.get('reason', 'Default')}")
+                    if max_replies_per_thread == 0:
+                        logger.info(f"Skipping reply download due to replies_per_thread=0 for intent: {processing}")
+                else:
+                    logger.warning("Failed to determine replies_per_thread, using default 100")
+    except Exception as e:
+        logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
+    
+    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
-            logger.info(f"No referenced thread IDs in context, falling back to metadata")
-            yield f"未能找到與問題相關的上下文帖子。請提供更具體的帖子 ID 或關鍵詞！"
-            return
-        
-        # 過濾與關鍵詞相關的帖子
+            prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
+            referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
+            logger.info(f"No referenced IDs in context, using prioritized IDs: {referenced_thread_ids}")
+        prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
+        supplemental_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) not in map(str, referenced_thread_ids)}
+        thread_data = {**prioritized_thread_data, **supplemental_thread_data}
+        logger.info(f"Filtered thread_data for follow_up: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
+
+    filtered_thread_data = {}
+    total_replies_count = 0
+    for tid, data in thread_data.items():
+        replies = data.get("replies", [])
         keywords = extract_keywords(user_query)
-        filtered_thread_data = {}
-        for tid in referenced_thread_ids:
-            if tid in thread_data:
-                data = thread_data[tid]
-                replies = data.get("replies", [])
-                sorted_replies = sorted(
-                    [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "").lower() for kw in keywords)],
-                    key=lambda x: x.get("like_count", 0),
-                    reverse=True
-                )[:max_replies_per_thread]
-                
-                if not sorted_replies and replies:
-                    logger.info(f"No keyword-matched replies for thread_id={tid}, using raw replies")
-                    sorted_replies = sorted(
-                        [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],
-                        key=lambda x: x.get("like_count", 0),
-                        reverse=True
-                    )[:max_replies_per_thread]
-                
-                filtered_thread_data[tid] = {
-                    "thread_id": data["thread_id"],
-                    "title": data["title"],
-                    "no_of_reply": data.get("no_of_reply", 0),
-                    "last_reply_time": data.get("last_reply_time", 0),
-                    "like_count": data.get("like_count", 0),
-                    "dislike_count": data.get("dislike_count", 0),
-                    "replies": sorted_replies,
-                    "fetched_pages": data.get("fetched_pages", [])
-                }
+        sorted_replies = sorted(
+            [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "") for kw in keywords)],
+            key=lambda x: x.get("like_count", 0),
+            reverse=True
+        )[:max_replies_per_thread]
         
-        if not filtered_thread_data:
-            logger.info(f"No relevant thread data for follow_up, falling back to metadata")
-            yield f"未能找到與問題相關的上下文帖子。請提供更具體的帖子 ID 或關鍵詞！"
-            return
-    else:
-        filtered_thread_data = {}
-        total_replies_count = 0
-        for tid, data in thread_data.items():
-            replies = data.get("replies", [])
-            keywords = extract_keywords(user_query)
+        if not sorted_replies and replies:
+            logger.info(f"No keyword-matched replies for thread_id={tid}, using raw replies")
             sorted_replies = sorted(
-                [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "") for kw in keywords)],
+                [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],
                 key=lambda x: x.get("like_count", 0),
                 reverse=True
             )[:max_replies_per_thread]
-            
-            if not sorted_replies and replies:
-                logger.info(f"No keyword-matched replies for thread_id={tid}, using raw replies")
-                sorted_replies = sorted(
-                    [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],
-                    key=lambda x: x.get("like_count", 0),
-                    reverse=True
-                )[:max_replies_per_thread]
-            
-            total_replies_count += len(sorted_replies)
-            filtered_thread_data[tid] = {
-                "thread_id": data["thread_id"],
-                "title": data["title"],
-                "no_of_reply": data.get("no_of_reply", 0),
-                "last_reply_time": data.get("last_reply_time", 0),
-                "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
-                "replies": sorted_replies,
-                "fetched_pages": data.get("fetched_pages", [])
-            }
+        
+        total_replies_count += len(sorted_replies)
+        filtered_thread_data[tid] = {
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),
+            "last_reply_time": data.get("last_reply_time", 0),
+            "like_count": data.get("like_count", 0),
+            "dislike_count": data.get("dislike_count", 0),
+            "replies": sorted_replies,
+            "fetched_pages": data.get("fetched_pages", [])
+        }
     
     if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
         logger.info(f"No replies in filtered thread data, using metadata for summary due to intent: {intent}")
@@ -487,8 +642,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    min_tokens = 1200
-    max_tokens = 3600
+    min_tokens = 600
+    max_tokens = 3600  # 放寬到 3600（約 2400 字）
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
@@ -698,7 +853,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:MM:%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as e:
         logger.warning(f"Failed to convert timestamp {timestamp}: {str(e)}")
         return "1970-01-01 00:00:00"
@@ -707,7 +862,16 @@ def configure_lihkg_api_logger():
     """
     配置 lihkg_api 日誌，確保使用香港時區格式器。
     """
-    lihkg_logger = configure_logger("lihkg_api", "lihkg_api.log")
+    lihkg_logger = logging.getLogger('lihkg_api')
+    lihkg_logger.setLevel(logging.INFO)
+    lihkg_logger.handlers.clear()
+    lihkg_handler = logging.StreamHandler()
+    lihkg_handler.setFormatter(formatter)
+    lihkg_logger.addHandler(lihkg_handler)
+    file_handler = logging.FileHandler("lihkg_api.log")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    lihkg_logger.addHandler(file_handler)
 
 async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
@@ -738,35 +902,30 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         reply_limit = analysis.get("reply_limit", 0)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 0)
-        min_likes = filters.get("min_likes", 0 if cat_id in ["5", "15"] else 5)
+        min_likes = filters.get("min_likes", 5)
         sort_method = filters.get("sort", "popular")
         time_range = filters.get("time_range", "recent")
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
         intent = analysis.get("intent", "summarize_posts")
         
-        thread_data = []
-        rate_limit_info = []
-        candidate_threads = []
-        
-        if intent == "follow_up" and top_thread_ids:
-            logger.info(f"Follow-up intent, using referenced thread IDs: {top_thread_ids}")
-            candidate_threads = [
-                {"thread_id": tid, "title": "", "no_of_reply": 0, "like_count": 0}
-                for tid in top_thread_ids
-            ]
-        else:
+        if reply_limit == 0:
+            logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
+            thread_data = []
             initial_threads = []
             for page in range(1, 6):
                 result = await get_lihkg_topic_list(
                     cat_id=cat_id,
                     start_page=page,
-                    max_pages=1
+                    max_pages=1,
+                    request_counter=request_counter,
+                    last_reset=last_reset,
+                    rate_limit_until=rate_limit_until
                 )
                 request_counter = result.get("request_counter", request_counter)
                 last_reset = result.get("last_reset", last_reset)
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                rate_limit_info.extend(result.get("rate_limit_info", []))
+                rate_limit_info = result.get("rate_limit_info", [])
                 items = result.get("items", [])
                 for item in items:
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
@@ -781,7 +940,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             filtered_items = [
                 item for item in initial_threads
-                if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes) and str(item["thread_id"]) not in previous_thread_ids
+                if item.get("no_of_reply", 0) >= min_replies and int(item.get("like_count", 0)) >= min_likes and str(item["thread_id"]) not in previous_thread_ids
             ]
             
             for item in initial_threads:
@@ -807,9 +966,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
                     reverse=True
                 )
-                candidate_threads = sorted_items[:post_limit]
+                top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
             else:
-                if filtered_items:
+                if not top_thread_ids and filtered_items:
                     prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
@@ -818,75 +977,299 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                             reverse=True
                         )
-                        candidate_threads = sorted_items[:post_limit]
-                    else:
-                        candidate_threads = [
-                            item for item in filtered_items
-                            if str(item["thread_id"]) in map(str, top_thread_ids)
-                        ][:post_limit]
+                        top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+            
+            thread_data = [
+                st.session_state.thread_cache[str(tid)]["data"]
+                for tid in top_thread_ids
+                if str(tid) in st.session_state.thread_cache
+            ]
+            
+            return {
+                "selected_cat": selected_cat,
+                "thread_data": thread_data,
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis
+            }
+        
+        thread_data = []
+        rate_limit_info = []
+        initial_threads = []
+        
+        for page in range(1, 6):
+            result = await get_lihkg_topic_list(
+                cat_id=cat_id,
+                start_page=page,
+                max_pages=1,
+                request_counter=request_counter,
+                last_reset=last_reset,
+                rate_limit_until=rate_limit_until
+            )
+            request_counter = result.get("request_counter", request_counter)
+            last_reset = result.get("last_reset", last_reset)
+            rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+            rate_limit_info.extend(result.get("rate_limit_info", []))
+            items = result.get("items", [])
+            for item in items:
+                item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
+            initial_threads.extend(items)
+            if not items:
+                logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}")
+            if len(initial_threads) >= 150:
+                initial_threads = initial_threads[:150]
+                break
+            if progress_callback:
+                progress_callback(f"已抓取第 {page}/5 頁帖子", 0.1 + 0.2 * (page / 5))
         
         if progress_callback:
-            progress_callback("正在抓取帖子內容", 0.3)
+            progress_callback("正在篩選帖子", 0.3)
+        
+        filtered_items = []
+        for item in initial_threads:
+            thread_id = str(item["thread_id"])
+            no_of_reply = item.get("no_of_reply", 0)
+            like_count = int(item.get("like_count", 0))
+            
+            if no_of_reply >= min_replies and like_count >= min_likes and thread_id not in previous_thread_ids:
+                filtered_items.append(item)
+        
+        for item in initial_threads:
+            thread_id = str(item["thread_id"])
+            if thread_id not in st.session_state.thread_cache:
+                st.session_state.thread_cache[thread_id] = {
+                    "data": {
+                        "thread_id": thread_id,
+                        "title": item["title"],
+                        "no_of_reply": item.get("no_of_reply", 0),
+                        "last_reply_time": item["last_reply_time"],
+                        "like_count": item.get("like_count", 0),
+                        "dislike_count": item.get("dislike_count", 0),
+                        "replies": [],
+                        "fetched_pages": []
+                    },
+                    "timestamp": time.time()
+                }
+        
+        if intent == "fetch_dates":
+            if progress_callback:
+                progress_callback("正在處理日期相關資料", 0.4)
+            sorted_items = sorted(
+                filtered_items,
+                key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
+                reverse=True
+            )
+            top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+            logger.info(f"Fetch dates mode, selected threads: {top_thread_ids}")
+        else:
+            if not top_thread_ids and filtered_items:
+                if progress_callback:
+                    progress_callback("正在重新分析帖子選擇", 0.4)
+                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
+                if not isinstance(prioritization, dict):
+                    logger.error(f"Invalid prioritization result: {prioritization}")
+                    prioritization = {"top_thread_ids": [], "reason": "Invalid prioritization result"}
+                top_thread_ids = prioritization.get("top_thread_ids", [])
+                if not top_thread_ids:
+                    logger.warning(f"Prioritization failed: {prioritization.get('reason', 'Unknown reason')}")
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                        reverse=True
+                    )
+                    top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+                    logger.info(f"Fallback to popularity sorting: {top_thread_ids}")
+                else:
+                    logger.info(f"Grok prioritized threads: {top_thread_ids}")
+            
+            if not top_thread_ids and filtered_items:
+                if sort_method == "popular":
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                        reverse=True
+                    )
+                else:
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
+                        reverse=(time_range == "recent")
+                    )
+                top_thread_ids = [item["thread_id"] for item in sorted_items[:post_limit]]
+                logger.info(f"Generated top_thread_ids: {top_thread_ids}")
+        
+        if progress_callback:
+            progress_callback("正在決定抓取頁數", 0.45)
+        
+        try:
+            GROK3_API_KEY = st.secrets["grok3key"]
+        except KeyError as e:
+            logger.error(f"Grok 3 API key missing: {str(e)}")
+            pages_to_fetch = [1, 2]
+            page_type = "latest"
+        else:
+            page_prompt = f"""
+            你是資料抓取助手，請根據問題複雜度和意圖決定需要抓取的回覆頁數（1-5頁）以及頁數類型（最舊、中段、最新）。
+            僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
+            問題：{user_query}
+            意圖：{intent}
+            若問題需要深入分析（如情緒分析、意見分類、追問）或追蹤事件，建議多頁（3-5），偏向最新頁。
+            若問題簡單（如標題列出、日期提取），建議少頁（1-2），偏向最舊或中段頁。
+            若意圖為「follow_up」，優先抓取未下載的最新頁（3-5頁）。
+            若意圖為「general_query」或「introduce」，建議 0 頁。
+            默認：首頁+末頁（[1, 總頁數]）。
+            輸出格式：{{"pages": [頁數列表], "page_type": "oldest/middle/latest", "reason": "決定原因"}}
+            """
+            
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+            payload = {
+                "model": "grok-3-beta",
+                "messages": [{"role": "user", "content": page_prompt}],
+                "max_tokens": 100,
+                "temperature": 0.5
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        logger.info(f"Dynamic page selection raw response: {content}")
+                        try:
+                            result = json.loads(content)
+                            if not isinstance(result, dict) or "pages" not in result or "page_type" not in result:
+                                logger.warning(f"Invalid dynamic page response format: {content}")
+                                pages_to_fetch = [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
+                                page_type = "latest"
+                            else:
+                                pages_to_fetch = result.get("pages", [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2])[:5]
+                                page_type = result.get("page_type", "latest")
+                                logger.info(f"Dynamic pages selected: {pages_to_fetch}, type: {page_type}, reason: {result.get('reason', 'Default')}")
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Failed to parse dynamic page response: {content}, error: {str(e)}")
+                            pages_to_fetch = [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
+                            page_type = "latest"
+                    else:
+                        logger.warning(f"Dynamic page selection API failed: status={response.status}")
+                        pages_to_fetch = [1, 2, 3, 4, 5] if intent == "follow_up" else [1, 2]
+                        page_type = "latest"
+        
+        if intent in ["general_query", "introduce"]:
+            pages_to_fetch = []
+            logger.info(f"Skipping page fetch due to intent: {intent}")
+        
+        if progress_callback:
+            progress_callback("正在抓取候選帖子內容", 0.5)
+        
+        candidate_threads = []
+        referenced_thread_ids = top_thread_ids if intent == "follow_up" else []
+        if intent == "follow_up" and referenced_thread_ids:
+            candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, referenced_thread_ids)]
+            logger.info(f"Follow-up intent, prioritized candidate threads: {[item['thread_id'] for item in candidate_threads]}")
+        
+        if len(candidate_threads) < post_limit:
+            other_threads = [item for item in filtered_items if str(item["thread_id"]) not in map(str, referenced_thread_ids)]
+            candidate_threads.extend(other_threads[:post_limit - len(candidate_threads)])
+            logger.info(f"Supplemented candidate threads: {[item['thread_id'] for item in candidate_threads]}")
+        
+        excluded_threads = [item["thread_id"] for item in filtered_items if item["thread_id"] not in [c["thread_id"] for c in candidate_threads]]
+        logger.info(f"Excluded threads: {excluded_threads}, reason: not in top_thread_ids or insufficient priority")
         
         tasks = []
-        pages_to_fetch = [1, 2] if intent == "follow_up" else [1]
-        
-        for item in candidate_threads:
+        for idx, item in enumerate(candidate_threads):
             thread_id = str(item["thread_id"])
-            if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies") and intent != "follow_up":
-                thread_data.append(st.session_state.thread_cache[thread_id]["data"])
+            cache_key = thread_id
+            cache_data = st.session_state.thread_cache.get(cache_key, {}).get("data", {})
+            
+            if cache_data and cache_data.get("replies") and cache_data.get("fetched_pages"):
+                thread_data.append(cache_data)
                 continue
-            tasks.append(get_lihkg_thread_content(
-                thread_id=thread_id,
-                cat_id=cat_id,
-                max_replies=reply_limit,
-                fetch_last_pages=2 if intent == "follow_up" else 0,
-                specific_pages=pages_to_fetch,
-                start_page=1
-            ))
+            
+            specific_pages = pages_to_fetch
+            if intent == "follow_up" and cache_data.get("fetched_pages"):
+                total_pages = cache_data.get("total_pages", 10)
+                specific_pages = [p for p in range(1, total_pages + 1) if p not in cache_data["fetched_pages"]][:5]
+                if not specific_pages:
+                    specific_pages = pages_to_fetch
+                logger.info(f"Follow-up intent, fetching new pages for thread_id={thread_id}: {specific_pages}")
+            
+            tasks.append(
+                get_lihkg_thread_content(
+                    thread_id=thread_id,
+                    cat_id=cat_id,
+                    request_counter=request_counter,
+                    last_reset=last_reset,
+                    rate_limit_until=rate_limit_until,
+                    max_replies=reply_limit,
+                    fetch_last_pages=0,
+                    specific_pages=specific_pages,
+                    start_page=1
+                )
+            )
+            if progress_callback:
+                progress_callback(f"正在準備抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
         
-        if tasks:
-            content_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for idx, result in enumerate(content_results):
-                if isinstance(result, Exception):
-                    logger.warning(f"Failed to fetch content for thread {candidate_threads[idx]['thread_id']}: {str(result)}")
-                    continue
-                request_counter = result.get("request_counter", request_counter)
-                last_reset = result.get("last_reset", last_reset)
-                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                rate_limit_info.extend(result.get("rate_limit_info", []))
-                
-                thread_id = str(candidate_threads[idx]["thread_id"])
-                if result.get("title"):
-                    cleaned_replies = [
-                        {
-                            "reply_id": reply.get("reply_id"),
-                            "msg": clean_html(reply.get("msg", "[無內容]")),
-                            "like_count": reply.get("like_count", 0),
-                            "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
-                        }
-                        for reply in result.get("replies", [])
-                        if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
-                    ]
-                    thread_info = {
-                        "thread_id": thread_id,
-                        "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", 0),
-                        "last_reply_time": unix_to_readable(candidate_threads[idx].get("last_reply_time", "0")),
-                        "like_count": candidate_threads[idx].get("like_count", 0),
-                        "dislike_count": candidate_threads[idx].get("dislike_count", 0),
-                        "replies": cleaned_replies,
-                        "fetched_pages": result.get("fetched_pages", [])
-                    }
-                    thread_data.append(thread_info)
-                    st.session_state.thread_cache[thread_id] = {
-                        "data": thread_info,
-                        "timestamp": time.time()
-                    }
+        content_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for idx, content_result in enumerate(content_results):
+            if isinstance(content_result, Exception):
+                logger.warning(f"Failed to fetch thread_id={candidate_threads[idx]['thread_id']}: {str(content_result)}")
+                continue
+            
+            request_counter = content_result.get("request_counter", request_counter)
+            last_reset = content_result.get("last_reset", last_reset)
+            rate_limit_until = content_result.get("rate_limit_until", rate_limit_until)
+            rate_limit_info.extend(content_result.get("rate_limit_info", []))
+            
+            thread_id = str(candidate_threads[idx]["thread_id"])
+            replies = content_result.get("replies", [])
+            fetched_pages = content_result.get("fetched_pages", [])
+            total_pages = content_result.get("total_pages", 10)
+            
+            cleaned_replies = []
+            for reply in replies:
+                msg = clean_html(reply.get("msg", ""))
+                if msg and msg != "[無內容]":
+                    cleaned_replies.append({
+                        "msg": msg,
+                        "like_count": reply.get("like_count", 0),
+                        "dislike_count": reply.get("dislike_count", 0),
+                        "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                    })
+            
+            thread_data.append({
+                "thread_id": thread_id,
+                "title": candidate_threads[idx]["title"],
+                "no_of_reply": candidate_threads[idx].get("no_of_reply", 0),
+                "last_reply_time": candidate_threads[idx]["last_reply_time"],
+                "like_count": candidate_threads[idx].get("like_count", 0),
+                "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                "replies": cleaned_replies,
+                "fetched_pages": fetched_pages,
+                "total_pages": total_pages
+            })
+            
+            st.session_state.thread_cache[thread_id] = {
+                "data": {
+                    "thread_id": thread_id,
+                    "title": candidate_threads[idx]["title"],
+                    "no_of_reply": candidate_threads[idx].get("no_of_reply", 0),
+                    "last_reply_time": candidate_threads[idx]["last_reply_time"],
+                    "like_count": candidate_threads[idx].get("like_count", 0),
+                    "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                    "replies": cleaned_replies,
+                    "fetched_pages": fetched_pages,
+                    "total_pages": total_pages
+                },
+                "timestamp": time.time()
+            }
+            
+            if progress_callback:
+                progress_callback(f"已抓取帖子 {idx + 1}/{len(candidate_threads)}", 0.5 + 0.3 * ((idx + 1) / len(candidate_threads)))
         
         if progress_callback:
-            progress_callback("正在準備數據", 0.5)
+            progress_callback("帖子內容抓取完成", 0.8)
         
         return {
             "selected_cat": selected_cat,
@@ -899,11 +1282,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         }
     
     except Exception as e:
-        logger.error(f"Error in process_user_question: {str(e)}")
+        logger.error(f"Error processing user question: {str(e)}")
         return {
             "selected_cat": selected_cat,
             "thread_data": [],
-            "rate_limit_info": [{"message": f"Processing error: {str(e)}"}],
+            "rate_limit_info": [{"message": f"Processing error: {str(e)}", "until": rate_limit_until}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
