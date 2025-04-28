@@ -193,7 +193,18 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response", {}).get("items"):
-            filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
+            filtered_items = [
+                {
+                    "thread_id": item.get("thread_id"),
+                    "title": item.get("title"),
+                    "no_of_reply": item.get("total_replies", 0),
+                    "like_count": item.get("like_count", 0),
+                    "dislike_count": item.get("dislike_count", 0),
+                    "last_reply_time": item.get("last_reply_time", 0)
+                }
+                for item in data["response"]["items"]
+                if item.get("title") and item.get("no_of_reply", 0) > 0
+            ]
             items.extend(filtered_items)
             logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
@@ -211,7 +222,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
-    抓取指定帖子的回覆內容，支援動態頁數選擇。
+    抓取指定帖子的回覆內容，支援動態頁數選擇和並行抓取。
     """
     replies = []
     fetched_pages = []
@@ -232,11 +243,16 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         total_replies = response_data.get("total_replies", 0)
         total_pages = response_data.get("total_page", 1)
         
-        page_replies = response_data.get("item_data", [])
-        for reply in page_replies:
-            reply["like_count"] = int(reply.get("like_count", "0"))
-            reply["dislike_count"] = int(reply.get("dislike_count", "0"))
-            reply["reply_time"] = reply.get("reply_time", "0")
+        page_replies = [
+            {
+                "reply_id": reply.get("post_id"),
+                "msg": reply.get("msg"),
+                "like_count": int(reply.get("like_count", "0")),
+                "dislike_count": int(reply.get("dislike_count", "0")),
+                "reply_time": reply.get("reply_time", "0")
+            }
+            for reply in response_data.get("item_data", [])
+        ]
         replies.extend(page_replies[:max_replies])
         fetched_pages.append(1)
         logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(page_replies)}, total_stored={len(replies)}")
@@ -267,32 +283,48 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     
     pages_to_fetch = sorted(set(pages_to_fetch))
     
-    # 抓取後續頁面
-    for page in pages_to_fetch:
-        if len(replies) >= max_replies:
-            logger.info(f"Stopped fetching: thread_id={thread_id}, replies={len(replies)} reached max {max_replies}")
-            break
-        
+    # 並行抓取後續頁面
+    async def fetch_thread_page(page):
         url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/{page}?order=reply_time"
-        data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "fetch_thread_page")
+        data, page_rate_limit_info, _ = await api_client.get(url, f"fetch_thread_page_{page}")
         rate_limit_info.extend(page_rate_limit_info)
-        
         if data and data.get("response"):
-            page_replies = data["response"].get("item_data", [])
-            for reply in page_replies:
-                reply["like_count"] = int(reply.get("like_count", "0"))
-                reply["dislike_count"] = int(reply.get("dislike_count", "0"))
-                reply["reply_time"] = reply.get("reply_time", "0")
-            remaining_slots = max_replies - len(replies)
-            page_replies = page_replies[:remaining_slots]
-            replies.extend(page_replies)
-            fetched_pages.append(page)
+            page_replies = [
+                {
+                    "reply_id": reply.get("post_id"),
+                    "msg": reply.get("msg"),
+                    "like_count": int(reply.get("like_count", "0")),
+                    "dislike_count": int(reply.get("dislike_count", "0")),
+                    "reply_time": reply.get("reply_time", "0")
+                }
+                for reply in data["response"].get("item_data", [])
+            ]
             logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
-        await asyncio.sleep(1)
+            return page, page_replies
+        return page, []
+
+    tasks = [fetch_thread_page(page) for page in pages_to_fetch if len(replies) < max_replies]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning(f"Failed to fetch page for thread_id={thread_id}: {str(result)}")
+            continue
+        page, page_replies = result
+        remaining_slots = max_replies - len(replies)
+        page_replies = page_replies[:remaining_slots]
+        replies.extend(page_replies)
+        fetched_pages.append(page)
+    
+    logger.info(f"Completed fetching thread_id={thread_id}, total_replies={len(replies)}, pages={fetched_pages}")
     
     return {
-        "replies": replies, "title": thread_title, "total_replies": total_replies,
-        "total_pages": total_pages, "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
+        "replies": replies,
+        "title": thread_title,
+        "total_replies": total_replies,
+        "total_pages": total_pages,
+        "fetched_pages": fetched_pages,
+        "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
         "rate_limit_until": rate_limit_data["rate_limit_until"]
