@@ -141,10 +141,79 @@ def clean_response(response):
         logger.info(f"Cleaned response: removed post_id strings")
     return cleaned
 
+async def extract_keywords_with_grok(query, conversation_context=None):
+    """
+    使用 Grok 3 API 提取查詢中的關鍵詞，支援粵語和繁體中文，過濾無意義詞語。
+    
+    Args:
+        query (str): 用戶查詢
+        conversation_context (list): 對話歷史，格式為 [{"role": "user", "content": "..."}, ...]
+    
+    Returns:
+        dict: {"keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"], "reason": "提取邏輯說明"}
+    """
+    conversation_context = conversation_context or []
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+    except KeyError as e:
+        logger.error(f"Grok 3 API key missing: {str(e)}")
+        return {"keywords": [], "reason": "Missing API key"}
+
+    prompt = f"""
+你是一個專業的語義分析助手，專注於從用戶查詢中提取關鍵詞，以繁體中文回答。請分析以下查詢，提取 1-3 個最相關的核心關鍵詞（僅保留名詞或核心動詞，過濾掉無意義的停用詞如「的」「是」「個」等）。關鍵詞應反映查詢的主題或意圖，適合用於 LIHKG 論壇的帖子搜索或匹配。特別注意處理粵語俚語（如「講D咩」「點解」），將其視為無意義詞語並過濾。請以 JSON 格式返回結果，並提供提取邏輯的簡要解釋。
+
+查詢："{query}"
+對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+
+返回格式：
+{{
+  "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
+  "reason": "提取邏輯說明"
+}}
+"""
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    payload = {
+        "model": "grok-3-beta",
+        "messages": [
+            {"role": "system", "content": "你是 LIHKG 論壇的語義分析助手，以繁體中文回答，專注於理解用戶意圖並提取關鍵詞。"},
+            *conversation_context,
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 200,
+        "temperature": 0.3,  # 確保輸出穩定
+        "think_mode": True  # 啟用 Think Mode 增強推理
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status != 200:
+                        logger.warning(f"Keyword extraction failed: status={response.status}, attempt={attempt + 1}")
+                        continue
+                    data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"Keyword extraction failed: missing choices, attempt={attempt + 1}")
+                        continue
+                    result = json.loads(data["choices"][0]["message"]["content"])
+                    keywords = result.get("keywords", [])
+                    reason = result.get("reason", "No reason provided")
+                    logger.info(f"Keywords extracted: {keywords}, reason: {reason}")
+                    return {"keywords": keywords[:3], "reason": reason}
+        except Exception as e:
+            logger.warning(f"Keyword extraction error: {str(e)}, attempt={attempt + 1}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+                continue
+            logger.error(f"Keyword extraction failed after {max_retries} attempts")
+            return {"keywords": [], "reason": f"Extraction failed: {str(e)}"}
+
 def extract_keywords(query):
     """
-    提取查詢中的關鍵詞，過濾停用詞。
+    保留原函數作為後備，實際上不再使用。
     """
+    logger.warning("Deprecated: extract_keywords called, use extract_keywords_with_grok instead")
     stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問"}
     words = re.findall(r'\w+', query)
     return [word for word in words if word not in stop_words][:3]
@@ -194,7 +263,7 @@ async def summarize_context(conversation_context):
 def extract_relevant_thread(conversation_context, query):
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None
-    query_keywords = set(extract_keywords(query))
+    query_keywords = set(extract_keywords(query))  # 保留原函數作為後備
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
@@ -214,6 +283,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
+    # 使用 Grok 3 提取關鍵詞
+    keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+    query_keywords = keyword_result["keywords"]
+    logger.info(f"Extracted keywords with Grok: {query_keywords}, reason: {keyword_result['reason']}")
+    
     # 檢查是否為追問
     thread_id, thread_title, last_response = extract_relevant_thread(conversation_context, user_query)
     if thread_id:
@@ -227,13 +301,13 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "data_type": "replies",
             "post_limit": 1,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": extract_keywords(user_query)},
+            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": query_keywords},
             "processing": "follow_up",
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
             "needs_advanced_analysis": False,
-            "reason": f"Matched follow-up query to thread_id={thread_id}, title={thread_title}",
-            "theme_keywords": extract_keywords(user_query)
+            "reason": f"Matched follow-up query to thread_id={thread_id}, title={thread_title}, keywords: {query_keywords}",
+            "theme_keywords": query_keywords
         }
     
     # 非追問情況下提煉對話歷史主題
@@ -241,9 +315,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     historical_theme = context_summary.get("theme", "general")
     historical_keywords = context_summary.get("keywords", [])
     
-    # 提取關鍵詞
-    query_words = set(extract_keywords(user_query))
-    is_vague = len(query_words) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
+    # 判斷問題是否模糊
+    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
     
     # 增強追問檢測
     is_follow_up = False
@@ -262,8 +335,9 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     referenced_titles.append(thread.get("title", ""))
         
         # 檢查語義關聯
-        common_words = query_words.intersection(set(extract_keywords(last_user_query + " " + last_response)))
-        title_overlap = any(any(kw in title for kw in query_words) for title in referenced_titles)
+        last_query_keywords = (await extract_keywords_with_grok(last_user_query, conversation_context))["keywords"]
+        common_words = set(query_keywords).intersection(set(last_query_keywords))
+        title_overlap = any(any(kw in title for kw in query_keywords) for title in referenced_titles)
         explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
         
         if len(common_words) >= 1 or title_overlap or explicit_follow_up:
@@ -274,8 +348,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     if is_follow_up and not thread_id:
         intent = "search_keywords"
         reason = "檢測到追問意圖，但無歷史帖子 ID匹配，回退到關鍵詞搜索"
-        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-        theme_keywords = extract_keywords(user_query) or historical_keywords
+        theme = query_keywords[0] if query_keywords else historical_theme
+        theme_keywords = query_keywords or historical_keywords
         logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}")
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
@@ -385,15 +459,15 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     
                     # 根據意圖設置參數
                     theme = historical_theme if is_vague else "general"
-                    theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
+                    theme_keywords = historical_keywords if is_vague else query_keywords
                     post_limit = 10
                     reply_limit = 0
                     data_type = "both"
                     processing = intent
                     min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
-                        theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
-                        theme_keywords = extract_keywords(user_query) or historical_keywords
+                        theme = query_keywords[0] if query_keywords else historical_theme
+                        theme_keywords = query_keywords or historical_keywords
                     elif intent == "monitor_events":
                         theme = "事件追蹤"
                     elif intent == "classify_opinions":
@@ -613,9 +687,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     filtered_thread_data = {}
     total_replies_count = 0
+    # 使用 Grok 3 提取關鍵詞
+    keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+    keywords = keyword_result["keywords"]
+    logger.info(f"Extracted keywords for filtering: {keywords}, reason: {keyword_result['reason']}")
+    
     for tid, data in thread_data.items():
         replies = data.get("replies", [])
-        keywords = extract_keywords(user_query)
         # 放寬關鍵詞匹配：僅要求包含任一關鍵詞，忽略大小寫
         sorted_replies = sorted(
             [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw.lower() in r.get("msg", "").lower() for kw in keywords)],
@@ -976,7 +1054,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     cat_id=cat_id,
                     max_replies=reply_limit,
                     fetch_last_pages=0,
-                    specific_pages=[],  # 移除 specific_pages 限制
+                    specific_pages=[],
                     start_page=1
                 ))
             
@@ -1025,13 +1103,16 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             # 補充搜索其他相關帖子
             if len(thread_data) == 1 and intent == "follow_up":
                 logger.info("Single thread matched, searching for supplemental threads")
+                keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+                theme_keywords = keyword_result["keywords"]
+                logger.info(f"Supplemental search keywords: {theme_keywords}, reason: {keyword_result['reason']}")
+                
                 supplemental_result = await get_lihkg_topic_list(
                     cat_id=cat_id,
                     start_page=1,
                     max_pages=2
                 )
                 supplemental_threads = supplemental_result.get("items", [])
-                theme_keywords = analysis.get("theme_keywords", [])
                 filtered_supplemental = [
                     item for item in supplemental_threads
                     if str(item["thread_id"]) not in top_thread_ids
