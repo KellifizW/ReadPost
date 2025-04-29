@@ -191,6 +191,24 @@ async def summarize_context(conversation_context):
         logger.warning(f"Context summarization error: {str(e)}")
         return {"theme": "general", "keywords": []}
 
+def extract_relevant_thread(conversation_context, query):
+    """
+    從對話歷史中提取與追問相關的帖子 ID 和標題。
+    """
+    if not conversation_context or len(conversation_context) < 2:
+        return None, None, None
+    
+    query_keywords = set(extract_keywords(query))
+    for message in reversed(conversation_context):
+        if message["role"] == "assistant" and "帖子 ID" in message["content"]:
+            matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
+            for thread_id, title in matches:
+                title_keywords = set(extract_keywords(title))
+                if query_keywords.intersection(title_keywords):
+                    logger.info(f"Follow-up query matched: thread_id={thread_id}, title={title}")
+                    return thread_id, title, message["content"]
+    return None, None, None
+
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
     分析用戶問題，使用語義嵌入識別意圖，放寬語義要求，動態設置篩選條件。
@@ -198,7 +216,29 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    # 提煉對話歷史主題
+    # 檢查是否為追問
+    thread_id, thread_title, last_response = extract_relevant_thread(conversation_context, user_query)
+    if thread_id:
+        logger.info(f"Follow-up intent confirmed: thread_id={thread_id}, title={thread_title}")
+        min_likes = 0 if cat_id in ["5", "15"] else 5
+        return {
+            "direct_response": False,
+            "intent": "follow_up",
+            "theme": thread_title or "追問相關主題",
+            "category_ids": [cat_id],
+            "data_type": "replies",
+            "post_limit": 1,
+            "reply_limit": 200,
+            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": extract_keywords(user_query)},
+            "processing": "follow_up",
+            "candidate_thread_ids": [thread_id],
+            "top_thread_ids": [thread_id],
+            "needs_advanced_analysis": False,
+            "reason": f"Matched follow-up query to thread_id={thread_id}, title={thread_title}",
+            "theme_keywords": extract_keywords(user_query)
+        }
+    
+    # 非追問情況下提煉對話歷史主題
     context_summary = await summarize_context(conversation_context)
     historical_theme = context_summary.get("theme", "general")
     historical_keywords = context_summary.get("keywords", [])
@@ -236,14 +276,12 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 is_follow_up = False
     
     # 若無歷史 ID 且檢測到追問，改用 search_keywords
-    # 在 analyze_and_screen 函數中，修改追問檢測回退到 search_keywords 的部分
     if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
         reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
         logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}") 
-        # 時事台和財經台放寬篩選條件
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
@@ -362,7 +400,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     reply_limit = 0
                     data_type = "both"
                     processing = intent
-                    # 時事台和財經台放寬篩選條件
                     min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
                         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
@@ -408,7 +445,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            # 時事台和財經台放寬篩選條件
             min_likes = 0 if cat_id in ["5", "15"] else 5
             return {
                 "direct_response": False,
@@ -518,7 +554,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
     
-    context_summary = await summarize_context(conversation_context)
+    # 僅在非 follow_up 意圖下提煉上下文
+    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
+    context_summary = {"theme": "general", "keywords": []}
+    if intent != "follow_up":
+        context_summary = await summarize_context(conversation_context)
     historical_theme = context_summary.get("theme", "general")
     
     try:
@@ -532,7 +572,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。
     僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
     問題：{user_query}
-    意圖：{processing}
+    意圖：{intent}
     若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（200-500）。
     若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
     若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
@@ -557,13 +597,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
                     logger.info(f"Grok selected replies_per_thread: {max_replies_per_thread}, reason: {result.get('reason', 'Default')}")
                     if max_replies_per_thread == 0:
-                        logger.info(f"Skipping reply download due to replies_per_thread=0 for intent: {processing}")
+                        logger.info(f"Skipping reply download due to replies_per_thread=0 for intent: {intent}")
                 else:
                     logger.warning("Failed to determine replies_per_thread, using default 100")
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
-    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     if intent == "follow_up":
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
         if not referenced_thread_ids:
@@ -623,7 +662,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_replies_count = 0
     
     min_tokens = 1200
-    max_tokens = 3600  # 放寬到 3600（約 2400 字）
+    max_tokens = 3600
     if total_replies_count == 0:
         target_tokens = min_tokens
     else:
@@ -879,6 +918,74 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         top_thread_ids = analysis.get("top_thread_ids", []) if not is_advanced else []
         previous_thread_ids = previous_thread_ids or []
         intent = analysis.get("intent", "summarize_posts")
+        
+        if intent == "follow_up" and top_thread_ids:
+            logger.info(f"Follow-up intent with top_thread_ids: {top_thread_ids}")
+            thread_data = []
+            tasks = []
+            for thread_id in top_thread_ids:
+                thread_id_str = str(thread_id)
+                if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
+                    thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
+                    continue
+                tasks.append(get_lihkg_thread_content(
+                    thread_id=thread_id_str,
+                    cat_id=cat_id,
+                    max_replies=reply_limit,
+                    fetch_last_pages=0,
+                    specific_pages=[1],
+                    start_page=1
+                ))
+            
+            if tasks:
+                content_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for idx, result in enumerate(content_results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Failed to fetch content for thread {top_thread_ids[idx]}: {str(result)}")
+                        continue
+                    request_counter = result.get("request_counter", request_counter)
+                    last_reset = result.get("last_reset", last_reset)
+                    rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+                    rate_limit_info = result.get("rate_limit_info", [])
+                    
+                    thread_id = str(top_thread_ids[idx])
+                    if result.get("title"):
+                        cleaned_replies = [
+                            {
+                                "reply_id": reply.get("reply_id"),
+                                "msg": clean_html(reply.get("msg", "[無內容]")),
+                                "like_count": reply.get("like_count", 0),
+                                "dislike_count": reply.get("dislike_count", 0),
+                                "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                            }
+                            for reply in result.get("replies", [])
+                            if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                        ]
+                        thread_info = {
+                            "thread_id": thread_id,
+                            "title": result.get("title"),
+                            "no_of_reply": result.get("total_replies", 0),
+                            "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                            "like_count": result.get("like_count", 0),
+                            "dislike_count": result.get("dislike_count", 0),
+                            "replies": cleaned_replies,
+                            "fetched_pages": result.get("fetched_pages", [])
+                        }
+                        thread_data.append(thread_info)
+                        st.session_state.thread_cache[thread_id] = {
+                            "data": thread_info,
+                            "timestamp": time.time()
+                        }
+            
+            return {
+                "selected_cat": selected_cat,
+                "thread_data": thread_data,
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis
+            }
         
         if reply_limit == 0:
             logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
