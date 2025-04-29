@@ -1,6 +1,6 @@
 """
 Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
-僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
+僅負責用戶交互、聊天記錄管理和後台日誌記錄。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
 """
@@ -62,15 +62,15 @@ def render_new_conversation_button():
         st.session_state.last_user_query = None
         st.session_state.awaiting_response = False
         logger.info("New conversation started, session state cleared")
-        st.rerun()  # 修改為 st.rerun()
+        st.rerun()
 
 async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
     """
     # 設置 Streamlit 頁面配置，默認非 wide 模式
-    st.set_page_config(page_title="LIHKG 聊天介面", layout="centered")
-    st.title("LIHKG 聊天介面")
+    st.set_page_config(page_title="LIHKG Chat Bot", layout="centered")
+    st.title("LIHKG Chat Bot")
 
     # 初始化 session_state
     if "chat_history" not in st.session_state:
@@ -95,29 +95,37 @@ async def main():
         st.session_state.page_reload_logged = True
         logger.info(f"Page reloaded, last_selected_cat: {st.session_state.get('last_selected_cat', 'None')}")
 
-    # 分類選擇
+    # 記錄速率限制狀態到後台
+    logger.info(f"Rate limit status: request_counter={st.session_state.request_counter}, "
+                f"last_reset={datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}, "
+                f"rate_limit_until={datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else 'No limit'}")
+
+    # 分類選擇與新對話按鈕並排
     cat_id_map = {
         "吹水台": 1, "熱門台": 2, "時事台": 5, "上班台": 14,
         "財經台": 15, "成人台": 29, "創意台": 31
     }
 
-    # 添加 selectbox 的 key 和 on_change 回調
     def on_category_change():
         logger.info(f"Category selectbox changed to {st.session_state.cat_select}")
 
-    try:
-        selected_cat = st.selectbox(
-            "選擇分類",
-            options=list(cat_id_map.keys()),
-            index=0,
-            key="cat_select",
-            on_change=on_category_change
-        )
-        cat_id = str(cat_id_map[selected_cat])
-    except Exception as e:
-        logger.error(f"Category selection error: {str(e)}")
-        selected_cat = "吹水台"
-        cat_id = "1"
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        try:
+            selected_cat = st.selectbox(
+                "選擇分類",
+                options=list(cat_id_map.keys()),
+                index=0,
+                key="cat_select",
+                on_change=on_category_change
+            )
+            cat_id = str(cat_id_map[selected_cat])
+        except Exception as e:
+            logger.error(f"Category selection error: {str(e)}")
+            selected_cat = "吹水台"
+            cat_id = "1"
+    with col2:
+        render_new_conversation_button()
 
     # 檢測分類變化並清理對話歷史
     if st.session_state.last_selected_cat != selected_cat:
@@ -136,16 +144,6 @@ async def main():
 
     # 記錄選單選擇
     logger.info(f"Selected category: {selected_cat}, cat_id: {cat_id}")
-
-    # 新對話按鈕
-    st.markdown("#### 操作")
-    render_new_conversation_button()
-
-    # 顯示速率限制狀態
-    st.markdown("#### 速率限制狀態")
-    st.markdown(f"- 請求計數: {st.session_state.request_counter}")
-    st.markdown(f"- 最後重置: {datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
-    st.markdown(f"- 速率限制解除: {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else '無限制'}")
 
     # 顯示聊天記錄
     for idx, chat in enumerate(st.session_state.chat_history):
@@ -168,7 +166,7 @@ async def main():
                 st.error(error_message)
             st.session_state.chat_history.append({"question": user_query, "answer": error_message})
             return
-        
+
         logger.info(f"User query: {user_query}, category: {selected_cat}, cat_id: {cat_id}")
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -212,13 +210,9 @@ async def main():
                 st.session_state.awaiting_response = False
                 return
 
-            # 重置聊天記錄
-            if "last_user_query" not in st.session_state:
-                st.session_state.last_user_query = None
-            if not st.session_state.last_user_query or len(set(user_query.split()).intersection(set(st.session_state.last_user_query.split()))) < 2:
-                st.session_state.chat_history = [{"question": user_query, "answer": ""}]
-                st.session_state.thread_cache = {}
-                st.session_state.last_user_query = user_query
+            # 追加新問題到聊天歷史
+            st.session_state.chat_history.append({"question": user_query, "answer": ""})
+            st.session_state.last_user_query = user_query
 
             # 分析問題
             update_progress("正在分析問題意圖", 0.1)
@@ -244,10 +238,13 @@ async def main():
                 progress_callback=update_progress
             )
 
-            # 更新速率限制
+            # 更新速率限制並記錄到後台
             st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
             st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
             st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
+            logger.info(f"Updated rate limit status: request_counter={st.session_state.request_counter}, "
+                        f"last_reset={datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}, "
+                        f"rate_limit_until={datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else 'No limit'}")
 
             # 顯示回應
             response = ""
@@ -280,6 +277,7 @@ async def main():
                 copy_container.empty()  # 清空佔位符
                 render_copy_button(response, key=f"copy_new_{len(st.session_state.chat_history)}")
 
+            # 更新聊天歷史中的回應
             st.session_state.chat_history[-1]["answer"] = response
             st.session_state.conversation_context.append({"role": "user", "content": user_query})
             st.session_state.conversation_context.append({"role": "assistant", "content": response})
@@ -297,7 +295,7 @@ async def main():
             logger.error(f"Error processing query: {user_query}, error: {str(e)}")
             with st.chat_message("assistant"):
                 st.markdown(error_message)
-            st.session_state.chat_history.append({"question": user_query, "answer": error_message})
+            st.session_state.chat_history[-1]["answer"] = error_message
             update_progress("處理失敗", 1.0)
             time.sleep(0.5)
             status_text.empty()
