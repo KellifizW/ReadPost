@@ -654,7 +654,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     thread_id=tid,
                     cat_id=cat_id,
                     max_replies=max_replies_per_thread - data["total_fetched_replies"],
-                    fetch_last_pages=0,
+                    fetch_last_pages=2,
                     specific_pages=additional_pages,
                     start_page=max(data["fetched_pages"], default=0) + 1
                 )
