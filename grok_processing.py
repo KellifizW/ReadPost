@@ -10,7 +10,7 @@ import streamlit as st
 import os
 import hashlib
 import pytz
-from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
+from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content, get_lihkg_thread_content_batch
 from logging_config import configure_logger
 
 # 設置香港時區
@@ -625,8 +625,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     for tid, data in thread_data.items():
         replies = data.get("replies", [])
         keywords = extract_keywords(user_query)
+        # 放寬關鍵詞匹配：僅要求包含任一關鍵詞，忽略大小寫
         sorted_replies = sorted(
-            [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw in r.get("msg", "") for kw in keywords)],
+            [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw.lower() in r.get("msg", "").lower() for kw in keywords)],
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
@@ -648,9 +649,47 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "like_count": data.get("like_count", 0),
             "dislike_count": data.get("dislike_count", 0),
             "replies": sorted_replies,
-            "fetched_pages": data.get("fetched_pages", [])
+            "fetched_pages": data.get("fetched_pages", []),
+            "total_fetched_replies": len(sorted_replies)  # 新增日誌字段
         }
     
+    # 若回覆不足，嘗試抓取更多頁數
+    if total_replies_count < max_replies_per_thread and intent == "follow_up":
+        logger.info(f"Replies insufficient: {total_replies_count}/{max_replies_per_thread}, fetching more pages")
+        for tid, data in filtered_thread_data.items():
+            if data["total_fetched_replies"] < max_replies_per_thread:
+                additional_pages = [page + 1 for page in data["fetched_pages"]][-2:]  # 抓取後續2頁
+                content_result = await get_lihkg_thread_content(
+                    thread_id=tid,
+                    cat_id=cat_id,
+                    max_replies=max_replies_per_thread - data["total_fetched_replies"],
+                    fetch_last_pages=0,
+                    specific_pages=additional_pages,
+                    start_page=max(data["fetched_pages"], default=0) + 1
+                )
+                if content_result.get("replies"):
+                    cleaned_replies = [
+                        {
+                            "reply_id": reply.get("reply_id"),
+                            "msg": clean_html(reply.get("msg", "[無內容]")),
+                            "like_count": reply.get("like_count", 0),
+                            "dislike_count": reply.get("dislike_count", 0),
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                        }
+                        for reply in content_result.get("replies", [])
+                        if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                    ]
+                    data["replies"].extend(cleaned_replies)
+                    data["fetched_pages"].extend(content_result.get("fetched_pages", []))
+                    data["total_fetched_replies"] += len(cleaned_replies)
+                    total_replies_count += len(cleaned_replies)
+                    logger.info(f"Additional fetch for thread_id={tid}, pages={content_result.get('fetched_pages', [])}, new_replies={len(cleaned_replies)}")
+                    # 更新緩存
+                    st.session_state.thread_cache[tid] = {
+                        "data": data,
+                        "timestamp": time.time()
+                    }
+
     if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
         logger.info(f"No replies in filtered thread data, using metadata for summary due to intent: {intent}")
         filtered_thread_data = {
@@ -662,7 +701,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
                 "replies": [],
-                "fetched_pages": data.get("fetched_pages", [])
+                "fetched_pages": data.get("fetched_pages", []),
+                "total_fetched_replies": 0
             } for tid, data in thread_data.items()
         }
         total_replies_count = 0
@@ -700,7 +740,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
                 "replies": data["replies"][:max_replies_per_thread],
-                "fetched_pages": data.get("fetched_pages", [])
+                "fetched_pages": data.get("fetched_pages", []),
+                "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
             } for tid, data in filtered_thread_data.items()
         }
         for data in filtered_thread_data.values():
@@ -778,7 +819,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                         "title": data["title"],
                                         "no_of_reply": data.get("no_of_reply", 0),
                                         "like_count": data.get("like_count", 0),
-                                        "replies": data["replies"][:5]
+                                        "replies": data["replies"][:5],
+                                        "total_fetched_replies": len(data["replies"][:5])
                                     } for tid, data in filtered_thread_data.items()
                                 }
                                 prompt = prompt_builder.build_response(
@@ -834,7 +876,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "like_count": data.get("like_count", 0),
                                 "dislike_count": data.get("dislike_count", 0),
                                 "replies": data["replies"][:max_replies_per_thread],
-                                "fetched_pages": data.get("fetched_pages", [])
+                                "fetched_pages": data.get("fetched_pages", []),
+                                "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
                             } for tid, data in filtered_thread_data.items()
                         }
                         for data in filtered_thread_data.values():
@@ -928,6 +971,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if intent == "follow_up" and top_thread_ids:
             logger.info(f"Follow-up intent with top_thread_ids: {top_thread_ids}")
             thread_data = []
+            rate_limit_info = []
+            
+            # 抓取主要帖子回覆
             tasks = []
             for thread_id in top_thread_ids:
                 thread_id_str = str(thread_id)
@@ -939,7 +985,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     cat_id=cat_id,
                     max_replies=reply_limit,
                     fetch_last_pages=0,
-                    specific_pages=[1],
+                    specific_pages=[],  # 移除 specific_pages 限制
                     start_page=1
                 ))
             
@@ -952,7 +998,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     request_counter = result.get("request_counter", request_counter)
                     last_reset = result.get("last_reset", last_reset)
                     rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                    rate_limit_info = result.get("rate_limit_info", [])
+                    rate_limit_info.extend(result.get("rate_limit_info", []))
                     
                     thread_id = str(top_thread_ids[idx])
                     if result.get("title"):
@@ -975,13 +1021,89 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "like_count": result.get("like_count", 0),
                             "dislike_count": result.get("dislike_count", 0),
                             "replies": cleaned_replies,
-                            "fetched_pages": result.get("fetched_pages", [])
+                            "fetched_pages": result.get("fetched_pages", []),
+                            "total_fetched_replies": len(cleaned_replies)  # 新增日誌字段
                         }
                         thread_data.append(thread_info)
                         st.session_state.thread_cache[thread_id] = {
                             "data": thread_info,
                             "timestamp": time.time()
                         }
+                        logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, expected_replies={reply_limit}")
+            
+            # 補充搜索其他相關帖子
+            if len(thread_data) == 1 and intent == "follow_up":
+                logger.info("Single thread matched, searching for supplemental threads")
+                supplemental_result = await get_lihkg_topic_list(
+                    cat_id=cat_id,
+                    start_page=1,
+                    max_pages=2
+                )
+                supplemental_threads = supplemental_result.get("items", [])
+                theme_keywords = analysis.get("theme_keywords", [])
+                filtered_supplemental = [
+                    item for item in supplemental_threads
+                    if str(item["thread_id"]) not in top_thread_ids
+                    and any(kw.lower() in item["title"].lower() for kw in theme_keywords)
+                ][:1]  # 最多補充1個帖子
+                request_counter = supplemental_result.get("request_counter", request_counter)
+                last_reset = supplemental_result.get("last_reset", last_reset)
+                rate_limit_until = supplemental_result.get("rate_limit_until", rate_limit_until)
+                rate_limit_info.extend(supplemental_result.get("rate_limit_info", []))
+                
+                supplemental_tasks = []
+                for item in filtered_supplemental:
+                    thread_id = str(item["thread_id"])
+                    supplemental_tasks.append(get_lihkg_thread_content(
+                        thread_id=thread_id,
+                        cat_id=cat_id,
+                        max_replies=reply_limit,
+                        fetch_last_pages=0,
+                        specific_pages=[],
+                        start_page=1
+                    ))
+                
+                if supplemental_tasks:
+                    supplemental_results = await asyncio.gather(*supplemental_tasks, return_exceptions=True)
+                    for idx, result in enumerate(supplemental_results):
+                        if isinstance(result, Exception):
+                            logger.warning(f"Failed to fetch supplemental thread {filtered_supplemental[idx]['thread_id']}: {str(result)}")
+                            continue
+                        request_counter = result.get("request_counter", request_counter)
+                        last_reset = result.get("last_reset", last_reset)
+                        rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+                        rate_limit_info.extend(result.get("rate_limit_info", []))
+                        
+                        thread_id = str(filtered_supplemental[idx]["thread_id"])
+                        if result.get("title"):
+                            cleaned_replies = [
+                                {
+                                    "reply_id": reply.get("reply_id"),
+                                    "msg": clean_html(reply.get("msg", "[無內容]")),
+                                    "like_count": reply.get("like_count", 0),
+                                    "dislike_count": reply.get("dislike_count", 0),
+                                    "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                                }
+                                for reply in result.get("replies", [])
+                                if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                            ]
+                            thread_info = {
+                                "thread_id": thread_id,
+                                "title": result.get("title"),
+                                "no_of_reply": result.get("total_replies", 0),
+                                "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                                "like_count": filtered_supplemental[idx].get("like_count", 0),
+                                "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
+                                "replies": cleaned_replies,
+                                "fetched_pages": result.get("fetched_pages", []),
+                                "total_fetched_replies": len(cleaned_replies)
+                            }
+                            thread_data.append(thread_info)
+                            st.session_state.thread_cache[thread_id] = {
+                                "data": thread_info,
+                                "timestamp": time.time()
+                            }
+                            logger.info(f"Supplemental thread fetched: thread_id={thread_id}, replies={len(cleaned_replies)}")
             
             return {
                 "selected_cat": selected_cat,
@@ -1090,7 +1212,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "request_counter": request_counter,
                 "last_reset": last_reset,
                 "rate_limit_until": rate_limit_until,
-                "analysis": analysis
+                "analysis": analysis PRIM
             }
         
         thread_data = []
@@ -1177,7 +1299,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             progress_callback("正在抓取帖子內容", 0.3)
         
         tasks = []
-        pages_to_fetch = [] if intent in ["summarize_posts", "list_titles", "recommend_threads"] else [1]
+        pages_to_fetch = [] if intent in ["summarize_posts", "list_titles", "recommend_threads"] else []
         
         for item in candidate_threads:
             thread_id = str(item["thread_id"])
@@ -1225,13 +1347,15 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "like_count": candidate_threads[idx].get("like_count", 0),
                         "dislike_count": candidate_threads[idx].get("dislike_count", 0),
                         "replies": cleaned_replies,
-                        "fetched_pages": result.get("fetched_pages", [])
+                        "fetched_pages": result.get("fetched_pages", []),
+                        "total_fetched_replies": len(cleaned_replies)
                     }
                     thread_data.append(thread_info)
                     st.session_state.thread_cache[thread_id] = {
                         "data": thread_info,
                         "timestamp": time.time()
                     }
+                    logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, expected_replies={reply_limit}")
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
