@@ -142,7 +142,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
         return {"keywords": [], "reason": "Missing API key"}
 
     prompt = f"""
-你是一個專業的語義分析助手，專注於從用戶查詢中提取關鍵詞，以繁體中文回答。請分析以下查詢，提取 1-3 個最相關的核心關鍵詞（僅保留名詞或核心動詞，過濾掉無意義的停用詞如「的」「是」「個」等）。關鍵詞應反映查詢的主題或意圖，適合用於 LIHKG 論壇的帖子搜索或匹配。特別注意處理粵語俚語（如「講D咩」「點解」），將其視為無意義詞語並過濾。請以 JSON 格式返回結果，並提供提取邏輯的簡要解釋。
+你是一個專業的語義分析助手，專注於從用戶查詢中提取關鍵詞，以繁體中文回答。請分析以下查詢，提取 1-3 個最相關的核心關鍵詞（僅保留名詞或核心動詞，過濾掉無意義的停用詞如「的」「是」「個」等）。關鍵詞應反映查詢的主題或意圖，適合用於 LIHKG 論壇的帖子搜索或匹配。特別注意處理粵語俚語（如「講D咩」「點解」），將其視為無意義詞語並過濾。請以 JSON 格式返回結果，並提供提取邏輯的簡要解釋（70字以內）。
 
 查詢："{query}"
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
@@ -150,7 +150,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
 返回格式：
 {{
   "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
-  "reason": "提取邏輯說明"
+  "reason": "提取邏輯說明（70字以內）"
 }}
 """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -161,7 +161,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 200,
+        "max_tokens": 150,  # 減少 max_tokens 以加快運行
         "temperature": 0.3
     }
 
@@ -178,17 +178,17 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                         logger.warning(f"Keyword extraction failed: missing choices, attempt={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    keywords = result.get("keywords", [])
-                    reason = result.get("reason", "No reason provided")
+                    keywords = result.get("keywords", [])[:3]
+                    reason = result.get("reason", "No reason provided")[:70]  # 限制 reason 長度
                     logger.info(f"Keywords extracted: {keywords}, reason: {reason}")
-                    return {"keywords": keywords[:3], "reason": reason}
+                    return {"keywords": keywords, "reason": reason}
         except Exception as e:
             logger.warning(f"Keyword extraction error: {str(e)}, attempt={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
             logger.error(f"Keyword extraction failed after {max_retries} attempts")
-            return {"keywords": [], "reason": f"Extraction failed: {str(e)}"}
+            return {"keywords": [], "reason": f"Extraction failed: {str(e)}"[:70]}
 
 async def summarize_context(conversation_context):
     """
