@@ -650,13 +650,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
-    # 轉換 thread_data 格式為字典
-    if isinstance(thread_data, list):
-        thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
-        logger.info(f"Converted thread_data from list to dict: {list(thread_data_dict.keys())}")
+    # 嚴格檢查 thread_data 格式
+    if not isinstance(thread_data, dict):
+        if isinstance(thread_data, list):
+            thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
+            logger.info(f"Converted thread_data from list to dict: {list(thread_data_dict.keys())}")
+        else:
+            logger.error(f"Invalid thread_data format: expected dict or list, got {type(thread_data)}")
+            yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
+            return
     else:
         thread_data_dict = thread_data
         logger.info(f"thread_data is already a dict: {list(thread_data_dict.keys())}")
+    
+    # 驗證 thread_data_dict 的值是否為字典
+    for tid, data in thread_data_dict.items():
+        if not isinstance(data, dict):
+            logger.error(f"Invalid thread_data entry for tid={tid}: expected dict, got {type(data)}")
+            yield f"錯誤：無效的 thread_data 條目（tid={tid}，類型={type(data)}）。請聯繫支持。"
+            return
     
     if intent in ["follow_up", "fetch_thread_by_id"]:
         referenced_thread_ids = []
@@ -762,7 +774,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "replies": [],
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": 0
-            } for tid, data in thread_data_dict.items()
+            } for tid, data in filtered_thread_data.items()
         }
         total_replies_count = 0
     
@@ -949,7 +961,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:M:%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         logger.warning(f"Failed to convert timestamp {timestamp}")
         return "1970-01-01 00:00:00"
@@ -971,7 +983,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             logger.warning(f"Rate limit active until {rate_limit_until}")
             return {
                 "selected_cat": selected_cat,
-                "thread_data": [],
+                "thread_data": {},
                 "rate_limit_info": [{"message": "Rate limit active", "until": rate_limit_until}],
                 "request_counter": request_counter,
                 "last_reset": last_reset,
@@ -1054,6 +1066,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         }
                         logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, expected_replies={reply_limit}")
             
+            # 將 thread_data 從列表轉換為字典
+            thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
+            logger.info(f"Converted thread_data to dict for {intent}: {list(thread_data_dict.keys())}")
+            
             if len(thread_data) == 1 and intent == "follow_up":
                 logger.info("Single thread matched, searching for supplemental threads")
                 keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
@@ -1123,7 +1139,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "fetched_pages": result.get("fetched_pages", []),
                                 "total_fetched_replies": len(cleaned_replies)
                             }
-                            thread_data.append(thread_info)
+                            thread_data_dict[thread_id] = thread_info
                             st.session_state.thread_cache[thread_id] = {
                                 "data": thread_info,
                                 "timestamp": time.time()
@@ -1132,7 +1148,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             return {
                 "selected_cat": selected_cat,
-                "thread_data": thread_data,
+                "thread_data": thread_data_dict,
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": last_reset,
@@ -1143,7 +1159,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         # 以下為原始程式碼未修改部分，僅展示上下文
         if reply_limit == 0:
             logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
-            thread_data = []
+            thread_data = {}
             initial_threads = []
             for page in range(1, 6):
                 result = await get_lihkg_topic_list(
@@ -1211,11 +1227,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             for thread_id in top_thread_ids:
                 thread_id_str = str(thread_id)
                 if thread_id_str in st.session_state.thread_cache:
-                    thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
+                    thread_data[thread_id_str] = st.session_state.thread_cache[thread_id_str]["data"]
                 else:
                     for item in filtered_items:
                         if str(item["thread_id"]) == thread_id_str:
-                            thread_data.append({
+                            thread_info = {
                                 "thread_id": thread_id_str,
                                 "title": item["title"],
                                 "no_of_reply": item.get("no_of_reply", 0),
@@ -1224,9 +1240,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "dislike_count": item.get("dislike_count", 0),
                                 "replies": [],
                                 "fetched_pages": []
-                            })
+                            }
+                            thread_data[thread_id_str] = thread_info
                             st.session_state.thread_cache[thread_id_str] = {
-                                "data": thread_data[-1],
+                                "data": thread_info,
                                 "timestamp": time.time()
                             }
                             break
@@ -1241,7 +1258,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
-        thread_data = []
+        thread_data = {}
         rate_limit_info = []
         candidate_threads = []
         
@@ -1328,7 +1345,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         for item in candidate_threads:
             thread_id = str(item["thread_id"])
             if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
-                thread_data.append(st.session_state.thread_cache[thread_id]["data"])
+                thread_data[thread_id] = st.session_state.thread_cache[thread_id]["data"]
                 continue
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -1374,7 +1391,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(cleaned_replies)
                     }
-                    thread_data.append(thread_info)
+                    thread_data[thread_id] = thread_info
                     st.session_state.thread_cache[thread_id] = {
                         "data": thread_info,
                         "timestamp": time.time()
@@ -1398,7 +1415,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         logger.error(f"Error in process_user_question: {str(e)}")
         return {
             "selected_cat": selected_cat,
-            "thread_data": [],
+            "thread_data": {},
             "rate_limit_info": [{"message": f"Processing error: {str(e)}"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
