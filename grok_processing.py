@@ -956,9 +956,6 @@ def configure_lihkg_api_logger():
     configure_logger("lihkg_api", "lihkg_api.log")
 
 async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
-    """
-    處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數，支援fetch_thread_by_id意圖。
-    """
     configure_lihkg_api_logger()
     try:
         logger.info(f"Processing user question: {user_query}, category: {selected_cat}")
@@ -992,6 +989,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_data = []
             rate_limit_info = []
             
+            # 初始化 candidate_threads 為字典列表，與其他意圖一致
+            candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
+            
             tasks = []
             for thread_id in top_thread_ids:
                 thread_id_str = str(thread_id)
@@ -1011,14 +1011,14 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 content_results = await asyncio.gather(*tasks, return_exceptions=True)
                 for idx, result in enumerate(content_results):
                     if isinstance(result, Exception):
-                        logger.warning(f"Failed to fetch content for thread {top_thread_ids[idx]}: {str(result)}")
+                        logger.warning(f"Failed to fetch content for thread {candidate_threads[idx]['thread_id']}: {str(result)}")
                         continue
                     request_counter = result.get("request_counter", request_counter)
                     last_reset = result.get("last_reset", last_reset)
                     rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                     rate_limit_info.extend(result.get("rate_limit_info", []))
                     
-                    thread_id = str(top_thread_ids[idx])
+                    thread_id = str(candidate_threads[idx]["thread_id"])
                     if result.get("title"):
                         cleaned_replies = [
                             {
@@ -1135,6 +1135,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
+        # 以下為原始程式碼未修改部分，僅展示上下文
         if reply_limit == 0:
             logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
             thread_data = []
@@ -1242,7 +1243,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if top_thread_ids:
             logger.info(f"Using top_thread_ids from analysis: {top_thread_ids}")
             candidate_threads = [
-                {"thread_id": tid, "title": "", "no_of_reply": 0, "like_count": 0}
+                {"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0}
                 for tid in top_thread_ids
             ]
         else:
