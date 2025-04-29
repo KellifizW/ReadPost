@@ -290,7 +290,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             page_replies = page_replies[:remaining_slots]
             replies.extend(page_replies)
             fetched_pages.append(page)
-            logger_info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
+            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
         await asyncio.sleep(1)
     
     return {
