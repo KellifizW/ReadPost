@@ -708,7 +708,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_replies_count = 0
     
     min_tokens = 1200
-    max_tokens = 1938
+    max_tokens = 3600
     target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.85 if total_replies_count else min_tokens
     target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"Dynamic max_tokens: {target_tokens}, based on total_replies_count: {total_replies_count}")
@@ -808,10 +808,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     continue
                     
                     logger.info(f"Response attempt {retry_count + 1} completed: length={len(response_content)}")
-                    if len(response_content) >= target_tokens * 0.8:
+                    if len(response_content) >= target_tokens * 0.9:
                         logger.info(f"Response sufficient: length={len(response_content)}, target={target_tokens}")
                         return
-                    elif len(response_content) < target_tokens * 0.5 and retry_count < max_retries - 1:
+                    elif len(response_content) < target_tokens * 0.8 and retry_count < max_retries - 1:
                         logger.warning(f"Response too short: length={len(response_content)}, target={target_tokens}, retrying")
                         simplified_thread_data = {
                             tid: {
@@ -840,7 +840,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         logger.info(f"Response acceptable: length={len(response_content)}, target={target_tokens}")
                         return
             
-            if len(response_content) < target_tokens * 0.5:
+            if len(response_content) < target_tokens * 0.8:
                 logger.error(f"Response generation failed: final length={len(response_content)}")
                 yield f"錯誤：生成回應過短（長度 {len(response_content)}）。請稍後重試。"
         except Exception as e:
