@@ -1,5 +1,3 @@
-# grok_processing.py
-
 import aiohttp
 import asyncio
 import json
