@@ -102,7 +102,7 @@ class PromptBuilder:
 
 def clean_html(text):
     """
-    清理 HTML 標籤，保留短文本和表情符號，記錄圖片過濾為 INFO。
+    清理 HTML 標籤，保留短文本和表情符號，僅記錄表情符號和空內容日誌。
     """
     if not isinstance(text, str):
         text = str(text)
@@ -120,7 +120,7 @@ def clean_html(text):
                 logger.info(f"HTML cleaning: replaced with [表情符號], original: {original_text}")
             elif any(ext in original_text.lower() for ext in ['.webp', '.jpg', '.png']):
                 text = "[圖片]"
-                logger.info(f"HTML cleaning: filtered image, original: {original_text}")
+                # 不記錄圖片過濾日誌
             else:
                 logger.info(f"HTML cleaning: empty after cleaning, original: {original_text}")
                 text = "[無內容]"
@@ -201,15 +201,6 @@ async def extract_keywords_with_grok(query, conversation_context=None):
             logger.error(f"Keyword extraction failed after {max_retries} attempts")
             return {"keywords": [], "reason": f"Extraction failed: {str(e)}"}
 
-def extract_keywords(query):
-    """
-    保留原函數作為後備，實際上不再使用。
-    """
-    logger.warning("Deprecated: extract_keywords called, use extract_keywords_with_grok instead")
-    stop_words = {"的", "是", "在", "有", "什麼", "嗎", "請問"}
-    words = re.findall(r'\w+', query)
-    return [word for word in words if word not in stop_words][:3]
-
 async def summarize_context(conversation_context):
     """
     使用 Grok 3 提煉對話歷史主題。
@@ -252,16 +243,24 @@ async def summarize_context(conversation_context):
         logger.warning(f"Context summarization error: {str(e)}")
         return {"theme": "general", "keywords": []}
 
-def extract_relevant_thread(conversation_context, query):
+async def extract_relevant_thread(conversation_context, query):
+    """
+    從對話歷史中提取相關帖子，增強匹配邏輯以支持部分關鍵詞匹配。
+    """
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None
-    query_keywords = set(extract_keywords(query))
+    
+    query_keyword_result = await extract_keywords_with_grok(query, conversation_context)
+    query_keywords = set(query_keyword_result["keywords"])
+    
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
-                title_keywords = set(extract_keywords(title))
+                title_keyword_result = await extract_keywords_with_grok(title, conversation_context)
+                title_keywords = set(title_keyword_result["keywords"])
                 common_keywords = query_keywords.intersection(title_keywords)
+                # 放寬匹配條件：允許部分關鍵詞匹配或標題包含查詢關鍵詞
                 if common_keywords or any(kw.lower() in title.lower() for kw in query_keywords):
                     logger.info(f"Follow-up matched: thread_id={thread_id}, title={title}, keywords={common_keywords}")
                     return thread_id, title, message["content"]
@@ -279,7 +278,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
     query_keywords = keyword_result["keywords"]
     logger.info(f"Extracted keywords with Grok: {query_keywords}, reason: {keyword_result['reason']}")
     
-    thread_id, thread_title, last_response = extract_relevant_thread(conversation_context, user_query)
+    thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
     if thread_id:
         logger.info(f"Follow-up intent confirmed: thread_id={thread_id}, title={thread_title}")
         min_likes = 0 if cat_id in ["5", "15"] else 5
@@ -644,7 +643,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     if intent == "follow_up":
         referenced_thread_ids = []
-        thread_id, thread_title, last_response = extract_relevant_thread(conversation_context, user_query)
+        thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
         if thread_id:
             referenced_thread_ids = [thread_id]
         else:
@@ -927,7 +926,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%Y-%m-%d %H:M:%S")
     except (ValueError, TypeError):
         logger.warning(f"Failed to convert timestamp {timestamp}")
         return "1970-01-01 00:00:00"
