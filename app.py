@@ -1,5 +1,5 @@
 """
-Streamlit 聊天介面模組，提供 LIHKG 數據查 查詢和顯示功能。
+Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
 僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
@@ -68,8 +68,8 @@ async def main():
     """
     主函數，初始化 Streamlit 應用，處理用戶輸入並渲染聊天介面。
     """
-    # 設置 Streamlit 頁面配置
-    st.set_page_config(page_title="LIHKG 聊天介面", layout="wide")
+    # 設置 Streamlit 頁面配置，默認非 wide 模式
+    st.set_page_config(page_title="LIHKG 聊天介面", layout="centered")
     st.title("LIHKG 聊天介面")
 
     # 初始化 session_state
