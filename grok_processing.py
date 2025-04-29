@@ -540,6 +540,43 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤: 缺少 API 密鑰"
         return
     
+    # 定義意圖對應的字數範圍（從 prompts.json 提取，字數已提高40%）
+    intent_word_ranges = {
+        "list": (140, 280),
+        "summarize": (420, 700),
+        "sentiment": (420, 700),
+        "compare": (560, 840),
+        "introduce": (70, 140),
+        "general": (280, 560),
+        "themed": (420, 700),
+        "fetch_dates": (280, 560),
+        "search_keywords": (420, 700),
+        "recommend_threads": (280, 560),
+        "monitor_events": (420, 700),
+        "classify_opinions": (420, 700),
+        "follow_up": (700, 2100),
+        "fetch_thread_by_id": (420, 700)
+    }
+    
+    # 獲取當前意圖的字數範圍，默認 summarize
+    word_min, word_max = intent_word_ranges.get(intent, (420, 700))
+    # 轉換為 token 範圍（1 token ≈ 0.8 字）
+    min_tokens = int(word_min / 0.8)
+    max_tokens = int(word_max / 0.8)
+    # 設置目標 token 為字數範圍中位數，考慮回覆數影響
+    target_tokens = int((min_tokens + max_tokens) / 2)
+    total_replies_count = sum(len(data.get("replies", [])) for data in (thread_data if isinstance(thread_data, list) else thread_data.values()))
+    if total_replies_count:
+        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9
+    target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
+    logger.info(f"Dynamic target_tokens: {target_tokens}, min_tokens={min_tokens}, max_tokens={max_tokens}, total_replies_count={total_replies_count}")
+
+    # 設置 max_tokens 為 3600
+    max_tokens_limit = 3600
+    target_tokens = min(target_tokens, max_tokens_limit)
+    logger.info(f"Final target_tokens: {target_tokens}, max_tokens_limit={max_tokens_limit}")
+
+    # 動態決定回覆數量
     reply_count_prompt = f"""
     你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。
     僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
@@ -707,12 +744,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    min_tokens = 1200
-    max_tokens = 3600
-    target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.85 if total_replies_count else min_tokens
-    target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
-    logger.info(f"Dynamic max_tokens: {target_tokens}, based on total_replies_count: {total_replies_count}")
-    
     thread_id_prompt = "\n請在回應中明確包含相關帖子 ID，格式為 [帖子 ID: xxx]。禁止包含 [post_id: ...] 格式。"
     prompt = prompt_builder.build_response(
         intent=intent,
@@ -751,9 +782,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             thread_data=list(filtered_thread_data.values()),
             filters=filters
         ) + thread_id_prompt
-        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.85
-        target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
-        logger.info(f"Truncated prompt: original_length={prompt_length}, new_length={len(prompt)}, new_max_tokens: {target_tokens}")
+        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9
+        target_tokens = min(max(int(target_tokens), min_tokens), max_tokens_limit)
+        logger.info(f"Truncated prompt: original_length={prompt_length}, new_length={len(prompt)}, new_target_tokens: {target_tokens}")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
@@ -772,83 +803,44 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(f"Starting response generation for query: {user_query}")
     
     response_content = ""
-    retry_count = 0
-    max_retries = 2
-    
     async with aiohttp.ClientSession() as session:
         try:
-            while retry_count < max_retries:
-                logger.info(f"Attempt {retry_count + 1}/{max_retries} for response generation")
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    if response.status != 200:
-                        logger.warning(f"Response generation failed: status={response.status}, attempt={retry_count + 1}")
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            await asyncio.sleep(2)
-                        continue
-                    
-                    async for line in response.content:
-                        if line and not line.isspace():
-                            line_str = line.decode('utf-8').strip()
-                            if line_str == "data: [DONE]":
-                                break
-                            if line_str.startswith("data:"):
-                                try:
-                                    chunk = json.loads(line_str[6:])
-                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        if "###" in content and ("Content Moderation" in content or "Blocked" in content):
-                                            logger.warning(f"Content moderation detected: {content}")
-                                            raise ValueError("Content moderation detected")
-                                        cleaned_content = clean_response(content)
-                                        response_content += cleaned_content
-                                        yield cleaned_content
-                                except json.JSONDecodeError:
-                                    logger.warning(f"JSON decode error in stream chunk")
-                                    continue
-                    
-                    logger.info(f"Response attempt {retry_count + 1} completed: length={len(response_content)}")
-                    if len(response_content) >= target_tokens * 0.9:
-                        logger.info(f"Response sufficient: length={len(response_content)}, target={target_tokens}")
-                        return
-                    elif len(response_content) < target_tokens * 0.8 and retry_count < max_retries - 1:
-                        logger.warning(f"Response too short: length={len(response_content)}, target={target_tokens}, retrying")
-                        simplified_thread_data = {
-                            tid: {
-                                "thread_id": data["thread_id"],
-                                "title": data["title"],
-                                "no_of_reply": data.get("no_of_reply", 0),
-                                "like_count": data.get("like_count", 0),
-                                "replies": data["replies"][:5],
-                                "total_fetched_replies": len(data["replies"][:5])
-                            } for tid, data in filtered_thread_data.items()
-                        }
-                        prompt = prompt_builder.build_response(
-                            intent=intent,
-                            query=user_query,
-                            selected_cat=selected_cat,
-                            conversation_context=conversation_context,
-                            metadata=metadata,
-                            thread_data=list(simplified_thread_data.values()),
-                            filters=filters
-                        ) + thread_id_prompt
-                        payload["messages"][-1]["content"] = prompt
-                        payload["max_tokens"] = target_tokens
-                        retry_count += 1
-                        await asyncio.sleep(2)
-                    else:
-                        logger.info(f"Response acceptable: length={len(response_content)}, target={target_tokens}")
-                        return
-            
-            if len(response_content) < target_tokens * 0.8:
-                logger.error(f"Response generation failed: final length={len(response_content)}")
-                yield f"錯誤：生成回應過短（長度 {len(response_content)}）。請稍後重試。"
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status != 200:
+                    logger.error(f"Response generation failed: status={response.status}")
+                    yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
+                    return
+                
+                async for line in response.content:
+                    if line and not line.isspace():
+                        line_str = line.decode('utf-8').strip()
+                        if line_str == "data: [DONE]":
+                            break
+                        if line_str.startswith("data:"):
+                            try:
+                                chunk = json.loads(line_str[6:])
+                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    if "###" in content and ("Content Moderation" in content or "Blocked" in content):
+                                        logger.warning(f"Content moderation detected: {content}")
+                                        raise ValueError("Content moderation detected")
+                                    cleaned_content = clean_response(content)
+                                    response_content += cleaned_content
+                                    yield cleaned_content
+                            except json.JSONDecodeError:
+                                logger.warning(f"JSON decode error in stream chunk")
+                                continue
+                
+                logger.info(f"Response completed: length={len(response_content)}, target={target_tokens}")
+                if len(response_content) < target_tokens * 0.9:
+                    logger.warning(f"Response too short: length={len(response_content)}, target={target_tokens}")
+                    yield f"\n提示：回應長度（{len(response_content)}）未達預期（{target_tokens}）。請嘗試更具體的查詢或稍後重試。"
         except Exception as e:
             logger.error(f"Response generation failed: {str(e)}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
-            
+
 def clean_cache(max_age=3600):
     current_time = time.time()
     expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
@@ -859,7 +851,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:MM:SS")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         logger.warning(f"Failed to convert timestamp {timestamp}")
         return "1970-01-01 00:00:00"
