@@ -62,7 +62,7 @@ def render_new_conversation_button():
         st.session_state.last_user_query = None
         st.session_state.awaiting_response = False
         logger.info("New conversation started, session state cleared")
-        st.experimental_rerun()
+        st.rerun()  # 修改為 st.rerun()
 
 async def main():
     """
@@ -268,7 +268,8 @@ async def main():
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
                     reason=analysis.get("reason", ""),
-                    filters=analysis.get("filters", {})
+                    filters=analysis.get("filters", {}),
+                    cat_id=cat_id
                 ):
                     response += chunk
                     grok_container.markdown(response)
