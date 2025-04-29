@@ -236,11 +236,13 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 is_follow_up = False
     
     # 若無歷史 ID 且檢測到追問，改用 search_keywords
+    # 在 analyze_and_screen 函數中，修改追問檢測回退到 search_keywords 的部分
     if is_follow_up and not referenced_thread_ids:
         intent = "search_keywords"
         reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
+        logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}")  # 添加日誌
         # 時事台和財經台放寬篩選條件
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
