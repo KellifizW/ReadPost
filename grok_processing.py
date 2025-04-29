@@ -589,7 +589,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     """
-    使用 Grok 3 API 生成流式回應，確保包含帖子 ID。
+    使用 Grok 3 API 生成流式回應，確保包含帖子 ID，使用字數過濾回覆。
     """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
@@ -660,24 +660,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     filtered_thread_data = {}
     total_replies_count = 0
-    keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
-    keywords = keyword_result["keywords"]
-    logger.info(f"Extracted keywords for filtering: {keywords}, reason: {keyword_result['reason']}")
     
     for tid, data in thread_data.items():
         replies = data.get("replies", [])
+        # 過濾回覆：保留字數 > 7 且非 [圖片]/[無內容]，按 like_count 排序
+        filtered_replies = [
+            r for r in replies
+            if r.get("msg") and len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
+        ]
         sorted_replies = sorted(
-            [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]" and any(kw.lower() in r.get("msg", "").lower() for kw in keywords)],
+            filtered_replies,
             key=lambda x: x.get("like_count", 0),
             reverse=True
         )[:max_replies_per_thread]
-        
-        if not sorted_replies and replies:
-            sorted_replies = sorted(
-                [r for r in replies if r.get("msg") and r.get("msg") != "[無內容]"],
-                key=lambda x: x.get("like_count", 0),
-                reverse=True
-            )[:max_replies_per_thread]
         
         total_replies_count += len(sorted_replies)
         filtered_thread_data[tid] = {
@@ -691,6 +686,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "fetched_pages": data.get("fetched_pages", []),
             "total_fetched_replies": len(sorted_replies)
         }
+        logger.info(f"Filtered replies for thread_id={tid}: {len(sorted_replies)}/{len(replies)}")
     
     if total_replies_count < max_replies_per_thread and intent == "follow_up":
         logger.info(f"Replies insufficient: {total_replies_count}/{max_replies_per_thread}, fetching more pages")
@@ -717,11 +713,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         for reply in content_result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
                     ]
-                    data["replies"].extend(cleaned_replies)
+                    filtered_additional_replies = [
+                        r for r in cleaned_replies
+                        if len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
+                    ]
+                    data["replies"].extend(filtered_additional_replies)
                     data["fetched_pages"].extend(content_result.get("fetched_pages", []))
-                    data["total_fetched_replies"] += len(cleaned_replies)
-                    total_replies_count += len(cleaned_replies)
-                    logger.info(f"Additional fetch for thread_id={tid}, pages={content_result.get('fetched_pages', [])}, new_replies={len(cleaned_replies)}")
+                    data["total_fetched_replies"] += len(filtered_additional_replies)
+                    total_replies_count += len(filtered_additional_replies)
+                    logger.info(f"Additional fetch for thread_id={tid}, pages={content_result.get('fetched_pages', [])}, new_replies={len(filtered_additional_replies)}")
                     st.session_state.thread_cache[tid] = {
                         "data": data,
                         "timestamp": time.time()
