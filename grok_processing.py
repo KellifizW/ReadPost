@@ -61,7 +61,7 @@ class PromptBuilder:
         data = config["data"].format(
             thread_titles=json.dumps(thread_titles or [], ensure_ascii=False),
             metadata=json.dumps(metadata or [], ensure_ascii=False),
-            thread_data=json.dumps(thread_data or {}, ensure_ascii=False)
+            thread_data=json.dumps(thread_data or [], ensure_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
         return prompt
@@ -91,7 +91,7 @@ class PromptBuilder:
         )
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
-            thread_data=json.dumps(thread_data or {}, ensure_ascii=False),
+            thread_data=json.dumps(thread_data or [], ensure_ascii=False),
             filters=json.dumps(filters, ensure_ascii=False)
         )
         prompt = f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
@@ -650,18 +650,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
-    # 嚴格檢查 thread_data 格式
-    if not isinstance(thread_data, dict):
-        if isinstance(thread_data, list):
-            thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
-            logger.info(f"Converted thread_data from list to dict: {list(thread_data_dict.keys())}")
-        else:
-            logger.error(f"Invalid thread_data format: expected dict or list, got {type(thread_data)}")
-            yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
-            return
-    else:
+    # 檢查 thread_data 格式並轉換為字典
+    logger.info(f"thread_data type: {type(thread_data)}, content: {thread_data}")
+    thread_data_dict = {}
+    if isinstance(thread_data, list):
+        thread_data_dict = {str(data["thread_id"]): data for data in thread_data if isinstance(data, dict) and "thread_id" in data}
+        logger.info(f"Converted thread_data from list to dict: {list(thread_data_dict.keys())}")
+    elif isinstance(thread_data, dict):
         thread_data_dict = thread_data
         logger.info(f"thread_data is already a dict: {list(thread_data_dict.keys())}")
+    else:
+        logger.error(f"Invalid thread_data format: expected list or dict, got {type(thread_data)}")
+        yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
+        return
     
     # 驗證 thread_data_dict 的值是否為字典
     for tid, data in thread_data_dict.items():
@@ -689,8 +690,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
         
-        prioritized_thread_data = {tid: data for tid, data in thread_data_dict.items() if str(tid) in map(str, referenced_thread_ids)}
-        supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if str(tid) not in map(str, referenced_thread_ids)}
+        prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
+        supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if tid not in map(str, referenced_thread_ids)}
         thread_data_dict = {**prioritized_thread_data, **supplemental_thread_data}
         logger.info(f"Filtered thread_data for {intent}: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
 
@@ -698,30 +699,38 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     total_replies_count = 0
     
     for tid, data in thread_data_dict.items():
-        replies = data.get("replies", [])
-        filtered_replies = [
-            r for r in replies
-            if r.get("msg") and len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
-        ]
-        sorted_replies = sorted(
-            filtered_replies,
-            key=lambda x: x.get("like_count", 0),
-            reverse=True
-        )[:max_replies_per_thread]
-        
-        total_replies_count += len(sorted_replies)
-        filtered_thread_data[tid] = {
-            "thread_id": data["thread_id"],
-            "title": data["title"],
-            "no_of_reply": data.get("no_of_reply", 0),
-            "last_reply_time": data.get("last_reply_time", 0),
-            "like_count": data.get("like_count", 0),
-            "dislike_count": data.get("dislike_count", 0),
-            "replies": sorted_replies,
-            "fetched_pages": data.get("fetched_pages", []),
-            "total_fetched_replies": len(sorted_replies)
-        }
-        logger.info(f"Filtered replies for thread_id={tid}: {len(sorted_replies)}/{len(replies)}")
+        try:
+            replies = data.get("replies", [])
+            if not isinstance(replies, list):
+                logger.warning(f"Invalid replies format for thread_id={tid}: expected list, got {type(replies)}")
+                replies = []
+            filtered_replies = [
+                r for r in replies
+                if isinstance(r, dict) and r.get("msg") and len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
+            ]
+            sorted_replies = sorted(
+                filtered_replies,
+                key=lambda x: x.get("like_count", 0),
+                reverse=True
+            )[:max_replies_per_thread]
+            
+            total_replies_count += len(sorted_replies)
+            filtered_thread_data[tid] = {
+                "thread_id": data.get("thread_id", tid),
+                "title": data.get("title", ""),
+                "no_of_reply": data.get("no_of_reply", 0),
+                "last_reply_time": data.get("last_reply_time", 0),
+                "like_count": data.get("like_count", 0),
+                "dislike_count": data.get("dislike_count", 0),
+                "replies": sorted_replies,
+                "fetched_pages": data.get("fetched_pages", []),
+                "total_fetched_replies": len(sorted_replies)
+            }
+            logger.info(f"Filtered replies for thread_id={tid}: {len(sorted_replies)}/{len(replies)}")
+        except Exception as e:
+            logger.error(f"Error processing thread_id={tid}: {str(e)}")
+            yield f"錯誤：處理帖子（tid={tid}）失敗（{str(e)}）。請聯繫支持。"
+            return
     
     if total_replies_count < max_replies_per_thread and intent in ["follow_up", "fetch_thread_by_id"]:
         logger.info(f"Replies insufficient: {total_replies_count}/{max_replies_per_thread}, fetching more pages")
@@ -791,7 +800,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         selected_cat=selected_cat,
         conversation_context=conversation_context,
         metadata=metadata,
-        thread_data=filtered_thread_data,
+        thread_data=list(filtered_thread_data.values()),
         filters=filters
     ) + thread_id_prompt
     
@@ -812,15 +821,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
             } for tid, data in filtered_thread_data.items()
         }
-        for data in filtered_thread_data.values():
-            total_replies_count += len(data["replies"])
+        total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
         prompt = prompt_builder.build_response(
             intent=intent,
             query=user_query,
             selected_cat=selected_cat,
             conversation_context=conversation_context,
             metadata=metadata,
-            thread_data=filtered_thread_data,
+            thread_data=list(filtered_thread_data.values()),
             filters=filters
         ) + thread_id_prompt
         target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens)
@@ -893,7 +901,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 selected_cat=selected_cat,
                                 conversation_context=conversation_context,
                                 metadata=metadata,
-                                thread_data=simplified_thread_data,
+                                thread_data=list(simplified_thread_data.values()),
                                 filters=filters
                             ) + thread_id_prompt
                             payload["messages"][-1]["content"] = prompt
@@ -920,15 +928,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
                             } for tid, data in filtered_thread_data.items()
                         }
-                        for data in filtered_thread_data.values():
-                            total_replies_count += len(data["replies"])
+                        total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
                         prompt = prompt_builder.build_response(
                             intent=intent,
                             query=user_query,
                             selected_cat=selected_cat,
                             conversation_context=conversation_context,
                             metadata=metadata,
-                            thread_data=filtered_thread_data,
+                            thread_data=list(filtered_thread_data.values()),
                             filters=filters
                         ) + thread_id_prompt
                         payload["messages"][-1]["content"] = prompt
@@ -983,7 +990,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             logger.warning(f"Rate limit active until {rate_limit_until}")
             return {
                 "selected_cat": selected_cat,
-                "thread_data": {},
+                "thread_data": [],
                 "rate_limit_info": [{"message": "Rate limit active", "until": rate_limit_until}],
                 "request_counter": request_counter,
                 "last_reset": last_reset,
@@ -1006,7 +1013,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_data = []
             rate_limit_info = []
             
-            # 初始化 candidate_threads 為字典列表，與其他意圖一致
             candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
             
             tasks = []
@@ -1065,10 +1071,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "timestamp": time.time()
                         }
                         logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, expected_replies={reply_limit}")
-            
-            # 將 thread_data 從列表轉換為字典
-            thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
-            logger.info(f"Converted thread_data to dict for {intent}: {list(thread_data_dict.keys())}")
             
             if len(thread_data) == 1 and intent == "follow_up":
                 logger.info("Single thread matched, searching for supplemental threads")
@@ -1139,7 +1141,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "fetched_pages": result.get("fetched_pages", []),
                                 "total_fetched_replies": len(cleaned_replies)
                             }
-                            thread_data_dict[thread_id] = thread_info
+                            thread_data.append(thread_info)
                             st.session_state.thread_cache[thread_id] = {
                                 "data": thread_info,
                                 "timestamp": time.time()
@@ -1148,7 +1150,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             return {
                 "selected_cat": selected_cat,
-                "thread_data": thread_data_dict,
+                "thread_data": thread_data,
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": last_reset,
@@ -1156,10 +1158,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
-        # 以下為原始程式碼未修改部分，僅展示上下文
         if reply_limit == 0:
             logger.info(f"Skipping reply fetch due to reply_limit=0, intent: {intent}")
-            thread_data = {}
+            thread_data = []
             initial_threads = []
             for page in range(1, 6):
                 result = await get_lihkg_topic_list(
@@ -1227,7 +1228,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             for thread_id in top_thread_ids:
                 thread_id_str = str(thread_id)
                 if thread_id_str in st.session_state.thread_cache:
-                    thread_data[thread_id_str] = st.session_state.thread_cache[thread_id_str]["data"]
+                    thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
                 else:
                     for item in filtered_items:
                         if str(item["thread_id"]) == thread_id_str:
@@ -1241,7 +1242,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "replies": [],
                                 "fetched_pages": []
                             }
-                            thread_data[thread_id_str] = thread_info
+                            thread_data.append(thread_info)
                             st.session_state.thread_cache[thread_id_str] = {
                                 "data": thread_info,
                                 "timestamp": time.time()
@@ -1258,7 +1259,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
-        thread_data = {}
+        thread_data = []
         rate_limit_info = []
         candidate_threads = []
         
@@ -1345,7 +1346,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         for item in candidate_threads:
             thread_id = str(item["thread_id"])
             if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
-                thread_data[thread_id] = st.session_state.thread_cache[thread_id]["data"]
+                thread_data.append(st.session_state.thread_cache[thread_id]["data"])
                 continue
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -1391,7 +1392,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(cleaned_replies)
                     }
-                    thread_data[thread_id] = thread_info
+                    thread_data.append(thread_info)
                     st.session_state.thread_cache[thread_id] = {
                         "data": thread_info,
                         "timestamp": time.time()
@@ -1415,7 +1416,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         logger.error(f"Error in process_user_question: {str(e)}")
         return {
             "selected_cat": selected_cat,
-            "thread_data": {},
+            "thread_data": [],
             "rate_limit_info": [{"message": f"Processing error: {str(e)}"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
