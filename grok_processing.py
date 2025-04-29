@@ -199,14 +199,21 @@ def extract_relevant_thread(conversation_context, query):
         return None, None, None
     
     query_keywords = set(extract_keywords(query))
+    logger.info(f"Extracted query keywords: {query_keywords}")
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
                 title_keywords = set(extract_keywords(title))
-                if query_keywords.intersection(title_keywords):
-                    logger.info(f"Follow-up query matched: thread_id={thread_id}, title={title}")
+                common_keywords = query_keywords.intersection(title_keywords)
+                if common_keywords:
+                    logger.info(f"Follow-up query matched: thread_id={thread_id}, title={title}, common_keywords={common_keywords}")
                     return thread_id, title, message["content"]
+                # 放寬匹配：檢查是否包含關鍵詞的子字符串
+                if any(keyword in title for keyword in query_keywords):
+                    logger.info(f"Follow-up query loosely matched: thread_id={thread_id}, title={title}, query_keywords_in_title={query_keywords}")
+                    return thread_id, title, message["content"]
+    logger.info("No relevant thread matched for follow-up query")
     return None, None, None
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
@@ -271,17 +278,14 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         if len(common_words) >= 1 or title_overlap or explicit_follow_up:
             is_follow_up = True
             logger.info(f"Follow-up intent detected, referenced thread IDs: {referenced_thread_ids}, title_overlap: {title_overlap}, common_words: {common_words}")
-            if not referenced_thread_ids:
-                logger.info("No referenced thread IDs found, falling back to search_keywords")
-                is_follow_up = False
     
-    # 若無歷史 ID 且檢測到追問，改用 search_keywords
-    if is_follow_up and not referenced_thread_ids:
+    # 若檢測到追問但無匹配帖子，改用 search_keywords
+    if is_follow_up and not thread_id:
         intent = "search_keywords"
-        reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
+        reason = "檢測到追問意圖，但無歷史帖子 ID匹配，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
-        logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}") 
+        logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}")
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
@@ -294,7 +298,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
             "processing": intent,
             "candidate_thread_ids": [],
-            "top_thread_ids": [],
+            "top_thread_ids": referenced_thread_ids[:2],
             "needs_advanced_analysis": False,
             "reason": reason,
             "theme_keywords": theme_keywords
@@ -388,11 +392,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         intent = "summarize_posts"
                         reason = "問題模糊，默認總結帖子"
                     
-                    # 若檢測到追問，強制設置為 follow_up
-                    if is_follow_up:
-                        intent = "follow_up"
-                        reason = "檢測到追問，與前問題或回應的帖子標題有語義重疊"
-                    
                     # 根據意圖設置參數
                     theme = historical_theme if is_vague else "general"
                     theme_keywords = historical_keywords if is_vague else extract_keywords(user_query)
@@ -417,7 +416,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         post_limit = 5
                     elif intent == "follow_up":
                         theme = historical_theme
-                        reply_limit = 500
+                        reply_limit = 200
                         data_type = "replies"
                         post_limit = min(len(referenced_thread_ids), 2) or 2
                     elif intent in ["general_query", "introduce"]:
@@ -435,7 +434,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
                         "processing": intent,
                         "candidate_thread_ids": [],
-                        "top_thread_ids": referenced_thread_ids,
+                        "top_thread_ids": referenced_thread_ids[:2],
                         "needs_advanced_analysis": confidence < 0.7,
                         "reason": reason,
                         "theme_keywords": theme_keywords
@@ -604,7 +603,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
     if intent == "follow_up":
-        referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", conversation_context[-1].get("content", "") if conversation_context else "")
+        referenced_thread_ids = []
+        thread_id, thread_title, last_response = extract_relevant_thread(conversation_context, user_query)
+        if thread_id:
+            referenced_thread_ids = [thread_id]
+        else:
+            last_response = conversation_context[-1].get("content", "") if conversation_context else ""
+            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
         if not referenced_thread_ids:
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
