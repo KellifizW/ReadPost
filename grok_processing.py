@@ -192,26 +192,17 @@ async def summarize_context(conversation_context):
         return {"theme": "general", "keywords": []}
 
 def extract_relevant_thread(conversation_context, query):
-    """
-    從對話歷史中提取與追問相關的帖子 ID 和標題。
-    """
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None
-    
     query_keywords = set(extract_keywords(query))
-    logger.info(f"Extracted query keywords: {query_keywords}")
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
                 title_keywords = set(extract_keywords(title))
                 common_keywords = query_keywords.intersection(title_keywords)
-                if common_keywords:
-                    logger.info(f"Follow-up query matched: thread_id={thread_id}, title={title}, common_keywords={common_keywords}")
-                    return thread_id, title, message["content"]
-                # 放寬匹配：檢查是否包含關鍵詞的子字符串
-                if any(keyword in title for keyword in query_keywords):
-                    logger.info(f"Follow-up query loosely matched: thread_id={thread_id}, title={title}, query_keywords_in_title={query_keywords}")
+                if common_keywords or any(kw.lower() in title.lower() for kw in query_keywords):
+                    logger.info(f"Follow-up matched: thread_id={thread_id}, title={title}, keywords={common_keywords}")
                     return thread_id, title, message["content"]
     logger.info("No relevant thread matched for follow-up query")
     return None, None, None
