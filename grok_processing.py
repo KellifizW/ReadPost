@@ -600,9 +600,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
-    """
-    使用 Grok 3 API 生成流式回應，確保包含帖子 ID，使用字數過濾回覆。
-    """
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
@@ -653,6 +650,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
+    # 轉換 thread_data 格式為字典
+    if isinstance(thread_data, list):
+        thread_data_dict = {str(data["thread_id"]): data for data in thread_data}
+        logger.info(f"Converted thread_data from list to dict: {list(thread_data_dict.keys())}")
+    else:
+        thread_data_dict = thread_data
+        logger.info(f"thread_data is already a dict: {list(thread_data_dict.keys())}")
+    
     if intent in ["follow_up", "fetch_thread_by_id"]:
         referenced_thread_ids = []
         if intent == "follow_up":
@@ -672,15 +677,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
         
-        prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
-        supplemental_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) not in map(str, referenced_thread_ids)}
-        thread_data = {**prioritized_thread_data, **supplemental_thread_data}
+        prioritized_thread_data = {tid: data for tid, data in thread_data_dict.items() if str(tid) in map(str, referenced_thread_ids)}
+        supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if str(tid) not in map(str, referenced_thread_ids)}
+        thread_data_dict = {**prioritized_thread_data, **supplemental_thread_data}
         logger.info(f"Filtered thread_data for {intent}: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
 
     filtered_thread_data = {}
     total_replies_count = 0
     
-    for tid, data in thread_data.items():
+    for tid, data in thread_data_dict.items():
         replies = data.get("replies", [])
         filtered_replies = [
             r for r in replies
@@ -757,7 +762,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "replies": [],
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": 0
-            } for tid, data in thread_data.items()
+            } for tid, data in thread_data_dict.items()
         }
         total_replies_count = 0
     
