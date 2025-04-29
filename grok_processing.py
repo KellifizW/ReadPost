@@ -277,7 +277,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "post_limit": 1,
             "reply_limit": 200,
             "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": []},
-            "processing": "fetch_thread_by_id",
+            "processing": {"intent": "fetch_thread_by_id", "top_thread_ids": [thread_id]},
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
             "needs_advanced_analysis": False,
@@ -302,7 +302,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "post_limit": 1,
             "reply_limit": 200,
             "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": query_keywords},
-            "processing": "follow_up",
+            "processing": {"intent": "follow_up", "top_thread_ids": [thread_id]},
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
             "needs_advanced_analysis": False,
@@ -355,7 +355,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "post_limit": 2,
             "reply_limit": 200,
             "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
-            "processing": intent,
+            "processing": {"intent": intent, "top_thread_ids": referenced_thread_ids[:2]},
             "candidate_thread_ids": [],
             "top_thread_ids": referenced_thread_ids[:2],
             "needs_advanced_analysis": False,
@@ -403,7 +403,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
             "post_limit": 5,
             "reply_limit": 0,
             "filters": {},
-            "processing": "general",
+            "processing": {"intent": "general"},
             "candidate_thread_ids": [],
             "top_thread_ids": [],
             "needs_advanced_analysis": False,
@@ -455,7 +455,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                     post_limit = 10
                     reply_limit = 0
                     data_type = "both"
-                    processing = intent
+                    processing = {"intent": intent, "top_thread_ids": []}
                     min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
                         theme = query_keywords[0] if query_keywords else historical_theme
@@ -476,6 +476,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         reply_limit = 200
                         data_type = "replies"
                         post_limit = min(len(referenced_thread_ids), 2) or 2
+                        processing["top_thread_ids"] = referenced_thread_ids[:2]
                     elif intent in ["general_query", "introduce"]:
                         reply_limit = 0
                         data_type = "none"
@@ -489,7 +490,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                         "post_limit": post_limit,
                         "reply_limit": reply_limit,
                         "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
-                        "processing": intent,
+                        "processing": processing,
                         "candidate_thread_ids": [],
                         "top_thread_ids": referenced_thread_ids[:2],
                         "needs_advanced_analysis": confidence < 0.7,
@@ -511,7 +512,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
                 "post_limit": 5,
                 "reply_limit": 0,
                 "filters": {"min_replies": 0, "min_likes": min_likes, "keywords": historical_keywords},
-                "processing": "summarize",
+                "processing": {"intent": "summarize"},
                 "candidate_thread_ids": [],
                 "top_thread_ids": [],
                 "needs_advanced_analysis": False,
@@ -604,7 +605,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
     prompt_builder = PromptBuilder()
     
-    intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
+    # 驗證 processing 格式
+    if not isinstance(processing, dict):
+        logger.error(f"Invalid processing format: expected dict, got {type(processing)}")
+        yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
+        return
+    intent = processing.get('intent', 'summarize')
+    logger.info(f"Processing intent: {intent}, processing: {processing}")
+
     context_summary = {"theme": "general", "keywords": []}
     if intent not in ["follow_up", "fetch_thread_by_id"]:
         context_summary = await summarize_context(conversation_context)
@@ -651,7 +659,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
     # 檢查 thread_data 格式並轉換為字典
-    logger.info(f"thread_data type: {type(thread_data)}, content: {thread_data}")
+    logger.info(f"thread_data type: {type(thread_data)}, keys: {list(thread_data.keys()) if isinstance(thread_data, dict) else thread_data}")
     thread_data_dict = {}
     if isinstance(thread_data, list):
         thread_data_dict = {str(data["thread_id"]): data for data in thread_data if isinstance(data, dict) and "thread_id" in data}
@@ -682,18 +690,22 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
                 referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
         else:  # fetch_thread_by_id
-            referenced_thread_ids = [tid for tid in processing.get("top_thread_ids", []) if any(str(t["thread_id"]) == str(tid) for t in metadata)]
+            top_thread_ids = processing.get("top_thread_ids", [])
+            if not isinstance(top_thread_ids, list):
+                logger.error(f"Invalid top_thread_ids format: expected list, got {type(top_thread_ids)}")
+                yield f"錯誤：無效的 top_thread_ids 格式（{type(top_thread_ids)}）。請聯繫支持。"
+                return
+            referenced_thread_ids = [tid for tid in top_thread_ids if str(tid) in thread_data_dict]
+            logger.info(f"fetch_thread_by_id: top_thread_ids={top_thread_ids}, referenced_thread_ids={referenced_thread_ids}")
         
         if not referenced_thread_ids and intent == "fetch_thread_by_id":
             referenced_thread_ids = processing.get("top_thread_ids", [])
-        elif not referenced_thread_ids:
-            prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
-            referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
         
-        prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
-        supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if tid not in map(str, referenced_thread_ids)}
+        # 確保 prioritized_thread_data 和 supplemental_thread_data 的值為字典
+        prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict and isinstance(thread_data_dict[tid], dict)}
+        supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if tid not in map(str, referenced_thread_ids) and isinstance(data, dict)}
         thread_data_dict = {**prioritized_thread_data, **supplemental_thread_data}
-        logger.info(f"Filtered thread_data for {intent}: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
+        logger.info(f"Updated thread_data_dict: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
 
     filtered_thread_data = {}
     total_replies_count = 0
@@ -735,6 +747,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if total_replies_count < max_replies_per_thread and intent in ["follow_up", "fetch_thread_by_id"]:
         logger.info(f"Replies insufficient: {total_replies_count}/{max_replies_per_thread}, fetching more pages")
         for tid, data in filtered_thread_data.items():
+            if not isinstance(data, dict):
+                logger.error(f"Invalid filtered_thread_data entry for tid={tid}: expected dict, got {type(data)}")
+                continue
             if data["total_fetched_replies"] < max_replies_per_thread:
                 additional_pages = [page + 1 for page in data["fetched_pages"]][-2:]
                 content_result = await get_lihkg_thread_content(
@@ -745,6 +760,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     specific_pages=additional_pages,
                     start_page=max(data["fetched_pages"], default=0) + 1
                 )
+                logger.info(f"content_result for tid={tid}: type={type(content_result)}, keys={list(content_result.keys()) if isinstance(content_result, dict) else content_result}")
+                if not isinstance(content_result, dict):
+                    logger.error(f"Invalid content_result for tid={tid}: expected dict, got {type(content_result)}")
+                    continue
                 if content_result.get("replies"):
                     cleaned_replies = [
                         {
@@ -761,13 +780,22 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         r for r in cleaned_replies
                         if len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
                     ]
-                    data["replies"].extend(filtered_additional_replies)
-                    data["fetched_pages"].extend(content_result.get("fetched_pages", []))
-                    data["total_fetched_replies"] += len(filtered_additional_replies)
+                    updated_data = {
+                        "thread_id": data.get("thread_id", tid),
+                        "title": data.get("title", ""),
+                        "no_of_reply": data.get("no_of_reply", 0),
+                        "last_reply_time": data.get("last_reply_time", ""),
+                        "like_count": data.get("like_count", 0),
+                        "dislike_count": data.get("dislike_count", 0),
+                        "replies": data.get("replies", []) + filtered_additional_replies,
+                        "fetched_pages": list(set(data.get("fetched_pages", []) + content_result.get("fetched_pages", []))),
+                        "total_fetched_replies": len(data.get("replies", []) + filtered_additional_replies)
+                    }
+                    filtered_thread_data[tid] = updated_data
                     total_replies_count += len(filtered_additional_replies)
-                    logger.info(f"Additional fetch for thread_id={tid}, pages={content_result.get('fetched_pages', [])}, new_replies={len(filtered_additional_replies)}")
+                    logger.info(f"Updated filtered_thread_data for tid={tid}: new_replies={len(filtered_additional_replies)}, total_fetched_replies={updated_data['total_fetched_replies']}")
                     st.session_state.thread_cache[tid] = {
-                        "data": data,
+                        "data": updated_data,
                         "timestamp": time.time()
                     }
 
@@ -968,7 +996,7 @@ def unix_to_readable(timestamp):
     try:
         timestamp = int(timestamp)
         dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%Y-%m-%d %H:MM:SS")
     except (ValueError, TypeError):
         logger.warning(f"Failed to convert timestamp {timestamp}")
         return "1970-01-01 00:00:00"
