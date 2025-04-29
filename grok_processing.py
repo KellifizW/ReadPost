@@ -242,7 +242,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         reason = "追問意圖無歷史帖子 ID，回退到關鍵詞搜索"
         theme = extract_keywords(user_query)[0] if extract_keywords(user_query) else historical_theme
         theme_keywords = extract_keywords(user_query) or historical_keywords
-        logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}")  # 添加日誌
+        logger.info(f"Follow-up intent fallback to search_keywords, extracted keywords: {theme_keywords}") 
         # 時事台和財經台放寬篩選條件
         min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
