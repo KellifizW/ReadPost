@@ -571,9 +571,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"Dynamic target_tokens: {target_tokens}, min_tokens={min_tokens}, max_tokens={max_tokens}, total_replies_count={total_replies_count}")
 
-    # 設置 max_tokens 為 3600
     max_tokens_limit = 4600
-    target_tokens = min(target_tokens, max_tokens_limit)
+    max_tokens = min(target_tokens + 300, max_tokens_limit)
     logger.info(f"Final target_tokens: {target_tokens}, max_tokens_limit={max_tokens_limit}")
 
     # 動態決定回覆數量
