@@ -5,7 +5,7 @@ LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 提供速率限制管理、錯誤處理和日誌記錄功能。
 主要函數：
 - get_lihkg_topic_list：抓取指定分類的帖子標題。
-- get_lihkg_thread_content：抓取指定帖子的回覆內容。
+- get_lihkg_thread_content：抓取指定帖子的回覆內容，支援多頁迭代。
 - get_category_name：返回分類名稱。
 - get_lihkg_thread_content_batch：批量抓取多個帖子的回覆內容。
 """
@@ -187,7 +187,6 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
     rate_limit_info = []
     
     for page in range(start_page, start_page + max_pages):
-        # 根據分類設置 type 和 order 參數
         if cat_id == "2":  # 熱門台
             url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id=1&page={page}&count=60&type=now&order=hot"
         else:
@@ -214,7 +213,17 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
-    抓取指定帖子的回覆內容，支援動態頁數選擇。
+    抓取指定帖子的回覆內容，支援多頁迭代直到達到 max_replies 或無更多回覆。
+    修改：實現多頁抓取，支援 LIHKG 每頁 25 條限制，增強日誌記錄。
+    Args:
+        thread_id: 帖子 ID
+        cat_id: 分類 ID
+        max_replies: 最大回覆數
+        fetch_last_pages: 抓取最後幾頁（優先於 specific_pages）
+        specific_pages: 指定頁數列表
+        start_page: 起始頁數
+    Returns:
+        Dict: 包含回覆數據、帖子標題、總回覆數、總頁數等
     """
     replies = []
     fetched_pages = []
@@ -222,9 +231,9 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     total_replies = None
     total_pages = None
     rate_limit_info = []
-    max_replies = max(max_replies, 250)
+    max_replies = max(max_replies, 25)  # 確保至少抓取 25 條
     
-    # 抓取第一頁
+    # 抓取第一頁以獲取帖子元數據
     url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/1?order=reply_time"
     data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_thread_content")
     rate_limit_info.extend(page_rate_limit_info)
@@ -242,7 +251,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             reply["reply_time"] = reply.get("reply_time", "0")
         replies.extend(page_replies[:max_replies])
         fetched_pages.append(1)
-        logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(page_replies)}, total_stored={len(replies)}")
+        logger.info(f"Fetched thread_id={thread_id}, page=1, replies={len(page_replies)}, total_stored={len(replies)}, expected_replies={max_replies}")
     else:
         logger.error(f"No data fetched for thread_id={thread_id}, page=1")
         return {
@@ -259,13 +268,13 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         pages_to_fetch = [p for p in specific_pages if 1 <= p <= total_pages and p not in fetched_pages]
     elif fetch_last_pages > 0:
         start = max(start_page, 2)
-        end = total_pages + 1
-        if end - start < fetch_last_pages:
-            start = max(2, end - fetch_last_pages)
-        pages_to_fetch = list(range(start, end))[:fetch_last_pages]
-        pages_to_fetch = [p for p in pages_to_fetch if p not in fetched_pages and 1 <= p <= total_pages]
-    elif start_page > 1:
-        pages_to_fetch = list(range(start_page, total_pages + 1))
+        end = min(total_pages + 1, start + fetch_last_pages)
+        pages_to_fetch = list(range(start, end))
+        pages_to_fetch = [p for p in pages_to_fetch if p not in fetched_pages]
+    else:
+        # 修改：迭代多頁直到達到 max_replies 或無更多回覆
+        max_pages = (max_replies // 25) + 1  # 每頁最多 25 條
+        pages_to_fetch = list(range(2, min(max_pages + 1, total_pages + 1)))
         pages_to_fetch = [p for p in pages_to_fetch if p not in fetched_pages]
     
     pages_to_fetch = sorted(set(pages_to_fetch))
@@ -290,21 +299,31 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
             page_replies = page_replies[:remaining_slots]
             replies.extend(page_replies)
             fetched_pages.append(page)
-            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}")
-        await asyncio.sleep(1)
+            logger.info(f"Fetched thread_id={thread_id}, page={page}, replies={len(page_replies)}, total_stored={len(replies)}, expected_replies={max_replies}")
+        else:
+            logger.warning(f"No data fetched for thread_id={thread_id}, page={page}")
+        
+        await asyncio.sleep(0.5)  # 避免過快請求
+    
+    if len(replies) < max_replies:
+        logger.info(f"Thread {thread_id} has fewer replies than expected: {len(replies)}/{max_replies}")
     
     return {
-        "replies": replies, "title": thread_title, "total_replies": total_replies,
-        "total_pages": total_pages, "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
+        "replies": replies,
+        "title": thread_title,
+        "total_replies": total_replies,
+        "total_pages": total_pages,
+        "fetched_pages": fetched_pages,
+        "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
         "rate_limit_until": rate_limit_data["rate_limit_until"]
     }
 
-### 修改：添加批量抓取帖子內容的函數
 async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
     批量抓取多個帖子的回覆內容，減少 API 請求次數。
+    修改：確保 max_replies 傳遞正確，增強日誌記錄。
     Args:
         thread_ids: List[str]，帖子 ID 列表
         cat_id: str，分類 ID
@@ -317,7 +336,7 @@ async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=25
     """
     results = []
     rate_limit_info = []
-    max_replies = max(max_replies, 250)
+    max_replies = max(max_replies, 25)  # 確保至少抓取 25 條
     
     tasks = []
     for thread_id in thread_ids:
@@ -367,4 +386,3 @@ async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=25
         "last_reset": aggregated_rate_limit_data["last_reset"],
         "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
     }
-### 修改結束
