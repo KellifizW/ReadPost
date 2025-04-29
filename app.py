@@ -1,5 +1,5 @@
 """
-Streamlit 聊天介面模組，提供 LIHKG 數據查詢和顯示功能。
+Streamlit 聊天介面模組，提供 LIHKG 數據查 查詢和顯示功能。
 僅負責用戶交互、聊天記錄管理和速率限制狀態顯示。
 主要函數：
 - main：初始化應用，處理用戶輸入，渲染介面。
@@ -52,16 +52,17 @@ def render_copy_button(content, key):
 
 def render_new_conversation_button():
     """
-    渲染新對話按鈕，樣式與複製按鈕一致。
+    渲染新對話按鈕，使用 Streamlit 原生按鈕。
     """
-    html_code = """
-    <button onclick="window.location.reload()"
-            title="開始新對話"
-            style="border: none; background: none; cursor: pointer; font-size: 20px;">
-        🆕
-    </button>
-    """
-    html(html_code, height=30)
+    if st.button("🆕 新對話", help="開始新對話"):
+        st.session_state.chat_history = []
+        st.session_state.conversation_context = []
+        st.session_state.context_timestamps = []
+        st.session_state.thread_cache = {}
+        st.session_state.last_user_query = None
+        st.session_state.awaiting_response = False
+        logger.info("New conversation started, session state cleared")
+        st.experimental_rerun()
 
 async def main():
     """
@@ -90,9 +91,9 @@ async def main():
         st.session_state.context_timestamps = []
     if "last_selected_cat" not in st.session_state:
         st.session_state.last_selected_cat = None
-
-    # 日誌記錄頁面重新整理
-    logger.info(f"Page reloaded, last_selected_cat: {st.session_state.get('last_selected_cat', 'None')}")
+    if "page_reload_logged" not in st.session_state:
+        st.session_state.page_reload_logged = True
+        logger.info(f"Page reloaded, last_selected_cat: {st.session_state.get('last_selected_cat', 'None')}")
 
     # 分類選擇
     cat_id_map = {
@@ -119,17 +120,14 @@ async def main():
         cat_id = "1"
 
     # 檢測分類變化並清理對話歷史
-    if "last_selected_cat" not in st.session_state:
-        st.session_state.last_selected_cat = selected_cat
-
     if st.session_state.last_selected_cat != selected_cat:
-        if st.session_state.chat_history or st.session_state.conversation_context:
+        if st.button("確認切換分類並清除歷史"):
             st.session_state.chat_history = []
             st.session_state.conversation_context = []
             st.session_state.context_timestamps = []
             st.session_state.thread_cache = {}
             st.session_state.last_user_query = None
-            logger.info(f"Category changed to {selected_cat}, cleared conversation history due to explicit switch")
+            logger.info(f"Category changed to {selected_cat}, cleared conversation history")
         st.session_state.last_selected_cat = selected_cat
     else:
         logger.info(f"Category unchanged: {selected_cat}, preserving conversation history")
@@ -181,11 +179,12 @@ async def main():
         valid_context = []
         valid_timestamps = []
         for msg, ts in zip(st.session_state.conversation_context, st.session_state.context_timestamps):
-            if current_time - ts < 3600:
+            if current_time - ts < 7200:  # 延長至 2 小時
                 valid_context.append(msg)
                 valid_timestamps.append(ts)
-        st.session_state.conversation_context = valid_context[:20]
-        st.session_state.context_timestamps = valid_timestamps[:20]
+        st.session_state.conversation_context = valid_context[-20:]
+        st.session_state.context_timestamps = valid_timestamps[-20:]
+        st.session_state.chat_history = st.session_state.chat_history[-20:]
 
         # 初始化進度條和狀態顯示
         status_text = st.empty()
