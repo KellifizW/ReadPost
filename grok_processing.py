@@ -161,7 +161,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 150,  # 減少 max_tokens 以加快運行
+        "max_tokens": 150,
         "temperature": 0.3
     }
 
@@ -179,7 +179,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
                     keywords = result.get("keywords", [])[:3]
-                    reason = result.get("reason", "No reason provided")[:70]  # 限制 reason 長度
+                    reason = result.get("reason", "No reason provided")[:70]
                     logger.info(f"Keywords extracted: {keywords}, reason: {reason}")
                     return {"keywords": keywords, "reason": reason}
         except Exception as e:
@@ -249,7 +249,6 @@ async def extract_relevant_thread(conversation_context, query):
                 title_keyword_result = await extract_keywords_with_grok(title, conversation_context)
                 title_keywords = set(title_keyword_result["keywords"])
                 common_keywords = query_keywords.intersection(title_keywords)
-                # 放寬匹配條件：允許部分關鍵詞匹配或標題包含查詢關鍵詞
                 if common_keywords or any(kw.lower() in title.lower() for kw in query_keywords):
                     logger.info(f"Follow-up matched: thread_id={thread_id}, title={title}, keywords={common_keywords}")
                     return thread_id, title, message["content"]
@@ -258,10 +257,33 @@ async def extract_relevant_thread(conversation_context, query):
 
 async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, metadata=None, thread_data=None, is_advanced=False, conversation_context=None):
     """
-    分析用戶問題，使用語義嵌入識別意圖，放寬語義要求，動態設置篩選條件。
+    分析用戶問題，使用語義嵌入識別意圖，檢測明確ID並設置fetch_thread_by_id意圖。
     """
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
+    
+    # 檢測是否包含明確的帖子 ID（如 "ID 3919968" 或 "帖子 3919968"）
+    id_match = re.search(r'(?:ID|帖子)\s*(\d+)', user_query, re.IGNORECASE)
+    if id_match:
+        thread_id = id_match.group(1)
+        logger.info(f"Detected explicit thread ID: {thread_id}")
+        min_likes = 0 if cat_id in ["5", "15"] else 5
+        return {
+            "direct_response": False,
+            "intent": "fetch_thread_by_id",
+            "theme": "特定帖子查詢",
+            "category_ids": [cat_id],
+            "data_type": "replies",
+            "post_limit": 1,
+            "reply_limit": 200,
+            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": []},
+            "processing": "fetch_thread_by_id",
+            "candidate_thread_ids": [thread_id],
+            "top_thread_ids": [thread_id],
+            "needs_advanced_analysis": False,
+            "reason": f"Detected explicit thread ID {thread_id} in query",
+            "theme_keywords": []
+        }
     
     keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
     query_keywords = keyword_result["keywords"]
@@ -362,7 +384,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, thread_titles=None, m
         "recommend_threads": "推薦相關或熱門帖子",
         "monitor_events": "追蹤特定事件或話題的討論",
         "classify_opinions": "將回覆按意見立場分類",
-        "follow_up": "追問之前回應中提到的帖子內容"
+        "follow_up": "追問之前回應中提到的帖子內容",
+        "fetch_thread_by_id": "根據明確的帖子 ID 抓取內容"
     }, ensure_ascii=False, indent=2)}
     輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
     """
@@ -586,7 +609,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     intent = processing.get('intent', 'summarize') if isinstance(processing, dict) else processing
     context_summary = {"theme": "general", "keywords": []}
-    if intent != "follow_up":
+    if intent not in ["follow_up", "fetch_thread_by_id"]:
         context_summary = await summarize_context(conversation_context)
     historical_theme = context_summary.get("theme", "general")
     
@@ -602,7 +625,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
     問題：{user_query}
     意圖：{intent}
-    若問題需要深入分析（如情緒分析、意見分類、追問），建議較多回覆（200-500）。
+    若問題需要深入分析（如情緒分析、意見分類、追問、特定帖子ID），建議較多回覆（200-500）。
     若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
     若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
     默認：100 條。
@@ -630,29 +653,35 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     except Exception as e:
         logger.warning(f"Replies per thread selection failed: {str(e)}, using default 100")
     
-    if intent == "follow_up":
+    if intent in ["follow_up", "fetch_thread_by_id"]:
         referenced_thread_ids = []
-        thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
-        if thread_id:
-            referenced_thread_ids = [thread_id]
-        else:
-            last_response = conversation_context[-1].get("content", "") if conversation_context else ""
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-            referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
-        if not referenced_thread_ids:
+        if intent == "follow_up":
+            thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
+            if thread_id:
+                referenced_thread_ids = [thread_id]
+            else:
+                last_response = conversation_context[-1].get("content", "") if conversation_context else ""
+                matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+                referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
+        else:  # fetch_thread_by_id
+            referenced_thread_ids = [tid for tid in processing.get("top_thread_ids", []) if any(str(t["thread_id"]) == str(tid) for t in metadata)]
+        
+        if not referenced_thread_ids and intent == "fetch_thread_by_id":
+            referenced_thread_ids = processing.get("top_thread_ids", [])
+        elif not referenced_thread_ids:
             prioritization = await prioritize_threads_with_grok(user_query, metadata, selected_cat, cat_id, intent)
             referenced_thread_ids = prioritization.get("top_thread_ids", [])[:2]
+        
         prioritized_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) in map(str, referenced_thread_ids)}
         supplemental_thread_data = {tid: data for tid, data in thread_data.items() if str(tid) not in map(str, referenced_thread_ids)}
         thread_data = {**prioritized_thread_data, **supplemental_thread_data}
-        logger.info(f"Filtered thread_data for follow_up: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
+        logger.info(f"Filtered thread_data for {intent}: prioritized={list(prioritized_thread_data.keys())}, supplemental={list(supplemental_thread_data.keys())}")
 
     filtered_thread_data = {}
     total_replies_count = 0
     
     for tid, data in thread_data.items():
         replies = data.get("replies", [])
-        # 過濾回覆：保留字數 > 7 且非 [圖片]/[無內容]，按 like_count 排序
         filtered_replies = [
             r for r in replies
             if r.get("msg") and len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
@@ -677,7 +706,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         logger.info(f"Filtered replies for thread_id={tid}: {len(sorted_replies)}/{len(replies)}")
     
-    if total_replies_count < max_replies_per_thread and intent == "follow_up":
+    if total_replies_count < max_replies_per_thread and intent in ["follow_up", "fetch_thread_by_id"]:
         logger.info(f"Replies insufficient: {total_replies_count}/{max_replies_per_thread}, fetching more pages")
         for tid, data in filtered_thread_data.items():
             if data["total_fetched_replies"] < max_replies_per_thread:
@@ -816,7 +845,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 line_str = line.decode('utf-8').strip()
                                 if line_str == "data: [DONE]":
                                     break
-                                if line_str.startswith("data: "):
+                                if line_str.startswith("data:"):
                                     try:
                                         chunk = json.loads(line_str[6:])
                                         content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
@@ -928,7 +957,7 @@ def configure_lihkg_api_logger():
 
 async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, is_advanced=False, previous_thread_ids=None, previous_thread_data=None, conversation_context=None, progress_callback=None):
     """
-    處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數。
+    處理用戶問題，分階段抓取並分析 LIHKG 帖子，支援並行抓取和動態頁數，支援fetch_thread_by_id意圖。
     """
     configure_lihkg_api_logger()
     try:
@@ -948,9 +977,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "analysis": analysis
             }
         
-        if progress_callback:
-            progress_callback("正在抓取帖子列表", 0.1)
-        
         post_limit = min(analysis.get("post_limit", 5), 20)
         reply_limit = analysis.get("reply_limit", 0)
         filters = analysis.get("filters", {})
@@ -961,8 +987,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         previous_thread_ids = previous_thread_ids or []
         intent = analysis.get("intent", "summarize_posts")
         
-        if intent == "follow_up" and top_thread_ids:
-            logger.info(f"Follow-up intent with top_thread_ids: {top_thread_ids}")
+        if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
+            logger.info(f"{intent} intent with top_thread_ids: {top_thread_ids}")
             thread_data = []
             rate_limit_info = []
             
