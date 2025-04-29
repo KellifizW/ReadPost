@@ -1212,7 +1212,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 "request_counter": request_counter,
                 "last_reset": last_reset,
                 "rate_limit_until": rate_limit_until,
-                "analysis": analysis PRIM
+                "analysis": analysis,
             }
         
         thread_data = []
