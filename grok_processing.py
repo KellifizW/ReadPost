@@ -100,10 +100,10 @@ async def extract_keywords_with_grok(query, conversation_context=None):
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
         logger.error(f"缺少 Grok 3 API 密鑰：{str(e)}")
-        return {"keywords": [], "reason": "缺少 API 密鑰"}
+        return {"keywords": [], "reason": "缺少 API 密鑰", "time_sensitive": False}
 
     prompt = f"""
-請從以下查詢提取 1-3 個核心關鍵詞（僅保留名詞或核心動詞，過濾停用詞如「的」「是」）。關鍵詞應反映主題或意圖。保留「你點睇」作為意圖短語，映射到「分析」。過濾無意義粵語俚語（如「講D咩」）。以 JSON 格式返回，附簡要邏輯說明（70字內）。
+請從以下查詢提取 1-3 個核心關鍵詞（僅保留名詞或核心動詞，過濾停用詞如「的」「是」）。關鍵詞應反映主題或意圖。保留「你點睇」作為意圖短語，映射到「分析」。過濾無意義粵語俚語（如「講D咩」）。若查詢包含時間性詞語（如「今晚」「今日」「最近」「呢排」），設置 time_sensitive 為 true。以 JSON 格式返回，附簡要邏輯說明（70字內）。
 
 查詢："{query}"
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
@@ -111,7 +111,8 @@ async def extract_keywords_with_grok(query, conversation_context=None):
 返回格式：
 {{
   "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
-  "reason": "提取邏輯說明（70字以內）"
+  "reason": "提取邏輯說明（70字以內）",
+  "time_sensitive": true/false
 }}
 """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -141,15 +142,16 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     result = json.loads(data["choices"][0]["message"]["content"])
                     keywords = result.get("keywords", [])[:3]
                     reason = result.get("reason", "未提供原因")[:70]
-                    logger.info(f"提取關鍵詞：{keywords}，原因：{reason}")
-                    return {"keywords": keywords, "reason": reason}
+                    time_sensitive = result.get("time_sensitive", False)
+                    logger.info(f"提取關鍵詞：{keywords}，原因：{reason}，時間敏感：{time_sensitive}")
+                    return {"keywords": keywords, "reason": reason, "time_sensitive": time_sensitive}
         except Exception as e:
             logger.warning(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
             logger.error(f"關鍵詞提取失敗，嘗試 {max_retries} 次後放棄")
-            return {"keywords": [], "reason": f"提取失敗：{str(e)}"[:70]}
+            return {"keywords": [], "reason": f"提取失敗：{str(e)}"[:70], "time_sensitive": False}
 
 async def summarize_context(conversation_context):
     if not conversation_context:
@@ -891,6 +893,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))  # 去重
         intent = analysis.get("intent", "summarize_posts")
         
+        # 檢查時間敏感關鍵詞
+        keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+        fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
+        logger.info(f"抓取方式：{'從最後一頁開始' if fetch_last_pages else '從第一頁開始'}，時間敏感：{keyword_result.get('time_sensitive', False)}")
+        
         if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
             logger.info(f"[Task {id(asyncio.current_task())}] {intent} 意圖，頂部帖子 ID：{top_thread_ids}")
             thread_data = []
@@ -909,7 +916,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     thread_id=thread_id_str,
                     cat_id=cat_id,
                     max_replies=100,
-                    fetch_last_pages=0,
+                    fetch_last_pages=fetch_last_pages,
                     specific_pages=[],
                     start_page=1
                 ))
@@ -986,7 +993,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         thread_id=thread_id,
                         cat_id=cat_id,
                         max_replies=100,
-                        fetch_last_pages=0,
+                        fetch_last_pages=fetch_last_pages,
                         specific_pages=[],
                         start_page=1
                     ))
@@ -1139,7 +1146,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 thread_id=thread_id,
                 cat_id=cat_id,
                 max_replies=100,
-                fetch_last_pages=0,
+                fetch_last_pages=fetch_last_pages,
                 specific_pages=[],
                 start_page=1
             ))
