@@ -457,7 +457,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             query=user_query,
             cat_name=cat_name,
             cat_id=cat_id,
-            threads=[{"thread_id": t["thread_id"], "title": t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
+            threads=[{"thread_id": t["thread_id"], "title(clean_html(t["title"])): t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
         logger.error(f"構建優先級提示失敗：{str(e)}")
@@ -556,38 +556,37 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_tokens = min(target_tokens + 300, max_tokens_limit)
     logger.info(f"最終目標 token 數：{target_tokens}，最大 token 限制={max_tokens_limit}")
 
-    reply_count_prompt = f"""
-你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（0、25、50、100、200、250、500 條）。
+    max_replies_per_thread = 100
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+    
+    if intent in ["follow_up", "fetch_thread_by_id"]:
+        reply_count_prompt = f"""
+你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（100、200、250、500 條）。
 僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
 問題：{user_query}
 意圖：{intent}
 若問題需要深入分析（如情緒分析、意見分類、追問、特定帖子ID），建議較多回覆（200-500）。
-若問題簡單（如標題列出、日期提取），建議較少回覆（25-50）。
-若意圖為「general_query」或「introduce」，無需討論區數據，建議 0 條。
 默認：100 條。
 輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
 """
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
-    payload = {
-        "model": "grok-3-beta",
-        "messages": [{"role": "user", "content": reply_count_prompt}],
-        "max_tokens": 100,
-        "temperature": 0.5
-    }
-    
-    max_replies_per_thread = 100
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    result = json.loads(data["choices"][0]["message"]["content"])
-                    max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
-                    logger.info(f"Grok 選擇每帖子回覆數：{max_replies_per_thread}，原因：{result.get('reason', '默認')}")
-                else:
-                    logger.warning("無法確定每帖子回覆數，使用默認 100")
-    except Exception as e:
-        logger.warning(f"每帖子回覆數選擇失敗：{str(e)}，使用默認 100")
+        payload = {
+            "model": "grok-3-beta",
+            "messages": [{"role": "user", "content": reply_count_prompt}],
+            "max_tokens": 100,
+            "temperature": 0.5
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = json.loads(data["choices"][0]["message"]["content"])
+                        max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
+                        logger.info(f"Grok 選擇每帖子回覆數：{max_replies_per_thread}，原因：{result.get('reason', '默認')}")
+                    else:
+                        logger.warning("無法確定每帖子回覆數，使用默認 100")
+        except Exception as e:
+            logger.warning(f"每帖子回覆數選擇失敗：{str(e)}，使用默認 100")
     
     thread_data_dict = {}
     if isinstance(thread_data, list):
@@ -663,13 +662,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         logger.info(f"回覆數不足：{total_replies_count}/{max_replies_per_thread}，抓取更多頁面")
         for tid, data in filtered_thread_data.items():
             if data["total_fetched_replies"] < max_replies_per_thread:
-                additional_pages = [page + 1 for page in data["fetched_pages"]][-2:]
                 content_result = await get_lihkg_thread_content(
                     thread_id=tid,
                     cat_id=cat_id,
                     max_replies=max_replies_per_thread - data["total_fetched_replies"],
-                    fetch_last_pages=2,
-                    specific_pages=additional_pages,
+                    fetch_last_pages=1,
                     start_page=max(data["fetched_pages"], default=0) + 1
                 )
                 if content_result.get("replies"):
@@ -721,7 +718,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "total_fetched_replies": 0
             } for tid, data in filtered_thread_data.items()
         }
-        total_replies_count = 0
+        total_replies_count =0
     
     thread_id_prompt = "\n請在回應中明確包含相關帖子 ID，格式為 [帖子 ID: xxx]。禁止包含 [post_id: ...] 格式。"
     prompt = prompt_builder.build_response(
@@ -880,7 +877,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 tasks.append(get_lihkg_thread_content(
                     thread_id=thread_id_str,
                     cat_id=cat_id,
-                    max_replies=0,  # 默認抓第一頁
+                    max_replies=100,  # 統一初始抓取
                     fetch_last_pages=0,
                     specific_pages=[],
                     start_page=1
@@ -956,7 +953,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     supplemental_tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id,
                         cat_id=cat_id,
-                        max_replies=0,  # 默認抓第一頁
+                        max_replies=100,  # 統一初始抓取
                         fetch_last_pages=0,
                         specific_pages=[],
                         start_page=1
@@ -973,7 +970,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                         rate_limit_info.extend(result.get("rate_limit_info", []))
                         
-                        thread_id = processor
+                        thread_id = str(filtered_supplemental[idx]["thread_id"])
                         if result.get("title"):
                             cleaned_replies = [
                                 {
@@ -1106,7 +1103,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
                 cat_id=cat_id,
-                max_replies=0,  # 默認抓第一頁
+                max_replies=100,  # 統一初始抓取
                 fetch_last_pages=0,
                 specific_pages=[],
                 start_page=1
