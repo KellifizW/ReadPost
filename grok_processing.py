@@ -630,9 +630,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     filtered_thread_data = {}
     total_replies_count = 0
-    logged_threads = set()  # 跟踪已記錄的帖子 ID
+    thread_log_context = {}  # 記錄每個帖子的日誌上下文
     
     for tid, data in thread_data_dict.items():
+        thread_log_context[tid] = {
+            "pages": data.get("fetched_pages", []),
+            "replies": 0,
+            "filtered_replies": 0
+        }
         try:
             replies = data.get("replies", [])
             if not isinstance(replies, list):
@@ -658,6 +663,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             )[:max_replies_per_thread]
             
             total_replies_count += len(sorted_replies)
+            thread_log_context[tid]["replies"] = len(replies)
+            thread_log_context[tid]["filtered_replies"] = len(sorted_replies)
             filtered_thread_data[tid] = {
                 "thread_id": data.get("thread_id", tid),
                 "title": data.get("title", ""),
@@ -669,9 +676,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": len(sorted_replies)
             }
-            if tid not in logged_threads:
-                logger.info(f"[Task {id(asyncio.current_task())}] 過濾帖子 ID={tid} 的回覆：原始={len(replies)}，過濾後={len(sorted_replies)}")
-                logged_threads.add(tid)
         except Exception as e:
             logger.error(f"處理帖子 ID={tid} 失敗：{str(e)}")
             yield f"錯誤：處理帖子（ID={tid}）失敗（{str(e)}）。請聯繫支持。"
@@ -718,14 +722,21 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     }
                     filtered_thread_data[tid] = updated_data
                     total_replies_count += len(filtered_additional_replies)
+                    thread_log_context[tid]["pages"] = updated_data["fetched_pages"]
+                    thread_log_context[tid]["filtered_replies"] = updated_data["total_fetched_replies"]
                     async with cache_lock:
                         st.session_state.thread_cache[tid] = {
                             "data": updated_data,
                             "timestamp": time.time()
                         }
-                    if tid not in logged_threads:
-                        logger.info(f"[Task {id(asyncio.current_task())}] 更新帖子 ID={tid} 的 filtered_thread_data：新增回覆={len(filtered_additional_replies)}，總回覆數={updated_data['total_fetched_replies']}")
-                        logged_threads.add(tid)
+
+    # 統一記錄帖子處理總結日誌
+    for tid, context in thread_log_context.items():
+        if context["replies"] > 0 or context["filtered_replies"] > 0:
+            logger.info(
+                f"[Task {id(asyncio.current_task())}] 帖子 ID={tid} 處理完成：頁面={context['pages']}，"
+                f"原始回覆數={context['replies']}，過濾後回覆數={context['filtered_replies']}"
+            )
 
     if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
         filtered_thread_data = {
@@ -945,7 +956,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "data": thread_info,
                                 "timestamp": time.time()
                             }
-                        logger.info(f"[Task {id(asyncio.current_task())}] 抓取帖子 ID={thread_id}，頁面={result.get('fetched_pages', [])}，原始回覆數={len(cleaned_replies)}")
             
             if len(thread_data) == 1 and intent == "follow_up":
                 logger.info(f"[Task {id(asyncio.current_task())}] 僅匹配單個帖子，搜索補充帖子")
@@ -1023,7 +1033,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                     "data": thread_info,
                                     "timestamp": time.time()
                                 }
-                            logger.info(f"[Task {id(asyncio.current_task())}] 補充帖子抓取完成：帖子 ID={thread_id}，原始回覆數={len(cleaned_replies)}")
             
             return {
                 "selected_cat": selected_cat,
@@ -1176,7 +1185,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "data": thread_info,
                             "timestamp": time.time()
                         }
-                    logger.info(f"[Task {id(asyncio.current_task())}] 抓取帖子 ID={thread_id}，頁面={result.get('fetched_pages', [])}，原始回覆數={len(cleaned_replies)}")
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
