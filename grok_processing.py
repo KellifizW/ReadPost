@@ -236,7 +236,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
     
     keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
     query_keywords = keyword_result["keywords"]
-    logger.info(f"使用 Grok 提取關鍵詞：{query_keywords}，原因：{keyword_result['reason']}")
     
     thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
     if thread_id:
@@ -730,9 +729,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "timestamp": time.time()
                         }
 
-    # 統一記錄帖子處理總結日誌
+    # 統一記錄帖子處理總結日誌，僅記錄有回覆的帖子
     for tid, context in thread_log_context.items():
-        if context["replies"] > 0 or context["filtered_replies"] > 0:
+        if context["filtered_replies"] > 0:
             logger.info(
                 f"[Task {id(asyncio.current_task())}] 帖子 ID={tid} 處理完成：頁面={context['pages']}，"
                 f"原始回覆數={context['replies']}，過濾後回覆數={context['filtered_replies']}"
