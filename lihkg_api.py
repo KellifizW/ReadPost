@@ -123,7 +123,7 @@ class ApiClient:
                     async with session.get(url, headers=self.generate_headers(url, int(time.time())), params=params, timeout=timeout) as response:
                         response_time = time.time() - start_time
                         self.rate_limiter.last_response_time = response_time
-                        logger.info(f"API response time: {response_time:.2f} seconds for {function_name}")
+                        logger.debug(f"API response time: {response_time:.2f} seconds for {function_name}")
                         status = "success" if response.status == 200 else f"failed_status_{response.status}"
                         logger.debug(
                             json.dumps({
@@ -212,7 +212,6 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
     抓取指定帖子的回覆內容，支援多頁迭代直到達到 max_replies 或無更多回覆。
-    修改：合併日誌，僅在抓取完成時記錄總結，逐頁日誌改為 DEBUG 級別。
     Args:
         thread_id: 帖子 ID
         cat_id: 分類 ID
@@ -324,7 +323,6 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
 async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
     """
     批量抓取多個帖子的回覆內容，減少 API 請求次數。
-    修改：統一記錄每個帖子的抓取總結日誌。
     Args:
         thread_ids: List[str]，帖子 ID 列表
         cat_id: str，分類 ID
