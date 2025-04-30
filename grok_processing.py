@@ -139,6 +139,11 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     if not data.get("choices"):
                         logger.warning(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
+                    usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    logger.info(f"Grok3 API 調用：函數=extract_keywords_with_grok, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     result = json.loads(data["choices"][0]["message"]["content"])
                     keywords = result.get("keywords", [])[:3]
                     reason = result.get("reason", "未提供原因")[:70]
@@ -185,6 +190,11 @@ async def summarize_context(conversation_context):
                     logger.warning(f"對話摘要失敗：狀態碼={response.status}")
                     return {"theme": "一般", "keywords": []}
                 data = await response.json()
+                # 記錄 token 使用情況
+                usage = data.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                logger.info(f"Grok3 API 調用：函數=summarize_context, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                 result = json.loads(data["choices"][0]["message"]["content"])
                 logger.info(f"對話摘要完成：主題={result['theme']}，關鍵詞={result['keywords']}")
                 return result
@@ -374,6 +384,11 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     if not data.get("choices"):
                         logger.warning(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
+                    usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    logger.info(f"Grok3 API 調用：函數=analyze_and_screen, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     result = json.loads(data["choices"][0]["message"]["content"])
                     intent = result.get("intent", "summarize_posts")
                     confidence = result.get("confidence", 0.7)
@@ -488,6 +503,11 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     if not data.get("choices"):
                         logger.warning(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
+                    usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    logger.info(f"Grok3 API 調用：函數=prioritize_threads_with_grok, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     content = data["choices"][0]["message"]["content"]
                     try:
                         result = json.loads(content)
@@ -588,6 +608,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
+                        # 記錄 token 使用情況
+                        usage = data.get("usage", {})
+                        prompt_tokens = usage.get("prompt_tokens", 0)
+                        completion_tokens = usage.get("completion_tokens", 0)
+                        logger.info(f"Grok3 API 調用：函數=stream_grok3_response (reply_count), 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                         result = json.loads(data["choices"][0]["message"]["content"])
                         max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
                         logger.info(f"Grok 選擇每帖子回覆數：{max_replies_per_thread}，原因：{result.get('reason', '默認')}")
@@ -814,6 +839,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(f"開始生成回應，查詢：{user_query}")
     
     response_content = ""
+    prompt_tokens = 0
+    completion_tokens = 0
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
@@ -826,6 +853,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     if line and not line.isspace():
                         line_str = line.decode('utf-8').strip()
                         if line_str == "data: [DONE]":
+                            # 記錄最終 token 使用情況
+                            logger.info(f"Grok3 API 調用：函數=stream_grok3_response, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                             break
                         if line_str.startswith("data:"):
                             try:
@@ -838,6 +867,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
+                                # 累計 token
+                                usage = chunk.get("usage", {})
+                                if usage:
+                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
                             except json.JSONDecodeError:
                                 logger.warning(f"流式數據 JSON 解碼錯誤")
                                 continue
