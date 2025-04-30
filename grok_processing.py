@@ -538,22 +538,26 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "recommend_threads": (280, 800),
         "monitor_events": (420, 1000),
         "classify_opinions": (420, 1000),
-        "follow_up": (700, 3000),
-        "fetch_thread_by_id": (420, 1000)
+        "follow_up": (700, 4000),  # Increased max for complex follow-up queries
+        "fetch_thread_by_id": (420, 1500)  # Increased max for detailed thread queries
     }
     
     word_min, word_max = intent_word_ranges.get(intent, (420, 1000))
     min_tokens = int(word_min / 0.8)
     max_tokens = int(word_max / 0.8)
     target_tokens = int((min_tokens + max_tokens) / 2)
+    
     total_replies_count = sum(len(data.get("replies", [])) for data in (thread_data if isinstance(thread_data, list) else thread_data.values()))
+    
+    # Dynamic token adjustment based on reply count and intent complexity
     if total_replies_count:
-        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9
+        complexity_factor = 1.5 if intent in ["follow_up", "fetch_thread_by_id", "summarize", "sentiment", "classify_opinions"] else 1.0
+        target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9 * complexity_factor
     target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"動態目標 token 數：{target_tokens}，最小 token={min_tokens}，最大 token={max_tokens}，總回覆數={total_replies_count}")
 
-    max_tokens_limit = 6000
-    max_tokens = min(target_tokens + 300, max_tokens_limit)
+    max_tokens_limit = 8000  # Increased global token limit for complex responses
+    max_tokens = min(target_tokens + 500, max_tokens_limit)  # Allow extra buffer
     logger.info(f"最終目標 token 數：{target_tokens}，最大 token 限制={max_tokens_limit}")
 
     max_replies_per_thread = 100
@@ -771,7 +775,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     payload = {
         "model": "grok-3-beta",
         "messages": messages,
-        "max_tokens": target_tokens,
+        "max_tokens": max_tokens,  # Use max_tokens to allow full response
         "temperature": 0.7,
         "stream": True
     }
@@ -808,9 +812,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 continue
                 
                 logger.info(f"回應生成完成：長度={len(response_content)}，目標={target_tokens}")
-                if len(response_content) < target_tokens * 0.9:
-                    logger.warning(f"回應過短：長度={len(response_content)}，目標={target_tokens}")
-                    yield f"\n提示：回應長度（{len(response_content)}）未達預期（{target_tokens}）。請嘗試更具體的查詢或稍後重試。"
         except Exception as e:
             logger.error(f"回應生成失敗：{str(e)}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
@@ -1130,8 +1131,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "dislike_count": reply.get("dislike_count", 0),
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         }
-                        for reply in result.get("replies", [])
-                        if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                        for reply in result.get("replies", []) if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
                     ]
                     thread_info = {
                         "thread_id": thread_id,
