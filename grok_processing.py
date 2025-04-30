@@ -457,7 +457,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
             query=user_query,
             cat_name=cat_name,
             cat_id=cat_id,
-            threads=[{"thread_id": t["thread_id"], "title(clean_html(t["title"])): t["title"], "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
+            threads=[{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
         logger.error(f"構建優先級提示失敗：{str(e)}")
@@ -718,7 +718,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "total_fetched_replies": 0
             } for tid, data in filtered_thread_data.items()
         }
-        total_replies_count =0
+        total_replies_count = 0
     
     thread_id_prompt = "\n請在回應中明確包含相關帖子 ID，格式為 [帖子 ID: xxx]。禁止包含 [post_id: ...] 格式。"
     prompt = prompt_builder.build_response(
@@ -877,7 +877,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 tasks.append(get_lihkg_thread_content(
                     thread_id=thread_id_str,
                     cat_id=cat_id,
-                    max_replies=100,  # 統一初始抓取
+                    max_replies=100,
                     fetch_last_pages=0,
                     specific_pages=[],
                     start_page=1
@@ -953,7 +953,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     supplemental_tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id,
                         cat_id=cat_id,
-                        max_replies=100,  # 統一初始抓取
+                        max_replies=100,
                         fetch_last_pages=0,
                         specific_pages=[],
                         start_page=1
@@ -1103,7 +1103,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
                 cat_id=cat_id,
-                max_replies=100,  # 統一初始抓取
+                max_replies=100,
                 fetch_last_pages=0,
                 specific_pages=[],
                 start_page=1
