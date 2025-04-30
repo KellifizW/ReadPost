@@ -214,7 +214,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
     if id_match:
         thread_id = id_match.group(1)
         logger.info(f"檢測到明確的帖子 ID：{thread_id}")
-        min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
             "intent": "fetch_thread_by_id",
@@ -223,7 +222,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "data_type": "replies",
             "post_limit": 1,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": []},
+            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": []},
             "processing": {"intent": "fetch_thread_by_id", "top_thread_ids": [thread_id]},
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
@@ -239,7 +238,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
     thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
     if thread_id:
         logger.info(f"確認追問意圖：帖子 ID={thread_id}，標題={thread_title}")
-        min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
             "intent": "follow_up",
@@ -248,7 +246,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "data_type": "replies",
             "post_limit": 1,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": query_keywords},
+            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": query_keywords},
             "processing": {"intent": "follow_up", "top_thread_ids": [thread_id]},
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
@@ -286,7 +284,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
         theme = query_keywords[0] if query_keywords else historical_theme
         theme_keywords = query_keywords or historical_keywords
         logger.info(f"追問意圖回退到關鍵詞搜索，提取關鍵詞：{theme_keywords}")
-        min_likes = 0 if cat_id in ["5", "15"] else 5
         return {
             "direct_response": False,
             "intent": intent,
@@ -295,7 +292,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "data_type": "both",
             "post_limit": 2,
             "reply_limit": 200,
-            "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
+            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
             "processing": {"intent": intent, "top_thread_ids": referenced_thread_ids[:2]},
             "candidate_thread_ids": [],
             "top_thread_ids": referenced_thread_ids[:2],
@@ -394,7 +391,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     reply_limit = 0
                     data_type = "both"
                     processing = {"intent": intent, "top_thread_ids": []}
-                    min_likes = 0 if cat_id in ["5", "15"] else 5
                     if intent in ["search_keywords", "find_themed"]:
                         theme = query_keywords[0] if query_keywords else historical_theme
                         theme_keywords = query_keywords or historical_keywords
@@ -416,7 +412,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                         "data_type": data_type,
                         "post_limit": post_limit,
                         "reply_limit": reply_limit,
-                        "filters": {"min_replies": 0, "min_likes": min_likes, "sort": "popular", "keywords": theme_keywords},
+                        "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
                         "processing": processing,
                         "candidate_thread_ids": [],
                         "top_thread_ids": referenced_thread_ids[:2],
@@ -429,7 +425,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            min_likes = 0 if cat_id in ["5", "15"] else 5
             return {
                 "direct_response": False,
                 "intent": "summarize_posts",
@@ -438,7 +433,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                 "data_type": "both",
                 "post_limit": 5,
                 "reply_limit": 0,
-                "filters": {"min_replies": 0, "min_likes": min_likes, "keywords": historical_keywords},
+                "filters": {"min_replies": 10, "min_likes": 0, "keywords": historical_keywords},
                 "processing": {"intent": "summarize"},
                 "candidate_thread_ids": [],
                 "top_thread_ids": [],
@@ -522,7 +517,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
     conversation_context = conversation_context or []
-    filters = filters or {"min_replies": 0, "min_likes": 0 if cat_id in ["5", "15"] else 5}
+    filters = filters or {"min_replies": 10, "min_likes": 0}
     prompt_builder = PromptBuilder()
     
     if not isinstance(processing, dict):
@@ -540,23 +535,23 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     
     intent_word_ranges = {
-        "list": (140, 280),
-        "summarize": (420, 700),
-        "sentiment": (420, 700),
-        "compare": (560, 840),
-        "introduce": (70, 140),
-        "general": (280, 560),
-        "themed": (420, 700),
-        "fetch_dates": (280, 560),
-        "search_keywords": (420, 700),
-        "recommend_threads": (280, 560),
-        "monitor_events": (420, 700),
-        "classify_opinions": (420, 700),
-        "follow_up": (700, 2100),
-        "fetch_thread_by_id": (420, 700)
+        "list": (140, 400),
+        "summarize": (420, 1000),
+        "sentiment": (420, 1000),
+        "compare": (560, 1200),
+        "introduce": (70, 200),
+        "general": (280, 800),
+        "themed": (420, 1000),
+        "fetch_dates": (280, 800),
+        "search_keywords": (420, 1000),
+        "recommend_threads": (280, 800),
+        "monitor_events": (420, 1000),
+        "classify_opinions": (420, 1000),
+        "follow_up": (700, 3000),
+        "fetch_thread_by_id": (420, 1000)
     }
     
-    word_min, word_max = intent_word_ranges.get(intent, (420, 700))
+    word_min, word_max = intent_word_ranges.get(intent, (420, 1000))
     min_tokens = int(word_min / 0.8)
     max_tokens = int(word_max / 0.8)
     target_tokens = int((min_tokens + max_tokens) / 2)
@@ -566,7 +561,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     target_tokens = min(max(int(target_tokens), min_tokens), max_tokens)
     logger.info(f"動態目標 token 數：{target_tokens}，最小 token={min_tokens}，最大 token={max_tokens}，總回覆數={total_replies_count}")
 
-    max_tokens_limit = 4600
+    max_tokens_limit = 6000
     max_tokens = min(target_tokens + 300, max_tokens_limit)
     logger.info(f"最終目標 token 數：{target_tokens}，最大 token 限制={max_tokens_limit}")
 
@@ -874,8 +869,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         post_limit = min(analysis.get("post_limit", 5), 20)
         reply_limit = analysis.get("reply_limit", 0)
         filters = analysis.get("filters", {})
-        min_replies = filters.get("min_replies", 0)
-        min_likes = filters.get("min_likes", 0 if cat_id in ["5", "15"] else 5)
+        min_replies = filters.get("min_replies", 10)
+        min_likes = 0
         top_thread_ids = analysis.get("top_thread_ids", [])
         intent = analysis.get("intent", "summarize_posts")
         
@@ -1057,7 +1052,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             filtered_items = [
                 item for item in initial_threads
-                if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes)
+                if item.get("no_of_reply", 0) >= min_replies
             ]
             
             for item in initial_threads:
@@ -1166,7 +1161,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             filtered_items = [
                 item for item in initial_threads
-                if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes)
+                if item.get("no_of_reply", 0) >= min_replies
             ]
             
             for item in initial_threads:
