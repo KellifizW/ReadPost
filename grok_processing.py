@@ -516,7 +516,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     logger.info(f"Grok3 API 調用：函數=prioritize_threads_with_grok, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     content = data["choices"][0]["message"]["content"]
                     try:
-                        result coherence = json.loads(content)
+                        result = json.loads(content)
                         logger.info(f"帖子優先級排序成功：{result}")
                         return result
                     except json.JSONDecodeError:
