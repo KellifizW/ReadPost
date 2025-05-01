@@ -107,7 +107,8 @@ async def main():
     }
 
     def on_category_change():
-        logger.info(f"Category selectbox changed to {st.session_state.cat_select}")
+        cat_select = st.session_state.get("cat_select", "未知分類")
+        logger.info(f"Category selectbox changed to {cat_select}")
 
     col1, col2 = st.columns([3, 1])
     with col1:
