@@ -100,10 +100,10 @@ async def extract_keywords_with_grok(query, conversation_context=None):
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
         logger.error(f"缺少 Grok 3 API 密鑰：{str(e)}")
-        return {"keywords": [], "reason": "缺少 API 密鑰", "time_sensitive": False}
+        return {"keywords": [], "reason": "缺少 API 密鑰"}
 
     prompt = f"""
-請從以下查詢提取 1-3 個核心關鍵詞（僅保留名詞或核心動詞，過濾停用詞如「的」「是」）。關鍵詞應反映主題或意圖。保留「你點睇」作為意圖短語，映射到「分析」。過濾無意義粵語俚語（如「講D咩」）。若查詢包含時間性詞語（如「今晚」「今日」「最近」「呢排」），設置 time_sensitive 為 true。以 JSON 格式返回，附簡要邏輯說明（70字內）。
+你是一個專業的語義分析助手，專注於從用戶查詢中提取關鍵詞，以繁體中文回答。請分析以下查詢，提取 1-3 個最相關的核心關鍵詞（僅保留名詞或核心動詞，過濾掉無意義的停用詞如「的」「是」「個」等）。關鍵詞應反映查詢的主題或意圖，適合用於 LIHKG 論壇的帖子搜索或匹配。特別注意處理粵語俚語（如「講D咩」「點解」），將其視為無意義詞語並過濾。請以 JSON 格式返回結果，並提供提取邏輯的簡要解釋（70字以內）。
 
 查詢："{query}"
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
@@ -111,8 +111,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
 返回格式：
 {{
   "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
-  "reason": "提取邏輯說明（70字以內）",
-  "time_sensitive": true/false
+  "reason": "提取邏輯說明（70字以內）"
 }}
 """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -139,24 +138,18 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     if not data.get("choices"):
                         logger.warning(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
-                    usage = data.get("usage", {})
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-                    logger.info(f"Grok3 API 調用：函數=extract_keywords_with_grok, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     result = json.loads(data["choices"][0]["message"]["content"])
                     keywords = result.get("keywords", [])[:3]
                     reason = result.get("reason", "未提供原因")[:70]
-                    time_sensitive = result.get("time_sensitive", False)
-                    logger.info(f"提取關鍵詞：{keywords}，原因：{reason}，時間敏感：{time_sensitive}")
-                    return {"keywords": keywords, "reason": reason, "time_sensitive": time_sensitive}
+                    logger.info(f"提取關鍵詞：{keywords}，原因：{reason}")
+                    return {"keywords": keywords, "reason": reason}
         except Exception as e:
             logger.warning(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
             logger.error(f"關鍵詞提取失敗，嘗試 {max_retries} 次後放棄")
-            return {"keywords": [], "reason": f"提取失敗：{str(e)}"[:70], "time_sensitive": False}
+            return {"keywords": [], "reason": f"提取失敗：{str(e)}"[:70]}
 
 async def summarize_context(conversation_context):
     if not conversation_context:
@@ -190,11 +183,6 @@ async def summarize_context(conversation_context):
                     logger.warning(f"對話摘要失敗：狀態碼={response.status}")
                     return {"theme": "一般", "keywords": []}
                 data = await response.json()
-                # 記錄 token 使用情況
-                usage = data.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
-                logger.info(f"Grok3 API 調用：函數=summarize_context, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                 result = json.loads(data["choices"][0]["message"]["content"])
                 logger.info(f"對話摘要完成：主題={result['theme']}，關鍵詞={result['keywords']}")
                 return result
@@ -384,11 +372,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     if not data.get("choices"):
                         logger.warning(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
-                    usage = data.get("usage", {})
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-                    logger.info(f"Grok3 API 調用：函數=analyze_and_screen, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     result = json.loads(data["choices"][0]["message"]["content"])
                     intent = result.get("intent", "summarize_posts")
                     confidence = result.get("confidence", 0.7)
@@ -503,11 +486,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     if not data.get("choices"):
                         logger.warning(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
-                    usage = data.get("usage", {})
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-                    logger.info(f"Grok3 API 調用：函數=prioritize_threads_with_grok, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                     content = data["choices"][0]["message"]["content"]
                     try:
                         result = json.loads(content)
@@ -608,11 +586,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
-                        # 記錄 token 使用情況
-                        usage = data.get("usage", {})
-                        prompt_tokens = usage.get("prompt_tokens", 0)
-                        completion_tokens = usage.get("completion_tokens", 0)
-                        logger.info(f"Grok3 API 調用：函數=stream_grok3_response (reply_count), 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                         result = json.loads(data["choices"][0]["message"]["content"])
                         max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
                         logger.info(f"Grok 選擇每帖子回覆數：{max_replies_per_thread}，原因：{result.get('reason', '默認')}")
@@ -839,8 +812,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(f"開始生成回應，查詢：{user_query}")
     
     response_content = ""
-    prompt_tokens = 0
-    completion_tokens = 0
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
@@ -853,8 +824,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     if line and not line.isspace():
                         line_str = line.decode('utf-8').strip()
                         if line_str == "data: [DONE]":
-                            # 記錄最終 token 使用情況
-                            logger.info(f"Grok3 API 調用：函數=stream_grok3_response, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                             break
                         if line_str.startswith("data:"):
                             try:
@@ -867,11 +836,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
-                                # 累計 token
-                                usage = chunk.get("usage", {})
-                                if usage:
-                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
                             except json.JSONDecodeError:
                                 logger.warning(f"流式數據 JSON 解碼錯誤")
                                 continue
@@ -927,11 +891,6 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))  # 去重
         intent = analysis.get("intent", "summarize_posts")
         
-        # 檢查時間敏感關鍵詞
-        keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
-        fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
-        logger.info(f"抓取方式：{'從最後一頁開始' if fetch_last_pages else '從第一頁開始'}，時間敏感：{keyword_result.get('time_sensitive', False)}")
-        
         if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
             logger.info(f"[Task {id(asyncio.current_task())}] {intent} 意圖，頂部帖子 ID：{top_thread_ids}")
             thread_data = []
@@ -950,7 +909,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     thread_id=thread_id_str,
                     cat_id=cat_id,
                     max_replies=100,
-                    fetch_last_pages=fetch_last_pages,
+                    fetch_last_pages=0,
                     specific_pages=[],
                     start_page=1
                 ))
@@ -1027,7 +986,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         thread_id=thread_id,
                         cat_id=cat_id,
                         max_replies=100,
-                        fetch_last_pages=fetch_last_pages,
+                        fetch_last_pages=0,
                         specific_pages=[],
                         start_page=1
                     ))
@@ -1180,7 +1139,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 thread_id=thread_id,
                 cat_id=cat_id,
                 max_replies=100,
-                fetch_last_pages=fetch_last_pages,
+                fetch_last_pages=0,
                 specific_pages=[],
                 start_page=1
             ))
