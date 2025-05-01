@@ -566,18 +566,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "follow_up": (700, 4000),
         "fetch_thread_by_id": (420, 1500)
     }
-
-    metadata = [
-        {
-            "thread_id": data["thread_id"],
-            "title": data["title"],
-            "no_of_reply": data.get("no_of_reply", 0),  # 確保包含 no_of_reply
-            "like_count": data.get("like_count", 0),
-            "dislike_count": data.get("dislike_count", 0),
-            "last_reply_time": data.get("last_reply_time", 0)
-        } for data in filtered_thread_data.values()
-    ]
-    logger.info(f"Metadata 內容：{metadata}")  # 添加日誌驗證 metadata
     
     word_min, word_max = intent_word_ranges.get(intent, (420, 1000))
     min_tokens = int(word_min / 0.8)
@@ -750,7 +738,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     updated_data = {
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
-                        "no_of_reply": data.get("no_of_reply", 0),
+                        "no_of_reply": content_result.get("total_replies", data.get("no_of_reply", 0)),
                         "last_reply_time": data.get("last_reply_time", ""),
                         "like_count": data.get("like_count", 0),
                         "dislike_count": data.get("dislike_count", 0),
@@ -775,6 +763,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 f"[Task {id(asyncio.current_task())}] 帖子 ID={tid} 處理完成：頁面={context['pages']}，"
                 f"原始回覆數={context['replies']}，過濾後回覆數={context['filtered_replies']}"
             )
+
+    # 構建 metadata，確保 no_of_reply 正確
+    metadata = [
+        {
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),
+            "like_count": data.get("like_count", 0),
+            "dislike_count": data.get("dislike_count", 0),
+            "last_reply_time": data.get("last_reply_time", 0)
+        } for data in filtered_thread_data.values()
+    ]
+    logger.info(f"Metadata 內容：{metadata}")
 
     if not any(data["replies"] for data in filtered_thread_data.values()) and metadata:
         filtered_thread_data = {
@@ -801,7 +802,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters
-    ) + thread_id_prompt
+    ) + thread_id_prompt + "\n回應需列出帖子標題和回覆數，格式：[帖子 ID: {thread_id}] {title}，回覆數：{no_of_reply}。即使回覆數少於10也需列出，並按篩選條件排序。"
     
     prompt_length = len(prompt)
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -821,6 +822,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             } for tid, data in filtered_thread_data.items()
         }
         total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
+        metadata = [
+            {
+                "thread_id": data["thread_id"],
+                "title": data["title"],
+                "no_of_reply": data.get("no_of_reply", 0),
+                "like_count": data.get("like_count", 0),
+                "dislike_count": data.get("dislike_count", 0),
+                "last_reply_time": data.get("last_reply_time", 0)
+            } for data in filtered_thread_data.values()
+        ]
         prompt = prompt_builder.build_response(
             intent=intent,
             query=user_query,
@@ -829,7 +840,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
             filters=filters
-        ) + thread_id_prompt
+        ) + thread_id_prompt + "\n回應需列出帖子標題和回覆數，格式：[帖子 ID: {thread_id}] {title}，回覆數：{no_of_reply}。即使回覆數少於10也需列出，並按篩選條件排序。"
         target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9
         target_tokens = min(max(int(target_tokens), min_tokens), max_tokens_limit)
         logger.info(f"截斷提示：原始長度={prompt_length}，新長度={len(prompt)}，新目標 token 數：{target_tokens}")
