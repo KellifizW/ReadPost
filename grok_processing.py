@@ -139,7 +139,6 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     if not data.get("choices"):
                         logger.warning(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -190,7 +189,6 @@ async def summarize_context(conversation_context):
                     logger.warning(f"對話摘要失敗：狀態碼={response.status}")
                     return {"theme": "一般", "keywords": []}
                 data = await response.json()
-                # 記錄 token 使用情況
                 usage = data.get("usage", {})
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
@@ -285,7 +283,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
         
         last_query_keywords = (await extract_keywords_with_grok(last_user_query, conversation_context))["keywords"]
         common_words = set(query_keywords).intersection(set(last_query_keywords))
-        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼",ICER])
+        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
         
         if len(common_words) >= 1 or explicit_follow_up:
             is_follow_up = True
@@ -384,7 +382,6 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     if not data.get("choices"):
                         logger.warning(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -394,13 +391,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     confidence = result.get("confidence", 0.7)
                     reason = result.get("reason", "語義匹配")
                     
-                    if intent == "fetch_dates":
-                        reason = "用戶查詢明確要求回覆數量，設置為 fetch_dates"
-                        theme = "回覆數量查詢"
-                        data_type = "threads"
-                        post_limit = 5
-                        theme_keywords = ["回覆數量"]
-                    elif is_vague and historical_theme != "一般":
+                    if is_vague and historical_theme != "一般":
                         intent = "summarize_posts"
                         reason = f"問題模糊，延續歷史主題：{historical_theme}"
                     elif is_vague:
@@ -509,7 +500,6 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     if not data.get("choices"):
                         logger.warning(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
-                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -614,7 +604,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
-                        # 記錄 token 使用情況
                         usage = data.get("usage", {})
                         prompt_tokens = usage.get("prompt_tokens", 0)
                         completion_tokens = usage.get("completion_tokens", 0)
@@ -662,7 +651,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     filtered_thread_data = {}
     total_replies_count = 0
-    thread_log_context = {}  # 記錄每個帖子的日誌上下文
+    thread_log_context = {}
     
     for tid, data in thread_data_dict.items():
         thread_log_context[tid] = {
@@ -762,7 +751,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "timestamp": time.time()
                         }
 
-    # 統一記錄帖子處理總結日誌，僅記錄有回覆的帖子
     for tid, context in thread_log_context.items():
         if context["filtered_replies"] > 0:
             logger.info(
@@ -859,7 +847,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     if line and not line.isspace():
                         line_str = line.decode('utf-8').strip()
                         if line_str == "data: [DONE]":
-                            # 記錄最終 token 使用情況
                             logger.info(f"Grok3 API 調用：函數=stream_grok3_response, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                             break
                         if line_str.startswith("data:"):
@@ -873,7 +860,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
-                                # 累計 token
                                 usage = chunk.get("usage", {})
                                 if usage:
                                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
@@ -930,10 +916,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
         min_likes = 0
-        top_thread_ids = list(set(analysis.get("top_thread_ids", [])))  # 去重
+        top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
         intent = analysis.get("intent", "summarize_posts")
         
-        # 檢查時間敏感關鍵詞
         keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         logger.info(f"抓取方式：{'從最後一頁開始' if fetch_last_pages else '從第一頁開始'}，時間敏感：{keyword_result.get('time_sensitive', False)}")
@@ -943,7 +928,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_data = []
             rate_limit_info = []
             
-            candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": content_result.get("total_replies", 0), "like_count": 0} for tid in top_thread_ids]
+            candidate_threads = [
+                {"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0}
+                for tid in top_thread_ids
+            ]
             
             tasks = []
             for thread_id in top_thread_ids:
@@ -1043,6 +1031,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     for idx, result in enumerate(supplemental_results):
                         if isinstance(result, Exception):
                             logger.warning(f"[Task {id(asyncio.current_task())}] 無法抓取補充帖子 {filtered_supplemental[idx]['thread_id']}：{str(result)}")
+                            continue
                         request_counter = result.get("request_counter", request_counter)
                         last_reset = result.get("last_reset", last_reset)
                         rate_limit_until = result.get("rate_limit_until", rate_limit_until)
@@ -1064,7 +1053,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             thread_info = {
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
-                                "no_of_reply": result.get("total_replies", 0),
+                                "no_of_reply": result.get("total_replies", filtered_supplemental[idx].get("total_replies", 0)),
                                 "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
                                 "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
@@ -1095,10 +1084,22 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         
         if top_thread_ids:
             logger.info(f"[Task {id(asyncio.current_task())}] 使用分析中的頂部帖子 ID：{top_thread_ids}")
+            async with request_semaphore:
+                result = await get_lihkg_topic_list(cat_id=cat_id, start_page=1, max_pages=1)
+            items = result.get("items", [])
             candidate_threads = [
-                {"thread_id": str(tid), "title": "", "no_of_reply": content_result.get("total_replies", 0), "like_count": 0}
-                for tid in top_thread_ids
+                {
+                    "thread_id": str(tid),
+                    "title": next((item["title"] for item in items if str(item["thread_id"]) == str(tid)), ""),
+                    "no_of_reply": next((item.get("total_replies", 0) for item in items if str(item["thread_id"]) == str(tid)), 0),
+                    "like_count": next((item.get("like_count", 0) for item in items if str(item["thread_id"]) == str(tid)), 0)
+                }
+                for tid in top_thread_ids if any(str(item["thread_id"]) == str(tid) for item in items)
             ]
+            request_counter = result.get("request_counter", request_counter)
+            last_reset = result.get("last_reset", last_reset)
+            rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+            rate_limit_info.extend(result.get("rate_limit_info", []))
         else:
             initial_threads = []
             for page in range(1, 6):
@@ -1126,7 +1127,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             
             filtered_items = [
                 item for item in initial_threads
-                if item.get("no_of_reply", 0) >= min_replies
+                if item.get("total_replies", 0) >= min_replies
             ]
             
             for item in initial_threads:
@@ -1137,7 +1138,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "data": {
                                 "thread_id": thread_id,
                                 "title": item["title"],
-                                "no_of_reply": item.get("no_of_reply", 0),
+                                "no_of_reply": item.get("total_replies", 0),
                                 "last_reply_time": item["last_reply_time"],
                                 "like_count": item.get("like_count", 0),
                                 "dislike_count": item.get("dislike_count", 0),
@@ -1147,29 +1148,35 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "timestamp": time.time()
                         }
             
-            if intent == "fetch_dates":
-                sorted_items = sorted(
-                    filtered_items,
-                    key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
-                    reverse=True
-                )
-                candidate_threads = sorted_items[:post_limit]
-            else:
-                if filtered_items:
-                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
-                    top_thread_ids = prioritization.get("top_thread_ids", [])
-                    if not top_thread_ids:
-                        sorted_items = sorted(
-                            filtered_items,
-                            key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
-                            reverse=True
-                        )
-                        candidate_threads = sorted_items[:post_limit]
-                    else:
-                        candidate_threads = [
-                            item for item in filtered_items
-                            if str(item["thread_id"]) in map(str, top_thread_ids)
-                        ][:post_limit]
+            if filtered_items:
+                prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
+                top_thread_ids = prioritization.get("top_thread_ids", [])
+                if not top_thread_ids:
+                    sorted_items = sorted(
+                        filtered_items,
+                        key=lambda x: x.get("total_replies", 0) * 0.6 + x.get("like_count", 0) * 0.4,
+                        reverse=True
+                    )
+                    candidate_threads = [
+                        {
+                            "thread_id": str(item["thread_id"]),
+                            "title": item["title"],
+                            "no_of_reply": item.get("total_replies", 0),
+                            "like_count": item.get("like_count", 0)
+                        }
+                        for item in sorted_items[:post_limit]
+                    ]
+                else:
+                    candidate_threads = [
+                        {
+                            "thread_id": str(item["thread_id"]),
+                            "title": item["title"],
+                            "no_of_reply": item.get("total_replies", 0),
+                            "like_count": item.get("like_count", 0)
+                        }
+                        for item in filtered_items
+                        if str(item["thread_id"]) in map(str, top_thread_ids)
+                    ][:post_limit]
         
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
@@ -1216,7 +1223,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", 0),
+                        "no_of_reply": result.get("total_replies", candidate_threads[idx].get("no_of_reply", 0)),
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                         "like_count": candidate_threads[idx].get("like_count", 0),
                         "dislike_count": candidate_threads[idx].get("dislike_count", 0),
