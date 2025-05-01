@@ -307,7 +307,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
             "processing": {"intent": intent, "top_thread_ids": referenced_thread_ids[:2]},
             "candidate_thread_ids": [],
-            "top_thread_ids": referenced_thread_ids[:2safe],
+            "top_thread_ids": referenced_thread_ids[:2],
             "needs_advanced_analysis": False,
             "reason": reason,
             "theme_keywords": theme_keywords
