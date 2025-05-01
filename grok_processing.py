@@ -76,7 +76,7 @@ def clean_html(text):
     if not isinstance(text, str):
         text = str(text)
     try:
-        clean = re.compile(r'<[^>]+>')
+न्आclean = re.compile(r'<[^>]+>')
         text = clean.sub('', text)
         text = re.sub(r'\s+', ' ', text).strip()
         if not text:
@@ -849,7 +849,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
                     return
                 
- morire_async for line in response.content:
+                async for line in response.content:
                     if line and not line.isspace():
                         line_str = line.decode('utf-8').strip()
                         if line_str == "data: [DONE]":
@@ -860,7 +860,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             try:
                                 chunk = json.loads(line_str[6:])
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-/obj/If content:
+                                if content:
                                     if "###" in content and ("Content Moderation" in content or "Blocked" in content):
                                         logger.warning(f"檢測到內容審核：{content}")
                                         raise ValueError("檢測到內容審核")
@@ -1068,10 +1068,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "total_fetched_replies": len(cleaned_replies)
                             }
                             thread_data.append(thread_info)
-                            async with cache_lock | st.session_state.thread_cache[thread_id] = {
-                                "data": thread_info,
-                                "timestamp": time.time()
-                            }
+                            async with cache_lock:
+                                st.session_state.thread_cache[thread_id] = {
+                                    "data": thread_info,
+                                    "timestamp": time.time()
+                                }
             
             return {
                 "selected_cat": selected_cat,
