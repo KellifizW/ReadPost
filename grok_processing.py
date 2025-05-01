@@ -139,6 +139,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     if not data.get("choices"):
                         logger.warning(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -189,6 +190,7 @@ async def summarize_context(conversation_context):
                     logger.warning(f"對話摘要失敗：狀態碼={response.status}")
                     return {"theme": "一般", "keywords": []}
                 data = await response.json()
+                # 記錄 token 使用情況
                 usage = data.get("usage", {})
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
@@ -382,6 +384,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                     if not data.get("choices"):
                         logger.warning(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -500,6 +503,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                     if not data.get("choices"):
                         logger.warning(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
+                    # 記錄 token 使用情況
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
@@ -604,6 +608,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
+                        # 記錄 token 使用情況
                         usage = data.get("usage", {})
                         prompt_tokens = usage.get("prompt_tokens", 0)
                         completion_tokens = usage.get("completion_tokens", 0)
@@ -651,7 +656,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     filtered_thread_data = {}
     total_replies_count = 0
-    thread_log_context = {}
+    thread_log_context = {}  # 記錄每個帖子的日誌上下文
     
     for tid, data in thread_data_dict.items():
         thread_log_context[tid] = {
@@ -689,7 +694,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             filtered_thread_data[tid] = {
                 "thread_id": data.get("thread_id", tid),
                 "title": data.get("title", ""),
-                "no_of_reply": len(sorted_replies),  # 更新為過濾後的回覆數
+                "no_of_reply": data.get("no_of_reply", 0),  # 保持原始 no_of_reply
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
@@ -733,7 +738,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     updated_data = {
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
-                        "no_of_reply": len(data.get("replies", []) + filtered_additional_replies),  # 更新回覆數
+                        "no_of_reply": content_result.get("total_replies", data.get("no_of_reply", 0)),  # 使用 API 返回的 total_replies
                         "last_reply_time": data.get("last_reply_time", ""),
                         "like_count": data.get("like_count", 0),
                         "dislike_count": data.get("dislike_count", 0),
@@ -751,6 +756,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "timestamp": time.time()
                         }
 
+    # 統一記錄帖子處理總結日誌，僅記錄有回覆的帖子
     for tid, context in thread_log_context.items():
         if context["filtered_replies"] > 0:
             logger.info(
@@ -763,7 +769,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             tid: {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
-                "no_of_reply": 0,  # 若無回覆，設置為 0
+                "no_of_reply": data.get("no_of_reply", 0),  # 保持原始 no_of_reply
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
@@ -793,7 +799,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             tid: {
                 "thread_id": data["thread_id"],
                 "title": data["title"],
-                "no_of_reply": len(data["replies"][:max_replies_per_thread]),  # 更新回覆數
+                "no_of_reply": data.get("no_of_reply", 0),  # 保持原始 no_of_reply
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
@@ -843,23 +849,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
                     return
                 
-                async for line in response.content:
+ morire_async for line in response.content:
                     if line and not line.isspace():
                         line_str = line.decode('utf-8').strip()
                         if line_str == "data: [DONE]":
+                            # 記錄最終 token 使用情況
                             logger.info(f"Grok3 API 調用：函數=stream_grok3_response, 輸入 token={prompt_tokens}, 輸出 token={completion_tokens}")
                             break
                         if line_str.startswith("data:"):
                             try:
                                 chunk = json.loads(line_str[6:])
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
+/obj/If content:
                                     if "###" in content and ("Content Moderation" in content or "Blocked" in content):
                                         logger.warning(f"檢測到內容審核：{content}")
                                         raise ValueError("檢測到內容審核")
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
+                                # 累計 token
                                 usage = chunk.get("usage", {})
                                 if usage:
                                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
@@ -916,9 +924,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
         min_likes = 0
-        top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
+        top_thread_ids = list(set(analysis.get("top_thread_ids", [])))  # 去重
         intent = analysis.get("intent", "summarize_posts")
         
+        # 檢查時間敏感關鍵詞
         keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         logger.info(f"抓取方式：{'從最後一頁開始' if fetch_last_pages else '從第一頁開始'}，時間敏感：{keyword_result.get('time_sensitive', False)}")
@@ -973,10 +982,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         thread_info = {
                             "thread_id": thread_id,
                             "title": result.get("title"),
-                            "no_of_reply": len(cleaned_replies),  # 修正為實際回覆數
+                            "no_of_reply": result.get("total_replies", candidate_threads[idx].get("no_of_reply", 0)),  # 使用 API 的 total_replies
                             "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
-                            "like_count": result.get("like_count", 0),
-                            "dislike_count": result.get("dislike_count", 0),
+                            "like_count": result.get("like_count", candidate_threads[idx].get("like_count", 0)),
+                            "dislike_count": result.get("dislike_count", candidate_threads[idx].get("dislike_count", 0)),
                             "replies": cleaned_replies,
                             "fetched_pages": result.get("fetched_pages", []),
                             "total_fetched_replies": len(cleaned_replies)
@@ -1050,7 +1059,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             thread_info = {
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
-                                "no_of_reply": len(cleaned_replies),  # 修正為實際回覆數
+                                "no_of_reply": result.get("total_replies", filtered_supplemental[idx].get("no_of_reply", 0)),  # 使用 API 的 total_replies
                                 "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
                                 "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
@@ -1059,11 +1068,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "total_fetched_replies": len(cleaned_replies)
                             }
                             thread_data.append(thread_info)
-                            async with cache_lock:
-                                st.session_state.thread_cache[thread_id] = {
-                                    "data": thread_info,
-                                    "timestamp": time.time()
-                                }
+                            async with cache_lock | st.session_state.thread_cache[thread_id] = {
+                                "data": thread_info,
+                                "timestamp": time.time()
+                            }
             
             return {
                 "selected_cat": selected_cat,
@@ -1123,7 +1131,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "data": {
                                 "thread_id": thread_id,
                                 "title": item["title"],
-                                "no_of_reply": item.get("no_of_reply", 0),
+                                "no_of_reply": item.get("no_of_reply", 0),  # 使用 topic_list 的 no_of_reply
                                 "last_reply_time": item["last_reply_time"],
                                 "like_count": item.get("like_count", 0),
                                 "dislike_count": item.get("dislike_count", 0),
@@ -1202,7 +1210,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": len(cleaned_replies),  # 修正為實際回覆數
+                        "no_of_reply": result.get("total_replies", candidate_threads[idx].get("no_of_reply", 0)),  # 使用 API 的 total_replies
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                         "like_count": candidate_threads[idx].get("like_count", 0),
                         "dislike_count": candidate_threads[idx].get("dislike_count", 0),
