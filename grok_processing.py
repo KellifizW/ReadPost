@@ -566,6 +566,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "follow_up": (700, 4000),
         "fetch_thread_by_id": (420, 1500)
     }
+
+    metadata = [
+        {
+            "thread_id": data["thread_id"],
+            "title": data["title"],
+            "no_of_reply": data.get("no_of_reply", 0),  # 確保包含 no_of_reply
+            "like_count": data.get("like_count", 0),
+            "dislike_count": data.get("dislike_count", 0),
+            "last_reply_time": data.get("last_reply_time", 0)
+        } for data in filtered_thread_data.values()
+    ]
+    logger.info(f"Metadata 內容：{metadata}")  # 添加日誌驗證 metadata
     
     word_min, word_max = intent_word_ranges.get(intent, (420, 1000))
     min_tokens = int(word_min / 0.8)
