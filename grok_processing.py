@@ -762,7 +762,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
                 "replies": data["replies"][:max_replies_per_thread],
-                "fetched_pages": data.get("fetched_pages", []),
+                "fetched_pages": data["fetched_pages", []],
                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
             } for tid, data in filtered_thread_data.items()
         }
@@ -870,7 +870,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 "like_count": data.get("like_count", 0),
                                 "dislike_count": data.get("dislike_count", 0),
                                 "replies": data["replies"][:max_replies_per_thread],
-                                "fetched_pages": data.get("fetched_pages", []),
+                                "fetched_pages": data["fetched_pages", []],
                                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
                             } for tid, data in filtered_thread_data.items()
                         }
@@ -1046,7 +1046,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 rate_limit_info.extend(supplemental_result.get("rate_limit_info", []))
                 
                 supplemental_tasks = []
-                for item in filtered_supplemental:
+                for item in supplemental_threads:
                     thread_id = str(item["thread_id"])
                     supplemental_tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id,
@@ -1114,6 +1114,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_data = []
             initial_threads = []
             for page in range(1, 6):
+                logger.info(f"Fetching topic list for cat_id={cat_id}, page={page}, start_time={datetime.datetime.now(HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
                 result = await get_lihkg_topic_list(
                     cat_id=cat_id,
                     start_page=page,
@@ -1124,12 +1125,15 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info = result.get("rate_limit_info", [])
                 items = result.get("items", [])
+                logger.debug(f"Raw API response for cat_id={cat_id}, page={page}: items={json.dumps(items, ensure_ascii=False)}")
                 for item in items:
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
+                    logger.info(f"Thread thread_id={item['thread_id']}, title={item['title']}, no_of_reply={item.get('no_of_reply', 0)}")
                 initial_threads.extend(items)
                 if not items:
                     logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}")
                 if len(initial_threads) >= 150:
+                    logger.info(f"Reached thread limit (150), stopping fetch at page={page}")
                     initial_threads = initial_threads[:150]
                     break
                 if progress_callback:
@@ -1139,23 +1143,27 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 item for item in initial_threads
                 if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes) and str(item["thread_id"]) not in previous_thread_ids
             ]
+            logger.info(f"Filtered items count: {len(filtered_items)}, min_replies={min_replies}, min_likes={min_likes}")
+            logger.debug(f"Filtered items: {[{'thread_id': item['thread_id'], 'title': item['title'], 'no_of_reply': item.get('no_of_reply', 0)} for item in filtered_items]}")
             
             for item in initial_threads:
                 thread_id = str(item["thread_id"])
                 if thread_id not in st.session_state.thread_cache:
+                    cache_data = {
+                        "thread_id": thread_id,
+                        "title": item["title"],
+                        "no_of_reply": item.get("no_of_reply", 0),
+                        "last_reply_time": item["last_reply_time"],
+                        "like_count": item.get("like_count", 0),
+                        "dislike_count": item.get("dislike_count", 0),
+                        "replies": [],
+                        "fetched_pages": []
+                    }
                     st.session_state.thread_cache[thread_id] = {
-                        "data": {
-                            "thread_id": thread_id,
-                            "title": item["title"],
-                            "no_of_reply": item.get("no_of_reply", 0),
-                            "last_reply_time": item["last_reply_time"],
-                            "like_count": item.get("like_count", 0),
-                            "dislike_count": item.get("dislike_count", 0),
-                            "replies": [],
-                            "fetched_pages": []
-                        },
+                        "data": cache_data,
                         "timestamp": time.time()
                     }
+                    logger.info(f"Cached thread_id={thread_id}, no_of_reply={cache_data['no_of_reply']}")
             
             if intent == "fetch_dates":
                 sorted_items = sorted(
@@ -1180,10 +1188,11 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 thread_id_str = str(thread_id)
                 if thread_id_str in st.session_state.thread_cache:
                     thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
+                    logger.info(f"Used cached thread_id={thread_id_str}, no_of_reply={st.session_state.thread_cache[thread_id_str]['data']['no_of_reply']}")
                 else:
                     for item in filtered_items:
                         if str(item["thread_id"]) == thread_id_str:
-                            thread_data.append({
+                            thread_info = {
                                 "thread_id": thread_id_str,
                                 "title": item["title"],
                                 "no_of_reply": item.get("no_of_reply", 0),
@@ -1192,12 +1201,16 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "dislike_count": item.get("dislike_count", 0),
                                 "replies": [],
                                 "fetched_pages": []
-                            })
+                            }
+                            thread_data.append(thread_info)
                             st.session_state.thread_cache[thread_id_str] = {
                                 "data": thread_data[-1],
                                 "timestamp": time.time()
                             }
+                            logger.info(f"Added thread_id={thread_id_str}, no_of_reply={thread_info['no_of_reply']} to thread_data")
                             break
+            
+            logger.info(f"Final thread_data: {[{'thread_id': data['thread_id'], 'title': data['title'], 'no_of_reply': data['no_of_reply']} for data in thread_data]}")
             
             return {
                 "selected_cat": selected_cat,
@@ -1222,6 +1235,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         else:
             initial_threads = []
             for page in range(1, 6):
+                logger.info(f"Fetching topic list for cat_id={cat_id}, page={page}, start_time={datetime.datetime.now(HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
                 result = await get_lihkg_topic_list(
                     cat_id=cat_id,
                     start_page=page,
@@ -1232,12 +1246,15 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(result.get("rate_limit_info", []))
                 items = result.get("items", [])
+                logger.debug(f"Raw API response for cat_id={cat_id}, page={page}: items={json.dumps(items, ensure_ascii=False)}")
                 for item in items:
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
+                    logger.info(f"Thread thread_id={item['thread_id']}, title={item['title']}, no_of_reply={item.get('no_of_reply', 0)}")
                 initial_threads.extend(items)
                 if not items:
                     logger.warning(f"No threads fetched for cat_id={cat_id}, page={page}")
                 if len(initial_threads) >= 150:
+                    logger.info(f"Reached thread limit (150), stopping fetch at page={page}")
                     initial_threads = initial_threads[:150]
                     break
                 if progress_callback:
@@ -1247,23 +1264,27 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 item for item in initial_threads
                 if item.get("no_of_reply", 0) >= min_replies and (cat_id in ["5", "15"] or int(item.get("like_count", 0)) >= min_likes) and str(item["thread_id"]) not in previous_thread_ids
             ]
+            logger.info(f"Filtered items count: {len(filtered_items)}, min_replies={min_replies}, min_likes={min_likes}")
+            logger.debug(f"Filtered items: {[{'thread_id': item['thread_id'], 'title': item['title'], 'no_of_reply': item.get('no_of_reply', 0)} for item in filtered_items]}")
             
             for item in initial_threads:
                 thread_id = str(item["thread_id"])
                 if thread_id not in st.session_state.thread_cache:
+                    cache_data = {
+                        "thread_id": thread_id,
+                        "title": item["title"],
+                        "no_of_reply": item.get("no_of_reply", 0),
+                        "last_reply_time": item["last_reply_time"],
+                        "like_count": item.get("like_count", 0),
+                        "dislike_count": item.get("dislike_count", 0),
+                        "replies": [],
+                        "fetched_pages": []
+                    }
                     st.session_state.thread_cache[thread_id] = {
-                        "data": {
-                            "thread_id": thread_id,
-                            "title": item["title"],
-                            "no_of_reply": item.get("no_of_reply", 0),
-                            "last_reply_time": item["last_reply_time"],
-                            "like_count": item.get("like_count", 0),
-                            "dislike_count": item.get("dislike_count", 0),
-                            "replies": [],
-                            "fetched_pages": []
-                        },
+                        "data": cache_data,
                         "timestamp": time.time()
                     }
+                    logger.info(f"Cached thread_id={thread_id}, no_of_reply={cache_data['no_of_reply']}")
             
             if intent == "fetch_dates":
                 sorted_items = sorted(
@@ -1297,6 +1318,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_id = str(item["thread_id"])
             if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
                 thread_data.append(st.session_state.thread_cache[thread_id]["data"])
+                logger.info(f"Used cached thread_id={thread_id}, no_of_reply={st.session_state.thread_cache[thread_id]['data']['no_of_reply']}")
                 continue
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -1351,6 +1373,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
+        
+        logger.info(f"Final thread_data: {[{'thread_id': data['thread_id'], 'title': data['title'], 'no_of_reply': data['no_of_reply']} for data in thread_data]}")
         
         return {
             "selected_cat": selected_cat,
