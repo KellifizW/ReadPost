@@ -719,6 +719,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         fetch_last_pages=1,
                         start_page=max(data["fetched_pages"], default=0) + 1
                     )
+                logger.info(f"帖子 ID={tid} 抓取結果：total_replies={content_result.get('total_replies', 0)}")
                 if content_result.get("replies"):
                     cleaned_replies = [
                         {
@@ -739,7 +740,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
                         "no_of_reply": content_result.get("total_replies", data.get("no_of_reply", 0)),
-                        "last_reply_time": data.get("last_reply_time", ""),
+                        "last_reply_time": unix_to_readable(content_result.get("last_reply_time", data.get("last_reply_time", "0"))),
                         "like_count": data.get("like_count", 0),
                         "dislike_count": data.get("dislike_count", 0),
                         "replies": data.get("replies", []) + filtered_additional_replies,
@@ -960,7 +961,16 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_data = []
             rate_limit_info = []
             
-            candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
+            candidate_threads = [
+                {
+                    "thread_id": str(tid),
+                    "title": "",
+                    "no_of_reply": 0,
+                    "like_count": 0,
+                    "dislike_count": 0,
+                    "last_reply_time": "1970-01-01 00:00:00"
+                } for tid in top_thread_ids
+            ]
             
             tasks = []
             for thread_id in top_thread_ids:
@@ -990,6 +1000,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     rate_limit_info.extend(result.get("rate_limit_info", []))
                     
                     thread_id = str(candidate_threads[idx]["thread_id"])
+                    logger.info(f"帖子 ID={thread_id} 抓取結果：total_replies={result.get('total_replies', 0)}")
                     if result.get("title"):
                         cleaned_replies = [
                             {
@@ -1005,10 +1016,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         thread_info = {
                             "thread_id": thread_id,
                             "title": result.get("title"),
-                            "no_of_reply": result.get("total_replies", 0),
-                            "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
-                            "like_count": result.get("like_count", 0),
-                            "dislike_count": result.get("dislike_count", 0),
+                            "no_of_reply": result.get("total_replies", candidate_threads[idx].get("no_of_reply", 0)),
+                            "last_reply_time": unix_to_readable(result.get("last_reply_time", candidate_threads[idx].get("last_reply_time", "0"))),
+                            "like_count": result.get("like_count", candidate_threads[idx].get("like_count", 0)),
+                            "dislike_count": result.get("dislike_count", candidate_threads[idx].get("dislike_count", 0)),
                             "replies": cleaned_replies,
                             "fetched_pages": result.get("fetched_pages", []),
                             "total_fetched_replies": len(cleaned_replies)
@@ -1067,6 +1078,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         rate_limit_info.extend(result.get("rate_limit_info", []))
                         
                         thread_id = str(filtered_supplemental[idx]["thread_id"])
+                        logger.info(f"補充帖子 ID={thread_id} 抓取結果：total_replies={result.get('total_replies', 0)}")
                         if result.get("title"):
                             cleaned_replies = [
                                 {
@@ -1082,8 +1094,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             thread_info = {
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
-                                "no_of_reply": result.get("total_replies", 0),
-                                "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                                "no_of_reply": result.get("total_replies", filtered_supplemental[idx].get("no_of_reply", 0)),
+                                "last_reply_time": unix_to_readable(result.get("last_reply_time", filtered_supplemental[idx].get("last_reply_time", "0"))),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
                                 "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
                                 "replies": cleaned_replies,
@@ -1114,8 +1126,14 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         if top_thread_ids:
             logger.info(f"[Task {id(asyncio.current_task())}] 使用分析中的頂部帖子 ID：{top_thread_ids}")
             candidate_threads = [
-                {"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0}
-                for tid in top_thread_ids
+                {
+                    "thread_id": str(tid),
+                    "title": "",
+                    "no_of_reply": 0,
+                    "like_count": 0,
+                    "dislike_count": 0,
+                    "last_reply_time": "1970-01-01 00:00:00"
+                } for tid in top_thread_ids
             ]
         else:
             initial_threads = []
@@ -1133,6 +1151,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 items = result.get("items", [])
                 for item in items:
                     item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
+                    item["no_of_reply"] = item.get("no_of_reply", 0)
                 initial_threads.extend(items)
                 if not items:
                     logger.warning(f"[Task {id(asyncio.current_task())}] 未抓取到分類 ID={cat_id}，頁面={page} 的帖子")
@@ -1220,6 +1239,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 rate_limit_info.extend(result.get("rate_limit_info", []))
                 
                 thread_id = str(candidate_threads[idx]["thread_id"])
+                logger.info(f"帖子 ID={thread_id} 抓取結果：total_replies={result.get('total_replies', 0)}")
                 if result.get("title"):
                     cleaned_replies = [
                         {
@@ -1234,10 +1254,10 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", 0),
-                        "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
-                        "like_count": candidate_threads[idx].get("like_count", 0),
-                        "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                        "no_of_reply": result.get("total_replies", candidate_threads[idx].get("no_of_reply", 0)),
+                        "last_reply_time": unix_to_readable(result.get("last_reply_time", candidate_threads[idx].get("last_reply_time", "0"))),
+                        "like_count": result.get("like_count", candidate_threads[idx].get("like_count", 0)),
+                        "dislike_count": result.get("dislike_count", candidate_threads[idx].get("dislike_count", 0)),
                         "replies": cleaned_replies,
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(cleaned_replies)
