@@ -67,7 +67,7 @@ class PromptBuilder:
             thread_data=json.dumps(thread_data or [], ensure_ascii=False),
             filters=json.dumps(filters, ensure_ascii=False)
         )
-        return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
+        return f"{config['system']}\ten{context}\n{data}\n{config['instructions']}"
 
     def get_system_prompt(self, mode):
         return self.config["system"].get(mode, "")
@@ -674,11 +674,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 if not isinstance(r, dict) or not r.get("msg"):
                     logger.debug(f"回覆 ID={r.get('reply_id', '未知')} 過濾：無效格式或缺少訊息")
                     continue
-                if len(r["msg"].strip()) <= 7:
-                    logger.debug(f"回覆 ID={r.get('reply_id', '未知')} 過濾：訊息太短")
-                    continue
-                if r["msg"].strip() in ["[圖片]", "[無內容]"]:
-                    logger.debug(f"回覆 ID={r.get('reply_id', '未知')} 過濾：無效內容")
+                cleaned_msg = clean_html(r["msg"])
+                if len(cleaned_msg.strip()) <= 7 or cleaned_msg in ["[圖片]", "[無內容]", "[表情符號]"]:
+                    logger.debug(f"回覆 ID={r.get('reply_id', '未知')} 過濾：訊息太短或無效內容")
                     continue
                 filtered_replies.append(r)
             
@@ -694,7 +692,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             filtered_thread_data[tid] = {
                 "thread_id": data.get("thread_id", tid),
                 "title": data.get("title", ""),
-                "no_of_reply": data.get("no_of_reply", 0),
+                "no_of_reply": data.get("no_of_reply", 0),  # 保留原始值，後續更新
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0),
@@ -720,6 +718,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         start_page=max(data["fetched_pages"], default=0) + 1
                     )
                 if content_result.get("replies"):
+                    total_replies = content_result.get("total_replies", data["no_of_reply"])
+                    if total_replies == 0:
+                        logger.warning(f"帖子 ID={tid} API 未返回 total_replies")
                     cleaned_replies = [
                         {
                             "reply_id": reply.get("reply_id"),
@@ -729,17 +730,17 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         }
                         for reply in content_result.get("replies", [])
-                        if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                        if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
                     ]
                     filtered_additional_replies = [
                         r for r in cleaned_replies
-                        if len(r["msg"].strip()) > 7 and r["msg"].strip() not in ["[圖片]", "[無內容]"]
+                        if len(r["msg"].strip()) > 7
                     ]
                     updated_data = {
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
-                        "no_of_reply": data.get("no_of_reply", 0),
-                        "last_reply_time": data.get("last_reply_time", ""),
+                        "no_of_reply": total_replies,  # 使用 API 返回的 total_replies
+                        "last_reply_time": unix_to_readable(content_result.get("last_reply_time", data["last_reply_time"])),
                         "like_count": data.get("like_count", 0),
                         "dislike_count": data.get("dislike_count", 0),
                         "replies": data.get("replies", []) + filtered_additional_replies,
@@ -755,6 +756,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "data": updated_data,
                             "timestamp": time.time()
                         }
+                    logger.info(f"更新帖子 ID={tid}：no_of_reply={total_replies}，抓取回覆數={len(filtered_additional_replies)}")
 
     # 統一記錄帖子處理總結日誌，僅記錄有回覆的帖子
     for tid, context in thread_log_context.items():
@@ -944,8 +946,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 thread_id_str = str(thread_id)
                 async with cache_lock:
                     if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
-                        thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
-                        logger.info(f"Used cached thread_id={thread_id_str}, no_of_reply={st.session_state.thread_cache[thread_id_str]['data']['no_of_reply']}")
+                        cached_data = st.session_state.thread_cache[thread_id_str]["data"]
+                        logger.info(f"Used cached thread_id={thread_id_str}, no_of_reply={cached_data['no_of_reply']}")
+                        thread_data.append(cached_data)
                         continue
                 tasks.append(get_lihkg_thread_content(
                     thread_id=thread_id_str,
@@ -969,6 +972,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     
                     thread_id = str(candidate_threads[idx]["thread_id"])
                     if result.get("title"):
+                        total_replies = result.get("total_replies", 0)
+                        if total_replies == 0:
+                            logger.warning(f"帖子 ID={thread_id} API 未返回 total_replies")
                         cleaned_replies = [
                             {
                                 "reply_id": reply.get("reply_id"),
@@ -978,18 +984,22 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                             }
                             for reply in result.get("replies", [])
-                            if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                            if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
+                        ]
+                        filtered_replies = [
+                            r for r in cleaned_replies
+                            if len(r["msg"].strip()) > 7
                         ]
                         thread_info = {
                             "thread_id": thread_id,
                             "title": result.get("title"),
-                            "no_of_reply": result.get("total_replies", 0),
+                            "no_of_reply": total_replies,  # 使用 API 返回的 total_replies
                             "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                             "like_count": result.get("like_count", 0),
                             "dislike_count": result.get("dislike_count", 0),
-                            "replies": cleaned_replies,
+                            "replies": filtered_replies,
                             "fetched_pages": result.get("fetched_pages", []),
-                            "total_fetched_replies": len(cleaned_replies)
+                            "total_fetched_replies": len(filtered_replies)
                         }
                         thread_data.append(thread_info)
                         async with cache_lock:
@@ -997,7 +1007,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "data": thread_info,
                                 "timestamp": time.time()
                             }
-                        logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, no_of_reply={thread_info['no_of_reply']}")
+                        logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(filtered_replies)}, no_of_reply={thread_info['no_of_reply']}")
             
             if len(thread_data) == 1 and intent == "follow_up":
                 logger.info(f"[Task {id(asyncio.current_task())}] 僅匹配單個帖子，搜索補充帖子")
@@ -1053,6 +1063,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         
                         thread_id = str(filtered_supplemental[idx]["thread_id"])
                         if result.get("title"):
+                            total_replies = result.get("total_replies", 0)
+                            if total_replies == 0:
+                                logger.warning(f"補充帖子 ID={thread_id} API 未返回 total_replies")
                             cleaned_replies = [
                                 {
                                     "reply_id": reply.get("reply_id"),
@@ -1062,18 +1075,22 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                     "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                                 }
                                 for reply in result.get("replies", [])
-                                if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                                if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
+                            ]
+                            filtered_replies = [
+                                r for r in cleaned_replies
+                                if len(r["msg"].strip()) > 7
                             ]
                             thread_info = {
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
-                                "no_of_reply": result.get("total_replies", 0),
+                                "no_of_reply": total_replies,  # 使用 API 返回的 total_replies
                                 "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
                                 "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
-                                "replies": cleaned_replies,
+                                "replies": filtered_replies,
                                 "fetched_pages": result.get("fetched_pages", []),
-                                "total_fetched_replies": len(cleaned_replies)
+                                "total_fetched_replies": len(filtered_replies)
                             }
                             thread_data.append(thread_info)
                             async with cache_lock:
@@ -1081,7 +1098,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                     "data": thread_info,
                                     "timestamp": time.time()
                                 }
-                            logger.info(f"Supplemental thread fetched: thread_id={thread_id}, no_of_reply={thread_info['no_of_reply']}")
+                            logger.info(f"Supplemental thread fetched: thread_id={thread_id}, no_of_reply={thread_info['no_of_reply']}, replies={len(filtered_replies)}")
             
             logger.info(f"Final thread_data: {[{'thread_id': data['thread_id'], 'title': data['title'], 'no_of_reply': data['no_of_reply']} for data in thread_data]}")
             
@@ -1148,7 +1165,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         cache_data = {
                             "thread_id": thread_id,
                             "title": item["title"],
-                            "no_of_reply": item.get("no_of_reply", 0),
+                            "no_of_reply": item.get("no_of_reply", 0),  # 使用 topic_list 的 no_of_reply
                             "last_reply_time": item["last_reply_time"],
                             "like_count": item.get("like_count", 0),
                             "dislike_count": item.get("dislike_count", 0),
@@ -1193,8 +1210,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             thread_id = str(item["thread_id"])
             async with cache_lock:
                 if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
-                    thread_data.append(st.session_state.thread_cache[thread_id]["data"])
-                    logger.info(f"Used cached thread_id={thread_id}, no_of_reply={st.session_state.thread_cache[thread_id]['data']['no_of_reply']}")
+                    cached_data = st.session_state.thread_cache[thread_id]["data"]
+                    logger.info(f"Used cached thread_id={thread_id}, no_of_reply={cached_data['no_of_reply']}")
+                    thread_data.append(cached_data)
                     continue
             tasks.append(get_lihkg_thread_content(
                 thread_id=thread_id,
@@ -1218,6 +1236,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 
                 thread_id = str(candidate_threads[idx]["thread_id"])
                 if result.get("title"):
+                    total_replies = result.get("total_replies", candidate_threads[idx]["no_of_reply"])
+                    if total_replies == 0:
+                        logger.warning(f"帖子 ID={thread_id} API 未返回 total_replies，嘗試使用 topic_list 的值：{candidate_threads[idx]['no_of_reply']}")
                     cleaned_replies = [
                         {
                             "reply_id": reply.get("reply_id"),
@@ -1226,18 +1247,23 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "dislike_count": reply.get("dislike_count", 0),
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"))
                         }
-                        for reply in result.get("replies", []) if reply.get("msg") and clean_html(reply.get("msg")) != "[無內容]"
+                        for reply in result.get("replies", [])
+                        if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
+                    ]
+                    filtered_replies = [
+                        r for r in cleaned_replies
+                        if len(r["msg"].strip()) > 7
                     ]
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", 0),
+                        "no_of_reply": total_replies,  # 優先使用 API 的 total_replies
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
                         "like_count": candidate_threads[idx].get("like_count", 0),
                         "dislike_count": candidate_threads[idx].get("dislike_count", 0),
-                        "replies": cleaned_replies,
+                        "replies": filtered_replies,
                         "fetched_pages": result.get("fetched_pages", []),
-                        "total_fetched_replies": len(cleaned_replies)
+                        "total_fetched_replies": len(filtered_replies)
                     }
                     thread_data.append(thread_info)
                     async with cache_lock:
@@ -1245,7 +1271,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "data": thread_info,
                             "timestamp": time.time()
                         }
-                    logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(cleaned_replies)}, no_of_reply={thread_info['no_of_reply']}")
+                    logger.info(f"Fetched thread_id={thread_id}, pages={result.get('fetched_pages', [])}, replies={len(filtered_replies)}, no_of_reply={thread_info['no_of_reply']}")
         
         if progress_callback:
             progress_callback("正在準備數據", 0.5)
