@@ -410,7 +410,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
                     
                     theme = historical_theme if is_vague else "一般"
                     theme_keywords = historical_keywords if is_vague else query_keywords
-                    post_limit = 10
+                    post_limit = 20
                     data_type = "both"
                     processing = {"intent": intent, "top_thread_ids": []}
                     if intent in ["search_keywords", "find_themed"]:
