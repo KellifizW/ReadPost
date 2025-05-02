@@ -50,11 +50,12 @@ async def init_reddit_client():
         logger.error(f"Reddit 客戶端初始化失敗：{str(e)}")
         raise
 
-async def get_subreddit_name(subreddit):
+async def get_subreddit_name(subreddit, reddit=None):
     """
     返回指定子版的顯示名稱。
     """
-    reddit = await init_reddit_client()
+    if reddit is None:
+        reddit = await init_reddit_client()
     try:
         subreddit_obj = await reddit.subreddit(subreddit)
         display_name = subreddit_obj.display_name
@@ -63,14 +64,16 @@ async def get_subreddit_name(subreddit):
         logger.error(f"獲取子版名稱失敗：{str(e)}")
         return "未知子版"
     finally:
-        await reddit.close()
+        if reddit and not hasattr(reddit, 'is_shared'):
+            await reddit.close()
 
-async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pages=3):
+async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pages=3, reddit=None):
     """
     抓取指定子版的貼文元數據。
     """
     global request_counter
-    reddit = await init_reddit_client()
+    if reddit is None:
+        reddit = await init_reddit_client()
     items = []
     rate_limit_info = []
     
@@ -98,7 +101,8 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
     finally:
-        await reddit.close()
+        if reddit and not hasattr(reddit, 'is_shared'):
+            await reddit.close()
     
     return {
         "items": items[:90],
@@ -113,6 +117,12 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
     抓取指定貼文的詳細內容。
     """
     global request_counter
+    if reddit is None:
+        reddit = await init_reddit_client()
+        logger.debug(f"重新初始化 Reddit 客戶端，post_id: {post_id}, reddit type: {type(reddit)}")
+    else:
+        logger.debug(f"使用傳入 Reddit 客戶端，post_id: {post_id}, reddit type: {type(reddit)}")
+    
     replies = []
     rate_limit_info = []
     
@@ -121,6 +131,10 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
         
         submission = await reddit.submission(id=post_id)
+        if not submission:
+            logger.error(f"無法獲取貼文 {post_id}，submission 為 None")
+            raise ValueError(f"貼文 {post_id} 獲取失敗")
+        
         await submission.comments.replace_more(limit=max_comments)
         hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
         readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -171,6 +185,9 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
             "last_reset": last_reset,
             "rate_limit_until": last_reset + 60 if "429" in str(e) else 0
         }
+    finally:
+        if reddit and not hasattr(reddit, 'is_shared'):
+            await reddit.close()
 
 async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=250):
     """
