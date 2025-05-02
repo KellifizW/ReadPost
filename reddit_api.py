@@ -38,10 +38,13 @@ async def get_subreddit_name(subreddit):
     reddit = await init_reddit_client()
     try:
         subreddit_obj = await reddit.subreddit(subreddit)
-        return subreddit_obj.display_name
+        display_name = subreddit_obj.display_name
+        return display_name
     except Exception as e:
         logger.error(f"獲取子版名稱失敗：{str(e)}")
         return "未知子版"
+    finally:
+        await reddit.close()
 
 async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pages=3):
     """
@@ -53,7 +56,8 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
     
     try:
         total_limit = 100 * max_pages  # 模擬多頁，總數量限制
-        async for submission in reddit.subreddit(subreddit).new(limit=total_limit):
+        subreddit_obj = await reddit.subreddit(subreddit)
+        async for submission in subreddit_obj.new(limit=total_limit):
             if submission.created_utc:
                 hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
                 readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -70,6 +74,8 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
         logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
+    finally:
+        await reddit.close()
     
     return {
         "items": items[:90],
@@ -133,6 +139,8 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
             "last_reset": time.time(),
             "rate_limit_until": 0
         }
+    finally:
+        await reddit.close()
 
 async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=250):
     """
@@ -142,38 +150,41 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
     results = []
     rate_limit_info = []
     
-    tasks = [get_reddit_thread_content(post_id, subreddit, max_comments) for post_id in post_ids]
-    content_results = await asyncio.gather(*tasks, return_exceptions=True)
-    for idx, result in enumerate(content_results):
-        post_id = post_ids[idx]
-        if isinstance(result, Exception):
-            logger.warning(f"批量抓取貼文 {post_id} 失敗：{str(result)}")
-            results.append({
-                "thread_id": post_id,
-                "replies": [],
-                "title": None,
-                "total_replies": 0,
-                "fetched_pages": [],
-                "rate_limit_info": [{"message": f"抓取錯誤：{str(result)}"}],
-                "request_counter": 0,
-                "last_reset": time.time(),
-                "rate_limit_until": 0
-            })
-            continue
-        result["thread_id"] = post_id
-        rate_limit_info.extend(result.get("rate_limit_info", []))
-        results.append(result)
-    
-    aggregated_rate_limit_data = {
-        "request_counter": 0,
-        "last_reset": time.time(),
-        "rate_limit_until": 0
-    }
-    
-    return {
-        "results": results,
-        "rate_limit_info": rate_limit_info,
-        "request_counter": aggregated_rate_limit_data["request_counter"],
-        "last_reset": aggregated_rate_limit_data["last_reset"],
-        "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
-    }
+    try:
+        tasks = [get_reddit_thread_content(post_id, subreddit, max_comments) for post_id in post_ids]
+        content_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for idx, result in enumerate(content_results):
+            post_id = post_ids[idx]
+            if isinstance(result, Exception):
+                logger.warning(f"批量抓取貼文 {post_id} 失敗：{str(result)}")
+                results.append({
+                    "thread_id": post_id,
+                    "replies": [],
+                    "title": None,
+                    "total_replies": 0,
+                    "fetched_pages": [],
+                    "rate_limit_info": [{"message": f"抓取錯誤：{str(result)}"}],
+                    "request_counter": 0,
+                    "last_reset": time.time(),
+                    "rate_limit_until": 0
+                })
+                continue
+            result["thread_id"] = post_id
+            rate_limit_info.extend(result.get("rate_limit_info", []))
+            results.append(result)
+        
+        aggregated_rate_limit_data = {
+            "request_counter": 0,
+            "last_reset": time.time(),
+            "rate_limit_until": 0
+        }
+        
+        return {
+            "results": results,
+            "rate_limit_info": rate_limit_info,
+            "request_counter": aggregated_rate_limit_data["request_counter"],
+            "last_reset": aggregated_rate_limit_data["last_reset"],
+            "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
+        }
+    finally:
+        await reddit.close()
