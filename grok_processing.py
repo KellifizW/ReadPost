@@ -9,6 +9,7 @@ import streamlit as st
 import os
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
+from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -37,27 +38,27 @@ class PromptBuilder:
             logger.error(f"載入 prompts.json 失敗：{str(e)}")
             raise
 
-    def build_analyze(self, query, cat_name, cat_id, conversation_context=None):
+    def build_analyze(self, query, source_name, source_id, conversation_context=None):
         config = self.config["analyze"]
         context = config["context"].format(
-            query=query, cat_name=cat_name, cat_id=cat_id,
+            query=query, cat_name=source_name, cat_id=source_id,
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
         return f"{config['system']}\n{context}\n{config['instructions']}"
 
-    def build_prioritize(self, query, cat_name, cat_id, threads):
+    def build_prioritize(self, query, source_name, source_id, threads):
         config = self.config.get("prioritize")
         if not config:
             logger.error("未找到 'prioritize' 的提示配置")
             raise ValueError("未找到 'prioritize' 的提示配置")
-        context = config["context"].format(query=query, cat_name=cat_name, cat_id=cat_id)
+        context = config["context"].format(query=query, cat_name=source_name, cat_id=source_id)
         data = config["data"].format(threads=json.dumps(threads, ensure_ascii=False))
         return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
 
-    def build_response(self, intent, query, selected_cat, conversation_context=None, metadata=None, thread_data=None, filters=None):
+    def build_response(self, intent, query, selected_source, conversation_context=None, metadata=None, thread_data=None, filters=None):
         config = self.config["response"].get(intent, self.config["response"]["general"])
         context = config["context"].format(
-            query=query, selected_cat=selected_cat,
+            query=query, selected_cat=selected_source,
             conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
         )
         data = config["data"].format(
@@ -224,7 +225,7 @@ async def extract_relevant_thread(conversation_context, query):
                     return thread_id, title, message["content"]
     return None, None, None
 
-async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=None):
+async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
@@ -235,7 +236,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "direct_response": False,
             "intent": "fetch_thread_by_id",
             "theme": "特定帖子查詢",
-            "category_ids": [cat_id],
+            "source_type": source_type,
+            "source_ids": [source_id],
             "data_type": "replies",
             "post_limit": 1,
             "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": []},
@@ -256,7 +258,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "direct_response": False,
             "intent": "follow_up",
             "theme": thread_title or "追問相關主題",
-            "category_ids": [cat_id],
+            "source_type": source_type,
+            "source_ids": [source_id],
             "data_type": "replies",
             "post_limit": 1,
             "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": query_keywords},
@@ -299,7 +302,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "direct_response": False,
             "intent": intent,
             "theme": theme,
-            "category_ids": [cat_id],
+            "source_type": source_type,
+            "source_ids": [source_id],
             "data_type": "both",
             "post_limit": 2,
             "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
@@ -316,6 +320,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
 若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
 若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
 用戶問題：{user_query}
+數據來源：{source_type} ({source_name})
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 歷史主題：{historical_theme}
 歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
@@ -324,7 +329,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
     "list_titles": "列出帖子標題或清單",
     "summarize_posts": "總結帖子內容或討論",
     "analyze_sentiment": "分析帖子或回覆的情緒",
-    "general_query": "與LIHKG無關或模糊的問題",
+    "general_query": "與LIHKG或Reddit無關或模糊的問題",
     "find_themed": "尋找特定主題的帖子",
     "fetch_dates": "提取帖子或回覆的日期資料",
     "search_keywords": "根據關鍵詞搜索帖子",
@@ -343,7 +348,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
             "direct_response": True,
             "intent": "general_query",
             "theme": historical_theme,
-            "category_ids": [],
+            "source_type": source_type,
+            "source_ids": [],
             "data_type": "none",
             "post_limit": 5,
             "filters": {},
@@ -422,7 +428,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                         "direct_response": intent in ["general_query", "introduce"],
                         "intent": intent,
                         "theme": theme,
-                        "category_ids": [cat_id],
+                        "source_type": source_type,
+                        "source_ids": [source_id],
                         "data_type": "both",
                         "post_limit": post_limit,
                         "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
@@ -442,7 +449,8 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                 "direct_response": False,
                 "intent": "summarize_posts",
                 "theme": historical_theme,
-                "category_ids": [cat_id],
+                "source_type": source_type,
+                "source_ids": [source_id],
                 "data_type": "both",
                 "post_limit": 5,
                 "filters": {"min_replies": 10, "min_likes": 0, "keywords": historical_keywords},
@@ -454,7 +462,7 @@ async def analyze_and_screen(user_query, cat_name, cat_id, conversation_context=
                 "theme_keywords": historical_keywords
             }
 
-async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, intent="summarize_posts"):
+async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, intent="summarize_posts"):
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -467,7 +475,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
         if context:
             last_response = context[-1].get("content", "")
             matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-            referenced_thread_ids = [int(tid) for tid in matches if any(t["thread_id"] == int(tid) for t in threads)]
+            referenced_thread_ids = [tid for tid in matches if any(t["thread_id"] == tid for t in threads)]
         if referenced_thread_ids:
             return {"top_thread_ids": referenced_thread_ids[:2], "reason": "使用追問的參考帖子 ID"}
 
@@ -475,8 +483,8 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
     try:
         prompt = prompt_builder.build_prioritize(
             query=user_query,
-            cat_name=cat_name,
-            cat_id=cat_id,
+            source_name=source_name,
+            source_id=source_id,
             threads=[{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
@@ -534,7 +542,7 @@ async def prioritize_threads_with_grok(user_query, threads, cat_name, cat_id, in
                 "reason": "優先級排序失敗，回退到熱門度排序"
             }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_cat, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, cat_id=None):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     prompt_builder = PromptBuilder()
@@ -687,7 +695,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "no_of_reply": data.get("no_of_reply", 0),
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
+                "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": sorted_replies,
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": len(sorted_replies)
@@ -701,13 +709,20 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         for tid, data in filtered_thread_data.items():
             if data["total_fetched_replies"] < max_replies_per_thread:
                 async with request_semaphore:
-                    content_result = await get_lihkg_thread_content(
-                        thread_id=tid,
-                        cat_id=cat_id,
-                        max_replies=max_replies_per_thread - data["total_fetched_replies"],
-                        fetch_last_pages=1,
-                        start_page=max(data["fetched_pages"], default=0) + 1
-                    )
+                    if source_type == "lihkg":
+                        content_result = await get_lihkg_thread_content(
+                            thread_id=tid,
+                            cat_id=source_id,
+                            max_replies=max_replies_per_thread - data["total_fetched_replies"],
+                            fetch_last_pages=1,
+                            start_page=max(data["fetched_pages"], default=0) + 1
+                        )
+                    else:  # reddit
+                        content_result = await get_reddit_thread_content(
+                            post_id=tid,
+                            subreddit=source_id,
+                            max_comments=max_replies_per_thread - data["total_fetched_replies"]
+                        )
                 if content_result.get("replies"):
                     total_replies = content_result.get("total_replies", data["no_of_reply"])
                     cleaned_replies = [
@@ -715,8 +730,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "reply_id": reply.get("reply_id"),
                             "msg": clean_html(reply.get("msg", "[無內容]")),
                             "like_count": reply.get("like_count", 0),
-                            "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                            "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                            "reply_time": reply.get("reply_time", "0")
                         }
                         for reply in content_result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -729,9 +744,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
                         "no_of_reply": total_replies,
-                        "last_reply_time": unix_to_readable(content_result.get("last_reply_time", data["last_reply_time"])),
+                        "last_reply_time": content_result.get("last_reply_time", data["last_reply_time"]),
                         "like_count": data.get("like_count", 0),
-                        "dislike_count": data.get("dislike_count", 0),
+                        "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                         "replies": data.get("replies", []) + filtered_additional_replies,
                         "fetched_pages": list(set(data.get("fetched_pages", []) + content_result.get("fetched_pages", []))),
                         "total_fetched_replies": len(data.get("replies", []) + filtered_additional_replies)
@@ -752,7 +767,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "no_of_reply": data.get("no_of_reply", 0),
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
+                "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": [],
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": 0
@@ -764,7 +779,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     prompt = prompt_builder.build_response(
         intent=intent,
         query=user_query,
-        selected_cat=selected_cat,
+        selected_source=selected_source,
         conversation_context=conversation_context,
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
@@ -782,7 +797,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "no_of_reply": data.get("no_of_reply", 0),
                 "last_reply_time": data.get("last_reply_time", 0),
                 "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0),
+                "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": data["replies"][:max_replies_per_thread],
                 "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
@@ -792,7 +807,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         prompt = prompt_builder.build_response(
             intent=intent,
             query=user_query,
-            selected_cat=selected_cat,
+            selected_source=selected_source,
             conversation_context=conversation_context,
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
@@ -879,15 +894,21 @@ def unix_to_readable(timestamp):
 def configure_lihkg_api_logger():
     configure_logger("lihkg_api", "lihkg_api.log")
 
-async def process_user_question(user_query, selected_cat, cat_id, analysis, request_counter, last_reset, rate_limit_until, conversation_context=None, progress_callback=None):
-    configure_lihkg_api_logger()
+def configure_reddit_api_logger():
+    configure_logger("reddit_api", "reddit_api.log")
+
+async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
+    if source_type == "lihkg":
+        configure_lihkg_api_logger()
+    else:
+        configure_reddit_api_logger()
     try:
         clean_cache()
         
         if rate_limit_until > time.time():
             logger.warning(f"速率限制生效，直到 {rate_limit_until}")
             return {
-                "selected_cat": selected_cat,
+                "selected_source": selected_source,
                 "thread_data": [],
                 "rate_limit_info": [{"message": "速率限制生效", "until": rate_limit_until}],
                 "request_counter": request_counter,
@@ -920,14 +941,21 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         cached_data = st.session_state.thread_cache[thread_id_str]["data"]
                         thread_data.append(cached_data)
                         continue
-                tasks.append(get_lihkg_thread_content(
-                    thread_id=thread_id_str,
-                    cat_id=cat_id,
-                    max_replies=100,
-                    fetch_last_pages=fetch_last_pages,
-                    specific_pages=[],
-                    start_page=1
-                ))
+                if source_type == "lihkg":
+                    tasks.append(get_lihkg_thread_content(
+                        thread_id=thread_id_str,
+                        cat_id=source_id,
+                        max_replies=100,
+                        fetch_last_pages=fetch_last_pages,
+                        specific_pages=[],
+                        start_page=1
+                    ))
+                else:  # reddit
+                    tasks.append(get_reddit_thread_content(
+                        post_id=thread_id_str,
+                        subreddit=source_id,
+                        max_comments=100
+                    ))
             
             if tasks:
                 content_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -950,8 +978,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "reply_id": reply.get("reply_id"),
                                 "msg": clean_html(reply.get("msg", "[無內容]")),
                                 "like_count": reply.get("like_count", 0),
-                                "dislike_count": reply.get("dislike_count", 0),
-                                "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                                "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                                "reply_time": reply.get("reply_time", "0")
                             }
                             for reply in result.get("replies", [])
                             if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -961,9 +989,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "thread_id": thread_id,
                             "title": result.get("title"),
                             "no_of_reply": total_replies,
-                            "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                            "last_reply_time": result.get("last_reply_time", "0"),
                             "like_count": result.get("like_count", 0),
-                            "dislike_count": result.get("dislike_count", 0),
+                            "dislike_count": result.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "replies": filtered_replies,
                             "fetched_pages": result.get("fetched_pages", []),
                             "total_fetched_replies": len(filtered_replies)
@@ -980,11 +1008,18 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 theme_keywords = keyword_result["keywords"]
                 
                 async with request_semaphore:
-                    supplemental_result = await get_lihkg_topic_list(
-                        cat_id=cat_id,
-                        start_page=1,
-                        max_pages=2
-                    )
+                    if source_type == "lihkg":
+                        supplemental_result = await get_lihkg_topic_list(
+                            cat_id=source_id,
+                            start_page=1,
+                            max_pages=2
+                        )
+                    else:  # reddit
+                        supplemental_result = await get_reddit_topic_list(
+                            subreddit=source_id,
+                            start_page=1,
+                            max_pages=2
+                        )
                 supplemental_threads = supplemental_result.get("items", [])
                 filtered_supplemental = [
                     item for item in supplemental_threads
@@ -999,14 +1034,21 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 supplemental_tasks = []
                 for item in filtered_supplemental:
                     thread_id = str(item["thread_id"])
-                    supplemental_tasks.append(get_lihkg_thread_content(
-                        thread_id=thread_id,
-                        cat_id=cat_id,
-                        max_replies=100,
-                        fetch_last_pages=fetch_last_pages,
-                        specific_pages=[],
-                        start_page=1
-                    ))
+                    if source_type == "lihkg":
+                        supplemental_tasks.append(get_lihkg_thread_content(
+                            thread_id=thread_id,
+                            cat_id=source_id,
+                            max_replies=100,
+                            fetch_last_pages=fetch_last_pages,
+                            specific_pages=[],
+                            start_page=1
+                        ))
+                    else:  # reddit
+                        supplemental_tasks.append(get_reddit_thread_content(
+                            post_id=thread_id,
+                            subreddit=source_id,
+                            max_comments=100
+                        ))
                 
                 if supplemental_tasks:
                     supplemental_results = await asyncio.gather(*supplemental_tasks, return_exceptions=True)
@@ -1029,8 +1071,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                     "reply_id": reply.get("reply_id"),
                                     "msg": clean_html(reply.get("msg", "[無內容]")),
                                     "like_count": reply.get("like_count", 0),
-                                    "dislike_count": reply.get("dislike_count", 0),
-                                    "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                                    "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                                    "reply_time": reply.get("reply_time", "0")
                                 }
                                 for reply in result.get("replies", [])
                                 if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -1040,9 +1082,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
                                 "no_of_reply": total_replies,
-                                "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                                "last_reply_time": result.get("last_reply_time", "0"),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
-                                "dislike_count": filtered_supplemental[idx].get("dislike_count", 0),
+                                "dislike_count": filtered_supplemental[idx].get("dislike_count", 0) if source_type == "lihkg" else 0,
                                 "replies": filtered_replies,
                                 "fetched_pages": result.get("fetched_pages", []),
                                 "total_fetched_replies": len(filtered_replies)
@@ -1059,7 +1101,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             )
             
             return {
-                "selected_cat": selected_cat,
+                "selected_source": selected_source,
                 "thread_data": thread_data,
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
@@ -1081,21 +1123,26 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
             initial_threads = []
             for page in range(1, 6):
                 async with request_semaphore:
-                    result = await get_lihkg_topic_list(
-                        cat_id=cat_id,
-                        start_page=page,
-                        max_pages=1
-                    )
+                    if source_type == "lihkg":
+                        result = await get_lihkg_topic_list(
+                            cat_id=source_id,
+                            start_page=page,
+                            max_pages=1
+                        )
+                    else:  # reddit
+                        result = await get_reddit_topic_list(
+                            subreddit=source_id,
+                            start_page=page,
+                            max_pages=1
+                        )
                 request_counter = result.get("request_counter", request_counter)
                 last_reset = result.get("last_reset", last_reset)
                 rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(result.get("rate_limit_info", []))
                 items = result.get("items", [])
-                for item in items:
-                    item["last_reply_time"] = unix_to_readable(item.get("last_reply_time", "0"))
                 initial_threads.extend(items)
                 if not items:
-                    logger.warning(f"未抓取到分類 ID={cat_id}，頁面={page} 的帖子")
+                    logger.warning(f"未抓取到分類 ID={source_id}，頁面={page} 的帖子")
                 if len(initial_threads) >= 150:
                     initial_threads = initial_threads[:150]
                     break
@@ -1115,9 +1162,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "thread_id": thread_id,
                             "title": item["title"],
                             "no_of_reply": item.get("no_of_reply", 0),
-                            "last_reply_time": item["last_reply_time"],
+                            "last_reply_time": item.get("last_reply_time", "0"),
                             "like_count": item.get("like_count", 0),
-                            "dislike_count": item.get("dislike_count", 0),
+                            "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "replies": [],
                             "fetched_pages": []
                         }
@@ -1135,7 +1182,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                 candidate_threads = sorted_items[:post_limit]
             else:
                 if filtered_items:
-                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_cat, cat_id, intent)
+                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_source, source_id, intent)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
                         sorted_items = sorted(
@@ -1161,14 +1208,21 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                     cached_data = st.session_state.thread_cache[thread_id]["data"]
                     thread_data.append(cached_data)
                     continue
-            tasks.append((idx, get_lihkg_thread_content(
-                thread_id=thread_id,
-                cat_id=cat_id,
-                max_replies=100,
-                fetch_last_pages=fetch_last_pages,
-                specific_pages=[],
-                start_page=1
-            )))
+            if source_type == "lihkg":
+                tasks.append((idx, get_lihkg_thread_content(
+                    thread_id=thread_id,
+                    cat_id=source_id,
+                    max_replies=100,
+                    fetch_last_pages=fetch_last_pages,
+                    specific_pages=[],
+                    start_page=1
+                )))
+            else:  # reddit
+                tasks.append((idx, get_reddit_thread_content(
+                    post_id=thread_id,
+                    subreddit=source_id,
+                    max_comments=100
+                )))
         
         if tasks:
             content_results = await asyncio.gather(*[task[1] for task in tasks], return_exceptions=True)
@@ -1192,8 +1246,8 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                             "reply_id": reply.get("reply_id"),
                             "msg": clean_html(reply.get("msg", "[無內容]")),
                             "like_count": reply.get("like_count", 0),
-                            "dislike_count": reply.get("dislike_count", 0),
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                            "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                            "reply_time": reply.get("reply_time", "0")
                         }
                         for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -1203,9 +1257,9 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
                         "thread_id": thread_id,
                         "title": result.get("title"),
                         "no_of_reply": total_replies,
-                        "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                        "last_reply_time": result.get("last_reply_time", "0"),
                         "like_count": candidate_threads[idx].get("like_count", 0),
-                        "dislike_count": candidate_threads[idx].get("dislike_count", 0),
+                        "dislike_count": candidate_threads[idx].get("dislike_count", 0) if source_type == "lihkg" else 0,
                         "replies": filtered_replies,
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(filtered_replies)
@@ -1225,7 +1279,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
         )
         
         return {
-            "selected_cat": selected_cat,
+            "selected_source": selected_source,
             "thread_data": thread_data,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
@@ -1237,7 +1291,7 @@ async def process_user_question(user_query, selected_cat, cat_id, analysis, requ
     except Exception as e:
         logger.error(f"處理用戶問題失敗：{str(e)}")
         return {
-            "selected_cat": selected_cat,
+            "selected_source": selected_source,
             "thread_data": [],
             "rate_limit_info": [{"message": f"處理錯誤：{str(e)}"}],
             "request_counter": request_counter,
