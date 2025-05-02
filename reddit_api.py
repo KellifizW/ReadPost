@@ -36,7 +36,12 @@ async def init_reddit_client():
             password=st.secrets["reddit"]["password"],
             user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}"
         )
-        logger.info("Reddit 客戶端初始化成功")
+        # 驗證認證狀態
+        user = await reddit.user.me()
+        if user:
+            logger.info(f"Reddit 客戶端初始化成功，已認證用戶：{user.name}")
+        else:
+            logger.warning("Reddit 客戶端初始化成功，但未成功認證用戶，可能未獲得更高配額")
         return reddit
     except KeyError as e:
         logger.error(f"缺少 Secrets 配置：{str(e)}")
@@ -103,12 +108,11 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
         "rate_limit_until": 0
     }
 
-async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_comments=250):
+async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_comments=250, reddit=None):
     """
     抓取指定貼文的詳細內容。
     """
     global request_counter
-    reddit = await init_reddit_client()
     replies = []
     rate_limit_info = []
     
@@ -167,8 +171,6 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
             "last_reset": last_reset,
             "rate_limit_until": last_reset + 60 if "429" in str(e) else 0
         }
-    finally:
-        await reddit.close()
 
 async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=250):
     """
@@ -187,7 +189,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
                 delay = 1.0  # 每個請求間隔 1 秒
                 logger.info(f"為避免速率限制，在抓取貼文 {post_id} 前延遲 {delay} 秒，當前請求次數 {request_counter}")
                 await asyncio.sleep(delay)
-            tasks.append(get_reddit_thread_content(post_id, subreddit, max_comments))
+            tasks.append(get_reddit_thread_content(post_id, subreddit, max_comments, reddit))
         
         content_results = await asyncio.gather(*tasks, return_exceptions=True)
         for idx, result in enumerate(content_results):
