@@ -130,14 +130,6 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         request_counter += 1
         logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
         
-        # 檢查速率限制
-        remaining = reddit.ratelimit.remaining
-        reset_time = reddit.ratelimit.reset_timestamp
-        if remaining is not None and remaining < 5:
-            wait_time = max(0, reset_time - time.time()) + 1
-            logger.warning(f"速率限制接近，剩餘請求數：{remaining}，等待 {wait_time} 秒直到 {datetime.fromtimestamp(reset_time, tz=HONG_KONG_TZ)}")
-            await asyncio.sleep(wait_time)
-
         submission = await reddit.submission(id=post_id)
         if not submission:
             logger.error(f"無法獲取貼文 {post_id}，submission 為 None")
@@ -183,9 +175,8 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
         if "429" in str(e):
             logger.warning(f"觸發速率限制，貼文 {post_id}，當前請求次數 {request_counter}")
-            reset_time = reddit.ratelimit.reset_timestamp
-            wait_time = max(0, reset_time - time.time()) + 1
-            logger.info(f"因 429 錯誤，等待 {wait_time} 秒直到 {datetime.fromtimestamp(reset_time, tz=HONG_KONG_TZ)} 後重試")
+            wait_time = 60  # 等待 60 秒後重試
+            logger.info(f"因 429 錯誤，等待 {wait_time} 秒後重試")
             await asyncio.sleep(wait_time)
             return await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)  # 重試
         return {
@@ -242,7 +233,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
             
             # 批次間延遲
             if i + batch_size < len(post_ids):
-                delay = 5.0  # 批次間延遲 5 秒
+                delay = 10.0  # 批次間延遲 10 秒
                 logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
                 await asyncio.sleep(delay)
         
