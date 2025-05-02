@@ -52,22 +52,22 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
     rate_limit_info = []
     
     try:
-        async for page in range(start_page, start_page + max_pages):
-            async for submission in reddit.subreddit(subreddit).new(limit=100):
-                if submission.created_utc:
-                    hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
-                    readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                    item = {
-                        "thread_id": submission.id,
-                        "title": submission.title,
-                        "no_of_reply": submission.num_comments,
-                        "last_reply_time": readable_time,
-                        "like_count": submission.score
-                    }
-                    items.append(item)
-            logger.info(f"抓取子版 {subreddit}，頁面 {page}，項目數 {len(items)}")
-            if not items:
+        total_limit = 100 * max_pages  # 模擬多頁，總數量限制
+        async for submission in reddit.subreddit(subreddit).new(limit=total_limit):
+            if submission.created_utc:
+                hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
+                readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
+                item = {
+                    "thread_id": submission.id,
+                    "title": submission.title,
+                    "no_of_reply": submission.num_comments,
+                    "last_reply_time": readable_time,
+                    "like_count": submission.score
+                }
+                items.append(item)
+            if len(items) >= 90:  # 限制最多 90 項，與原邏輯一致
                 break
+        logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
     
