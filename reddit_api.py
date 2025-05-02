@@ -18,15 +18,15 @@ request_counter = 0
 last_reset = time.time()
 RATE_LIMIT_REQUESTS_PER_MINUTE = 60  # Reddit API 速率限制：每分鐘 60 個請求
 
-# 簡單緩存：存儲子版抓取結果，避免重複抓取
+# 簡單緩存：存儲子版抓取結果和貼文內容
 topic_cache = {}
+thread_cache = {}
 CACHE_DURATION = 300  # 緩存 5 分鐘
 
 # 初始化 Reddit 客戶端
 async def init_reddit_client():
     global request_counter, last_reset
     try:
-        # 重置速率限制計數器（每分鐘重置一次）
         current_time = time.time()
         if current_time - last_reset >= 60:
             request_counter = 0
@@ -40,7 +40,6 @@ async def init_reddit_client():
             password=st.secrets["reddit"]["password"],
             user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}"
         )
-        # 驗證認證狀態
         user = await reddit.user.me()
         if user:
             logger.info(f"Reddit 客戶端初始化成功，已認證用戶：{user.name}")
@@ -55,9 +54,6 @@ async def init_reddit_client():
         raise
 
 async def get_subreddit_name(subreddit, reddit=None):
-    """
-    返回指定子版的顯示名稱。
-    """
     if reddit is None:
         reddit = await init_reddit_client()
     try:
@@ -72,13 +68,9 @@ async def get_subreddit_name(subreddit, reddit=None):
             await reddit.close()
 
 async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pages=1, reddit=None):
-    """
-    抓取指定子版的貼文元數據。
-    """
     global request_counter, topic_cache
-    cache_key = f"{subreddit}_page_{start_page}"
+    cache_key = f"{subreddit}"  # 移除 start_page 依賴，確保緩存有效
     
-    # 檢查緩存
     if cache_key in topic_cache:
         cached_data = topic_cache[cache_key]
         if time.time() - cached_data["timestamp"] < CACHE_DURATION:
@@ -91,7 +83,7 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
     rate_limit_info = []
     
     try:
-        total_limit = 100  # 固定為 100，符合 API 最大限制
+        total_limit = 100
         subreddit_obj = await reddit.subreddit(subreddit)
         request_counter += 1
         logger.info(f"開始抓取子版 {subreddit}，當前請求次數 {request_counter}")
@@ -110,7 +102,6 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
                 items.append(item)
         logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
         
-        # 存入緩存
         topic_cache[cache_key] = {
             "timestamp": time.time(),
             "data": {
@@ -135,11 +126,16 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
         "rate_limit_until": 0
     }
 
-async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_comments=100, reddit=None):
-    """
-    抓取指定貼文的詳細內容。
-    """
-    global request_counter
+async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_comments=50, reddit=None):
+    global request_counter, thread_cache
+    cache_key = f"{post_id}_subreddit_{subreddit}"
+    
+    if cache_key in thread_cache:
+        cached_data = thread_cache[cache_key]
+        if time.time() - cached_data["timestamp"] < CACHE_DURATION:
+            logger.info(f"使用緩存數據，貼文：{post_id}")
+            return cached_data["data"]
+    
     if reddit is None:
         reddit = await init_reddit_client()
         logger.debug(f"重新初始化 Reddit 客戶端，post_id: {post_id}, reddit type: {type(reddit)}")
@@ -153,11 +149,13 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         request_counter += 1
         logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
         
-        # 動態檢查請求頻率
-        if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE * 0.8:  # 接近 80% 限制
+        if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE * 0.5:  # 提前到 50%
             wait_time = max(1, 60 - (time.time() - last_reset))
             logger.warning(f"接近速率限制，剩餘請求數：{RATE_LIMIT_REQUESTS_PER_MINUTE - request_counter}，等待 {wait_time} 秒")
             await asyncio.sleep(wait_time)
+
+        # 添加小幅延遲，避免瞬間過多請求
+        await asyncio.sleep(0.5)
 
         submission = await reddit.submission(id=post_id)
         if not submission:
@@ -198,17 +196,21 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
             "rate_limit_until": 0
         }
         logger.info(f"抓取貼文 {post_id} 成功，總回覆數 {len(replies)}")
+        
+        thread_cache[cache_key] = {
+            "timestamp": time.time(),
+            "data": result
+        }
         return result
     except Exception as e:
         logger.error(f"抓取貼文 {post_id} 失敗：{str(e)}")
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
         if "429" in str(e):
             logger.warning(f"觸發速率限制，貼文 {post_id}，當前請求次數 {request_counter}")
-            # 動態獲取 Retry-After 頭（若可用）或使用預設 60 秒
             wait_time = 60
             logger.info(f"因 429 錯誤，等待 {wait_time} 秒後重試")
             await asyncio.sleep(wait_time)
-            return await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)  # 重試
+            return await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)
         return {
             "replies": [],
             "title": None,
@@ -223,23 +225,19 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
 
-async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=100):
-    """
-    批量抓取多個貼文的詳細內容。
-    """
+async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=50):
     global request_counter
     reddit = await init_reddit_client()
-    reddit.is_shared = True  # 標記為共享客戶端
+    reddit.is_shared = True
     results = []
     rate_limit_info = []
     
     try:
-        batch_size = 5  # 每批抓取 5 個貼文
+        batch_size = 3  # 減少並行數量
         for i in range(0, len(post_ids), batch_size):
             batch = post_ids[i:i + batch_size]
             logger.info(f"開始抓取批次 {i//batch_size + 1}，貼文數量：{len(batch)}")
             
-            # 使用 asyncio.gather 實現受控並行
             tasks = [get_reddit_thread_content(post_id, subreddit, max_comments, reddit) for post_id in batch]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -263,14 +261,10 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
                 rate_limit_info.extend(result.get("rate_limit_info", []))
                 results.append(result)
             
-            # 動態調整批次間延遲
-            if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE * 0.5:  # 超過 50% 限制時增加延遲
-                delay = max(10.0, 60 - (time.time() - last_reset))
-                logger.info(f"請求數接近限制，批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
-            else:
-                delay = 5.0
-                logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
-            if i + batch_size < len(post_ids):  # 僅在有下一批時延遲
+            # 強制批次間延遲
+            delay = max(5.0, 60 - (time.time() - last_reset))
+            logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
+            if i + batch_size < len(post_ids):
                 await asyncio.sleep(delay)
         
         aggregated_rate_limit_data = {
