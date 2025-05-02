@@ -130,6 +130,14 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         request_counter += 1
         logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
         
+        # 檢查速率限制
+        remaining = reddit.ratelimit.remaining
+        reset_time = reddit.ratelimit.reset_timestamp
+        if remaining is not None and remaining < 5:
+            wait_time = max(0, reset_time - time.time()) + 1
+            logger.warning(f"速率限制接近，剩餘請求數：{remaining}，等待 {wait_time} 秒直到 {datetime.fromtimestamp(reset_time, tz=HONG_KONG_TZ)}")
+            await asyncio.sleep(wait_time)
+
         submission = await reddit.submission(id=post_id)
         if not submission:
             logger.error(f"無法獲取貼文 {post_id}，submission 為 None")
@@ -175,6 +183,11 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
         if "429" in str(e):
             logger.warning(f"觸發速率限制，貼文 {post_id}，當前請求次數 {request_counter}")
+            reset_time = reddit.ratelimit.reset_timestamp
+            wait_time = max(0, reset_time - time.time()) + 1
+            logger.info(f"因 429 錯誤，等待 {wait_time} 秒直到 {datetime.fromtimestamp(reset_time, tz=HONG_KONG_TZ)} 後重試")
+            await asyncio.sleep(wait_time)
+            return await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)  # 重試
         return {
             "replies": [],
             "title": None,
@@ -195,40 +208,43 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
     """
     global request_counter
     reddit = await init_reddit_client()
+    reddit.is_shared = True  # 標記為共享客戶端
     results = []
     rate_limit_info = []
     
     try:
-        tasks = []
-        for idx, post_id in enumerate(post_ids):
-            # 在每個請求之間添加延遲以避免速率限制
-            if idx > 0:
-                delay = 1.0  # 每個請求間隔 1 秒
-                logger.info(f"為避免速率限制，在抓取貼文 {post_id} 前延遲 {delay} 秒，當前請求次數 {request_counter}")
+        batch_size = 5  # 每批抓取 5 個貼文
+        for i in range(0, len(post_ids), batch_size):
+            batch = post_ids[i:i + batch_size]
+            logger.info(f"開始抓取批次 {i//batch_size + 1}，貼文數量：{len(batch)}")
+            
+            for post_id in batch:
+                # 順序抓取，避免並行
+                result = await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)
+                if result.get("title") is None:
+                    logger.warning(f"批量抓取貼文 {post_id} 失敗：{result.get('rate_limit_info', [{}])[0].get('message', '未知錯誤')}")
+                    results.append({
+                        "thread_id": post_id,
+                        "replies": [],
+                        "title": None,
+                        "total_replies": 0,
+                        "fetched_pages": [],
+                        "rate_limit_info": result.get("rate_limit_info", [{"message": "未知錯誤"}]),
+                        "request_counter": request_counter,
+                        "last_reset": last_reset,
+                        "rate_limit_until": result.get("rate_limit_until", 0)
+                    })
+                    rate_limit_info.extend(result.get("rate_limit_info", []))
+                    continue
+                result["thread_id"] = post_id
+                rate_limit_info.extend(result.get("rate_limit_info", []))
+                results.append(result)
+            
+            # 批次間延遲
+            if i + batch_size < len(post_ids):
+                delay = 5.0  # 批次間延遲 5 秒
+                logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
                 await asyncio.sleep(delay)
-            tasks.append(get_reddit_thread_content(post_id, subreddit, max_comments, reddit))
-        
-        content_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for idx, result in enumerate(content_results):
-            post_id = post_ids[idx]
-            if isinstance(result, Exception):
-                logger.warning(f"批量抓取貼文 {post_id} 失敗：{str(result)}")
-                results.append({
-                    "thread_id": post_id,
-                    "replies": [],
-                    "title": None,
-                    "total_replies": 0,
-                    "fetched_pages": [],
-                    "rate_limit_info": [{"message": f"抓取錯誤：{str(result)}"}],
-                    "request_counter": request_counter,
-                    "last_reset": last_reset,
-                    "rate_limit_until": last_reset + 60 if "429" in str(result) else 0
-                })
-                rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(result)}"})
-                continue
-            result["thread_id"] = post_id
-            rate_limit_info.extend(result.get("rate_limit_info", []))
-            results.append(result)
         
         aggregated_rate_limit_data = {
             "request_counter": request_counter,
@@ -239,8 +255,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
         return {
             "results": results,
             "rate_limit_info": rate_limit_info,
-            "request_counter": aggregated_rate_limit_data["request_counter"],
-            "last_reset": aggregated_rate_limit_data["last_reset"],
+            "request_counter": request_counter,
+            "last_reset": last_reset,
             "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
         }
     finally:
