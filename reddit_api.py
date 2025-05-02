@@ -1,8 +1,8 @@
-import praw
-import time
-import streamlit as st
+import asyncpraw
 import logging
 from datetime import datetime
+import streamlit as st
+import time
 import pytz
 from logging_config import configure_logger
 
@@ -13,9 +13,9 @@ HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "reddit_api.log")
 
 # 初始化 Reddit 客戶端
-def init_reddit_client():
+async def init_reddit_client():
     try:
-        reddit = praw.Reddit(
+        reddit = asyncpraw.Reddit(
             client_id=st.secrets["reddit"]["client_id"],
             client_secret=st.secrets["reddit"]["client_secret"],
             username=st.secrets["reddit"]["username"],
@@ -31,13 +31,13 @@ def init_reddit_client():
         logger.error(f"Reddit 客戶端初始化失敗：{str(e)}")
         raise
 
-def get_subreddit_name(subreddit):
+async def get_subreddit_name(subreddit):
     """
     返回指定子版的顯示名稱。
     """
-    reddit = init_reddit_client()
+    reddit = await init_reddit_client()
     try:
-        subreddit_obj = reddit.subreddit(subreddit)
+        subreddit_obj = await reddit.subreddit(subreddit)
         return subreddit_obj.display_name
     except Exception as e:
         logger.error(f"獲取子版名稱失敗：{str(e)}")
@@ -47,14 +47,13 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
     """
     抓取指定子版的貼文元數據。
     """
-    reddit = init_reddit_client()
+    reddit = await init_reddit_client()
     items = []
     rate_limit_info = []
     
     try:
-        for page in range(start_page, start_page + max_pages):
-            submissions = reddit.subreddit(subreddit).new(limit=100)
-            for submission in submissions:
+        async for page in range(start_page, start_page + max_pages):
+            async for submission in reddit.subreddit(subreddit).new(limit=100):
                 if submission.created_utc:
                     hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
                     readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -67,7 +66,7 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
                     }
                     items.append(item)
             logger.info(f"抓取子版 {subreddit}，頁面 {page}，項目數 {len(items)}")
-            if not list(submissions):
+            if not items:
                 break
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
@@ -84,17 +83,17 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
     """
     抓取指定貼文的詳細內容。
     """
-    reddit = init_reddit_client()
+    reddit = await init_reddit_client()
     replies = []
     rate_limit_info = []
     
     try:
-        submission = reddit.submission(id=post_id)
-        submission.comments.replace_more(limit=max_comments)
+        submission = await reddit.submission(id=post_id)
+        await submission.comments.replace_more(limit=max_comments)
         hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
         readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
         
-        for comment in submission.comments.list():
+        async for comment in submission.comments.list():
             if comment.body:
                 hk_comment_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
                 readable_comment_time = hk_comment_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -139,14 +138,11 @@ async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", 
     """
     批量抓取多個貼文的詳細內容。
     """
-    reddit = init_reddit_client()
+    reddit = await init_reddit_client()
     results = []
     rate_limit_info = []
     
-    tasks = []
-    for post_id in post_ids:
-        tasks.append(get_reddit_thread_content(post_id, subreddit, max_comments))
-    
+    tasks = [get_reddit_thread_content(post_id, subreddit, max_comments) for post_id in post_ids]
     content_results = await asyncio.gather(*tasks, return_exceptions=True)
     for idx, result in enumerate(content_results):
         post_id = post_ids[idx]
