@@ -85,7 +85,7 @@ def clean_cache(cache, cache_type="topic"):
         logger.info(f"清理 {cache_type} 緩存，移除 {len(sorted_keys[:len(cache) - MAX_CACHE_SIZE])} 個過舊條目，當前緩存大小：{len(cache)}")
 
 async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=None):
-    global request_counter, topic_cache
+    global request_counter, last_reset, topic_cache
     cache_key = f"{subreddit}_{start_page}_{max_pages}"
     
     clean_cache(topic_cache, "topic")
@@ -99,18 +99,20 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=Non
         reddit = await init_reddit_client()
     items = []
     rate_limit_info = []
+    local_last_reset = last_reset  # 保存全局 last_reset 的當前值
     
     try:
         total_limit = 100
         subreddit_obj = await reddit.subreddit(subreddit)
         request_counter += 1
         if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE:
-            wait_time = 60 - (time.time() - last_reset)
+            wait_time = 60 - (time.time() - local_last_reset)
             if wait_time > 0:
                 logger.warning(f"達到速率限制，等待 {wait_time:.2f} 秒")
                 await asyncio.sleep(wait_time)
                 request_counter = 0
-                last_reset = time.time()
+                local_last_reset = time.time()
+                last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
         logger.info(f"開始抓取子版 {subreddit}，當前請求次數 {request_counter}")
@@ -135,13 +137,20 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=Non
                 "items": items,
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
-                "last_reset": last_reset,
+                "last_reset": local_last_reset,
                 "rate_limit_until": 0
             }
         }
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
         rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
+        return {
+            "items": items,
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": local_last_reset,
+            "rate_limit_until": 0
+        }
     finally:
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
@@ -150,12 +159,12 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=Non
         "items": items,
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
-        "last_reset": last_reset,
+        "last_reset": local_last_reset,
         "rate_limit_until": 0
     }
 
 async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=None):
-    global request_counter, thread_cache
+    global request_counter, last_reset, thread_cache
     cache_key = f"{post_id}_subreddit_{subreddit}"
     
     clean_cache(thread_cache, "thread")
@@ -173,21 +182,22 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
     
     replies = []
     rate_limit_info = []
+    local_last_reset = last_reset  # 保存全局 last_reset 的當前值
     
     try:
         request_counter += 1
         if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE:
-            wait_time = 60 - (time.time() - last_reset)
+            wait_time = 60 - (time.time() - local_last_reset)
             if wait_time > 0:
                 logger.warning(f"達到速率限制，等待 {wait_time:.2f} 秒")
                 await asyncio.sleep(wait_time)
                 request_counter = 0
-                last_reset = time.time()
+                local_last_reset = time.time()
+                last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
         logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
         
-        # 移除對 _ratelimiter 的訪問，改用手動速率限制
         await asyncio.sleep(1.0)  # 固定延遲
 
         submission = await reddit.submission(id=post_id)
@@ -225,7 +235,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
             "fetched_pages": [1],
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            "last_reset": last_reset,
+            "last_reset": local_last_reset,
             "rate_limit_until": 0
         }
         logger.info(f"抓取貼文 {post_id} 成功，總回覆數 {len(replies)}")
@@ -250,7 +260,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
             "fetched_pages": [],
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            "last_reset": last_reset,
+            "last_reset": local_last_reset,
             "rate_limit_until": last_reset + 120 if "429" in str(e) else 0
         }
     finally:
@@ -258,7 +268,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
             await reddit.close()
 
 async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
-    global request_counter
+    global request_counter, last_reset
     # 移除重複貼文 ID
     unique_post_ids = list(dict.fromkeys(post_ids))
     if len(unique_post_ids) < len(post_ids):
@@ -268,6 +278,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
     reddit.is_shared = True
     results = []
     rate_limit_info = []
+    local_last_reset = last_reset  # 保存全局 last_reset 的當前值
     
     try:
         batch_size = 1  # 單個請求，避免過多並行
@@ -296,8 +307,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
                             "fetched_pages": [],
                             "rate_limit_info": [{"message": f"抓取錯誤：{str(result)}"}],
                             "request_counter": request_counter,
-                            "last_reset": last_reset,
-                            "rate_limit_until": last_reset + 120 if "429" in str(result) else 0
+                            "last_reset": local_last_reset,
+                            "rate_limit_until": local_last_reset + 120 if "429" in str(result) else 0
                         })
                     rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(result)}"})
                     continue
@@ -308,11 +319,12 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
             # 批次間延遲
             delay = 10.0
             if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE - 10:
-                delay = 60 - (time.time() - last_reset)
+                delay = 60 - (time.time() - local_last_reset)
                 if delay <= 0:
                     delay = 60
                 request_counter = 0
-                last_reset = time.time()
+                local_last_reset = time.time()
+                last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
             logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
             if i + batch_size < len(unique_post_ids):
@@ -320,7 +332,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
         
         aggregated_rate_limit_data = {
             "request_counter": request_counter,
-            "last_reset": last_reset,
+            "last_reset": local_last_reset,
             "rate_limit_until": max(r.get("rate_limit_until", 0) for r in results)
         }
         
@@ -328,7 +340,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
             "results": results,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            "last_reset": last_reset,
+            "last_reset": local_last_reset,
             "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
         }
     except Exception as e:
@@ -338,8 +350,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
             "results": results,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": last_reset + 120 if "429" in str(e) else 0
+            "last_reset": local_last_reset,
+            "rate_limit_until": local_last_reset + 120 if "429" in str(e) else 0
         }
     finally:
         await reddit.close()
