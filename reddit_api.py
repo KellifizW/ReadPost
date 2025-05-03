@@ -24,7 +24,7 @@ topic_cache = {}
 thread_cache = {}
 CACHE_DURATION = 300  # 緩存 5 分鐘
 
-# 初始化 Reddit 客戶端
+# 初始化 Reddit 客戶端（保持不變）
 async def init_reddit_client():
     global request_counter, last_reset
     async with request_lock:
@@ -55,6 +55,7 @@ async def init_reddit_client():
         logger.error(f"Reddit 客戶端初始化失敗：{str(e)}")
         raise
 
+# get_subreddit_name（保持不變）
 async def get_subreddit_name(subreddit, reddit=None):
     if reddit is None:
         reddit = await init_reddit_client()
@@ -69,6 +70,7 @@ async def get_subreddit_name(subreddit, reddit=None):
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
 
+# get_reddit_topic_list（保持不變）
 async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=None):
     global request_counter, topic_cache
     cache_key = f"{subreddit}"
@@ -145,7 +147,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
     if cache_key in thread_cache:
         cached_data = thread_cache[cache_key]
         if time.time() - cached_data["timestamp"] < CACHE_DURATION:
-            logger.info(f"使用緩存數據，貼文：{post_id}")
+            logger.info(f"使用緩存數據，貼文：{post_id}, 鍵：{cache_key}")
             return cached_data["data"]
     
     if reddit is None:
@@ -226,6 +228,14 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
         if "RATELIMIT" in str(e) or "429" in str(e):
             wait_time = 120  # 默認等待時間
             try:
+                # 檢查響應頭中的速率限制信息
+                if hasattr(e, 'response') and e.response:
+                    headers = e.response.headers
+                    remaining = int(headers.get('x-ratelimit-remaining', 0))
+                    reset_time = int(headers.get('x-ratelimit-reset', 0))
+                    if remaining == 0 and reset_time > 0:
+                        wait_time = max(wait_time, reset_time - time.time() + 1)
+                        logger.info(f"從頭信息獲取重置時間，等待 {wait_time:.2f} 秒")
                 # 嘗試從異常中提取速率限制信息
                 for item in e.items:
                     if item.error_type == "RATELIMIT":
@@ -288,7 +298,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
     
     try:
         batch_size = 2  # 減少批次大小，降低請求壓力
-        post_ids = list(set(post_ids))  # 去重，避免重複請求
+        post_ids = list(dict.fromkeys(post_ids))  # 保留順序去重
         
         # 檢查緩存，過濾已緩存的貼文
         cached_results = []
@@ -298,7 +308,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
             if cache_key in thread_cache:
                 cached_data = thread_cache[cache_key]
                 if time.time() - cached_data["timestamp"] < CACHE_DURATION:
-                    logger.info(f"使用緩存數據，貼文：{post_id}")
+                    logger.info(f"使用緩存數據，貼文：{post_id}, 鍵：{cache_key}")
                     cached_results.append(cached_data["data"])
                     continue
             uncached_post_ids.append(post_id)
@@ -346,7 +356,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
                 current_time = time.time()
                 elapsed = current_time - last_reset
                 requests_remaining = RATE_LIMIT_REQUESTS_PER_MINUTE - request_counter
-                delay = max(5.0, (60 - elapsed) / max(requests_remaining, 1)) if elapsed < 60 else 5.0
+                requests_per_second = RATE_LIMIT_REQUESTS_PER_MINUTE / 60.0
+                delay = max(5.0, len(batch) / requests_per_second) if elapsed < 60 else 5.0
                 logger.info(f"批次間延遲 {delay:.2f} 秒，當前請求次數 {request_counter}")
             
             if i + batch_size < len(uncached_post_ids):
