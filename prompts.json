@@ -28,7 +28,7 @@
       "system": "{system.response}",
       "context": "問題：{query}\n討論區：{selected_cat}\n對話歷史：{conversation_context}",
       "data": "帖子元數據：{metadata}\n帖子內容：{thread_data}\n篩選條件：{filters}",
-      "instructions": "任務：\n1. 總結最多5個帖子的討論內容，引用高點讚回覆，聚焦問題主題。\n2. 每個帖子標註 [帖子 ID: {thread_id}] {標題}。\n3. 若無帖子內容，基於元數據總結標題趨勢。\n4. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請提供更具體的主題或試試其他討論區！」\n5. 字數：600-1000字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出Americans：\n- 簡介：說明總結的討論區和主題。\n- 帖子總結：每個帖子包含 [帖子 ID: {thread_id}] {標題}、主題、關鍵回覆。\n- 總結：概述討論趨勢或觀點分布。"
+      "instructions": "任務：\n1. 總結最多5個帖子的討論內容，引用高點讚回覆，聚焦問題主題。\n2. 每個帖子標註 [帖子 ID: {thread_id}] {標題}。\n3. 若無帖子內容，基於元數據總結標題趨勢。\n4. 若無匹配帖子，回應：「在 {selected_cat} 中未找到符合條件的帖子（篩選：回覆數≥{filters[min_replies]}，點讚數≥{filters[min_likes]}）。請提供更具體的主題或試試其他討論區！」\n5. 字數：600-1000字。\n6. 禁止使用 [post_id: ...] 格式。\n輸出格式：\n- 簡介：說明總結的討論區和主題。\n- 帖子總結：每個帖子包含 [帖子 ID: {thread_id}] {標題}、主題、關鍵回覆。\n- 總結：概述討論趨勢或觀點分布。"
     },
     "sentiment": {
       "system": "{system.response}",
