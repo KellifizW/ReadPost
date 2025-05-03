@@ -810,7 +810,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             selected_source=selected_source,
             conversation_context=conversation_context,
             metadata=metadata,
-            thread_data=list(filteredCSCS
             thread_data=list(filtered_thread_data.values()),
             filters=filters
         ) + thread_id_prompt
