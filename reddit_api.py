@@ -1,9 +1,18 @@
+"""
+Reddit API 模組，負責從 Reddit 抓取子版貼文和回覆內容。
+提供速率限制管理、錯誤處理和日誌記錄功能。
+主要函數：
+- get_reddit_submission_list：抓取指定子版的貼文列表。
+- get_reddit_submission_content：抓取指定貼文的回覆內容。
+- get_reddit_submission_content_batch：批量抓取多個貼文的回覆內容。
+"""
+
 import asyncpraw
-import logging
 import asyncio
-from datetime import datetime
-import streamlit as st
 import time
+from datetime import datetime
+import logging
+import json
 import pytz
 from logging_config import configure_logger
 
@@ -13,272 +22,235 @@ HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 # 配置日誌記錄器
 logger = configure_logger(__name__, "reddit_api.log")
 
-# 記錄當前請求次數和速率限制狀態
-request_counter = 0
-last_reset = time.time()
-RATE_LIMIT_REQUESTS_PER_MINUTE = 60  # Reddit API 速率限制：每分鐘 60 個請求
+# Reddit API 配置（請替換為實際憑證）
+REDDIT_CLIENT_ID = "your_client_id"
+REDDIT_CLIENT_SECRET = "your_client_secret"
+REDDIT_USER_AGENT = "SocialMediaBot/1.0 by dopeloner2025"
+REDDIT_USERNAME = "dopeloner2025"
+REDDIT_PASSWORD = "your_password"
 
-# 簡單緩存：存儲子版抓取結果和貼文內容
-topic_cache = {}
-thread_cache = {}
-CACHE_DURATION = 300  # 緩存 5 分鐘
+class RateLimiter:
+    """
+    速率限制器，控制 Reddit API 請求頻率，動態調整延遲。
+    """
+    def __init__(self, max_requests: int, period: float):
+        self.max_requests = max_requests
+        self.period = period
+        self.requests = []
+        self.request_counter = 0
+        self.last_reset = time.time()
+        self.rate_limit_until = 0
+        self.last_response_time = 1.0
 
-# 初始化 Reddit 客戶端
-async def init_reddit_client():
-    global request_counter, last_reset
-    try:
-        current_time = time.time()
-        if current_time - last_reset >= 60:
-            request_counter = 0
-            last_reset = current_time
-            logger.info("速率限制計數器重置")
+    async def acquire(self):
+        now = time.time()
+        # 重置計數器
+        if now - self.last_reset >= self.period:
+            self.request_counter = 0
+            self.last_reset = now
+        # 檢查速率限制
+        if now < self.rate_limit_until:
+            wait_time = self.rate_limit_until - now
+            logger.warning(f"Rate limit active, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+            return False, {
+                "request_counter": self.request_counter,
+                "last_reset": self.last_reset,
+                "rate_limit_until": self.rate_limit_until
+            }
+        # 清理過期請求
+        self.requests = [t for t in self.requests if now - t < self.period]
+        if len(self.requests) >= self.max_requests:
+            wait_time = self.period - (now - self.requests[0])
+            logger.warning(f"Rate limit reached, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+            self.requests = self.requests[1:]
+        self.requests.append(now)
+        self.request_counter += 1
+        await asyncio.sleep(max(0.5, min(self.last_response_time, 2.0)))
+        return True, {
+            "request_counter": self.request_counter,
+            "last_reset": self.last_reset,
+            "rate_limit_until": self.rate_limit_until
+        }
 
-        reddit = asyncpraw.Reddit(
-            client_id=st.secrets["reddit"]["client_id"],
-            client_secret=st.secrets["reddit"]["client_secret"],
-            username=st.secrets["reddit"]["username"],
-            password=st.secrets["reddit"]["password"],
-            user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}"
-        )
-        user = await reddit.user.me()
-        if user:
+    def update_rate_limit(self, retry_after):
+        self.rate_limit_until = time.time() + int(retry_after)
+
+# 初始化速率限制器
+rate_limiter = RateLimiter(max_requests=60, period=60)
+
+# Reddit 客戶端（單例模式）
+reddit_client = None
+
+async def initialize_reddit_client():
+    """
+    初始化 Reddit 客戶端，確保單例模式。
+    """
+    global reddit_client
+    if reddit_client is None:
+        try:
+            reddit_client = asyncpraw.Reddit(
+                client_id=REDDIT_CLIENT_ID,
+                client_secret=REDDIT_CLIENT_SECRET,
+                user_agent=REDDIT_USER_AGENT,
+                username=REDDIT_USERNAME,
+                password=REDDIT_PASSWORD
+            )
+            user = await reddit_client.user.me()
             logger.info(f"Reddit 客戶端初始化成功，已認證用戶：{user.name}")
-        else:
-            logger.warning("Reddit 客戶端初始化成功，但未成功認證用戶，可能未獲得更高配額")
-        return reddit
-    except KeyError as e:
-        logger.error(f"缺少 Secrets 配置：{str(e)}")
-        raise
-    except Exception as e:
-        logger.error(f"Reddit 客戶端初始化失敗：{str(e)}")
-        raise
+        except Exception as e:
+            logger.error(f"Reddit 客戶端初始化失敗：{str(e)}")
+            raise
+    return reddit_client
 
-async def get_subreddit_name(subreddit, reddit=None):
-    if reddit is None:
-        reddit = await init_reddit_client()
-    try:
-        subreddit_obj = await reddit.subreddit(subreddit)
-        display_name = subreddit_obj.display_name
-        return display_name
-    except Exception as e:
-        logger.error(f"獲取子版名稱失敗：{str(e)}")
-        return "未知子版"
-    finally:
-        if reddit and not hasattr(reddit, 'is_shared'):
-            await reddit.close()
-
-async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=None):
-    global request_counter, topic_cache
-    cache_key = f"{subreddit}"  # 移除 start_page 依賴，確保緩存有效
-    
-    if cache_key in topic_cache:
-        cached_data = topic_cache[cache_key]
-        if time.time() - cached_data["timestamp"] < CACHE_DURATION:
-            logger.info(f"使用緩存數據，子版：{subreddit}")
-            return cached_data["data"]
-    
-    if reddit is None:
-        reddit = await init_reddit_client()
+async def get_reddit_submission_list(subreddit, limit=100):
+    """
+    抓取指定子版的貼文列表。
+    """
+    reddit = await initialize_reddit_client()
     items = []
     rate_limit_info = []
     
-    try:
-        total_limit = 100
-        subreddit_obj = await reddit.subreddit(subreddit)
-        request_counter += 1
-        logger.info(f"開始抓取子版 {subreddit}，當前請求次數 {request_counter}")
-        
-        async for submission in subreddit_obj.new(limit=total_limit):
-            if submission.created_utc:
-                hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
-                readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                item = {
-                    "thread_id": submission.id,
-                    "title": submission.title,
-                    "no_of_reply": submission.num_comments,
-                    "last_reply_time": readable_time,
-                    "like_count": submission.score
-                }
-                items.append(item)
-        logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
-        
-        topic_cache[cache_key] = {
-            "timestamp": time.time(),
-            "data": {
-                "items": items,
-                "rate_limit_info": rate_limit_info,
-                "request_counter": request_counter,
-                "last_reset": last_reset,
-                "rate_limit_until": 0
-            }
+    success, rate_limit_data = await rate_limiter.acquire()
+    if not success:
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_data['rate_limit_until'], tz=HONG_KONG_TZ)}")
+        return {
+            "items": [],
+            "rate_limit_info": rate_limit_info,
+            "request_counter": rate_limit_data["request_counter"],
+            "last_reset": rate_limit_data["last_reset"],
+            "rate_limit_until": rate_limit_data["rate_limit_until"]
         }
+    
+    logger.info(f"開始抓取子版 {subreddit}，當前請求次數 {rate_limit_data['request_counter']}")
+    try:
+        start_time = time.time()
+        subreddit_obj = await reddit.subreddit(subreddit)
+        async for submission in subreddit_obj.hot(limit=limit):
+            items.append({
+                "thread_id": submission.id,
+                "title": submission.title,
+                "no_of_reply": submission.num_comments,
+                "like_count": submission.score,
+                "last_reply_time": str(int(submission.created_utc))
+            })
+        response_time = time.time() - start_time
+        rate_limiter.last_response_time = response_time
+        logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
+    except asyncpraw.exceptions.RedditAPIException as e:
+        if "RATELIMIT" in str(e):
+            wait_time = 60  # 默認等待 60 秒
+            rate_limiter.update_rate_limit(wait_time)
+            rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit hit, waiting {wait_time:.2f} seconds")
+            logger.warning(f"觸發速率限制，子版 {subreddit}")
+        logger.error(f"抓取子版 {subreddit} 失敗：{str(e)}")
+        items = []
     except Exception as e:
-        logger.error(f"抓取貼文列表失敗：{str(e)}")
-    finally:
-        if reddit and not hasattr(reddit, 'is_shared'):
-            await reddit.close()
+        logger.error(f"抓取子版 {subreddit} 失敗：{str(e)}")
+        items = []
     
     return {
         "items": items,
         "rate_limit_info": rate_limit_info,
-        "request_counter": request_counter,
-        "last_reset": last_reset,
-        "rate_limit_until": 0
+        "request_counter": rate_limit_data["request_counter"],
+        "last_reset": rate_limit_data["last_reset"],
+        "rate_limit_until": rate_limit_data["rate_limit_until"]
     }
 
-async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=None):
-    global request_counter, thread_cache
-    cache_key = f"{post_id}_subreddit_{subreddit}"
-    
-    if cache_key in thread_cache:
-        cached_data = thread_cache[cache_key]
-        if time.time() - cached_data["timestamp"] < CACHE_DURATION:
-            logger.info(f"使用緩存數據，貼文：{post_id}")
-            return cached_data["data"]
-    
-    if reddit is None:
-        reddit = await init_reddit_client()
-        logger.debug(f"重新初始化 Reddit 客戶端，post_id: {post_id}, reddit type: {type(reddit)}")
-    else:
-        logger.debug(f"使用傳入 Reddit 客戶端，post_id: {post_id}, reddit type: {type(reddit)}")
-    
+async def get_reddit_submission_content(submission_id, subreddit=None, max_replies=250):
+    """
+    抓取指定貼文的回覆內容。
+    """
+    reddit = await initialize_reddit_client()
     replies = []
     rate_limit_info = []
     
-    try:
-        request_counter += 1
-        logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
-        
-        if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE * 0.5:  # 提前到 50%
-            wait_time = max(1, 60 - (time.time() - last_reset))
-            logger.warning(f"接近速率限制，剩餘請求數：{RATE_LIMIT_REQUESTS_PER_MINUTE - request_counter}，等待 {wait_time} 秒")
-            await asyncio.sleep(wait_time)
-
-        # 添加小幅延遲，避免瞬間過多請求
-        await asyncio.sleep(0.5)
-
-        submission = await reddit.submission(id=post_id)
-        if not submission:
-            logger.error(f"無法獲取貼文 {post_id}，submission 為 None")
-            raise ValueError(f"貼文 {post_id} 獲取失敗")
-        
-        await submission.comments.replace_more(limit=max_comments)
-        hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
-        readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
-        
-        comments_list = submission.comments.list()
-        logger.debug(f"貼文 {post_id} 的評論數量：{len(comments_list)}")
-        
-        for comment in comments_list:
-            if comment.body:
-                hk_comment_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-                readable_comment_time = hk_comment_time.strftime("%Y-%m-%d %H:%M:%S")
-                reply = {
-                    "reply_id": comment.id,
-                    "msg": comment.body,
-                    "like_count": comment.score,
-                    "reply_time": readable_comment_time
-                }
-                replies.append(reply)
-        
-        result = {
-            "thread_id": submission.id,
-            "title": submission.title,
-            "no_of_reply": submission.num_comments,
-            "last_reply_time": readable_time,
-            "like_count": submission.score,
-            "replies": replies[:max_comments],
-            "total_replies": submission.num_comments,
-            "fetched_pages": [1],
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": 0
-        }
-        logger.info(f"抓取貼文 {post_id} 成功，總回覆數 {len(replies)}")
-        
-        thread_cache[cache_key] = {
-            "timestamp": time.time(),
-            "data": result
-        }
-        return result
-    except Exception as e:
-        logger.error(f"抓取貼文 {post_id} 失敗：{str(e)}")
-        rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
-        if "429" in str(e):
-            logger.warning(f"觸發速率限制，貼文 {post_id}，當前請求次數 {request_counter}")
-            wait_time = 60
-            logger.info(f"因 429 錯誤，等待 {wait_time} 秒後重試")
-            await asyncio.sleep(wait_time)
-            return await get_reddit_thread_content(post_id, subreddit, max_comments, reddit)
+    success, rate_limit_data = await rate_limiter.acquire()
+    if not success:
+        rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit active until {datetime.fromtimestamp(rate_limit_data['rate_limit_until'], tz=HONG_KONG_TZ)}")
         return {
             "replies": [],
             "title": None,
             "total_replies": 0,
             "fetched_pages": [],
             "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": last_reset + wait_time if "429" in str(e) else 0
+            "request_counter": rate_limit_data["request_counter"],
+            "last_reset": rate_limit_data["last_reset"],
+            "rate_limit_until": rate_limit_data["rate_limit_until"]
         }
-    finally:
-        if reddit and not hasattr(reddit, 'is_shared'):
-            await reddit.close()
+    
+    logger.info(f"開始抓取貼文 {submission_id}，當前請求次數 {rate_limit_data['request_counter']}")
+    try:
+        start_time = time.time()
+        submission = await reddit.submission(id=submission_id)
+        await submission.load()
+        submission.comment_sort = "top"
+        await submission.comments.replace_more(limit=0)
+        total_replies = len(submission.comments)
+        replies_data = []
+        for comment in submission.comments[:max_replies]:
+            replies_data.append({
+                "reply_id": comment.id,
+                "msg": comment.body,
+                "like_count": comment.score,
+                "dislike_count": 0,
+                "reply_time": str(int(comment.created_utc))
+            })
+        response_time = time.time() - start_time
+        rate_limiter.last_response_time = response_time
+        logger.info(f"抓取貼文 {submission_id} 成功，總回覆數 {len(replies_data)}")
+        replies = replies_data
+    except asyncpraw.exceptions.RedditAPIException as e:
+        if "RATELIMIT" in str(e):
+            wait_time = 60
+            rate_limiter.update_rate_limit(wait_time)
+            rate_limit_info.append(f"{datetime.now(tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} HKT - Rate limit hit, waiting {wait_time:.2f} seconds")
+            logger.warning(f"觸發速率限制，貼文 {submission_id}")
+        logger.error(f"抓取貼文 {submission_id} 失敗：{str(e)}")
+        replies = []
+    except Exception as e:
+        logger.error(f"抓取貼文 {submission_id} 失敗：{str(e)}")
+        replies = []
+    
+    return {
+        "replies": replies,
+        "title": submission.title if 'submission' in locals() else None,
+        "total_replies": total_replies if 'total_replies' in locals() else 0,
+        "fetched_pages": [1],
+        "rate_limit_info": rate_limit_info,
+        "request_counter": rate_limit_data["request_counter"],
+        "last_reset": rate_limit_data["last_reset"],
+        "rate_limit_until": rate_limit_data["rate_limit_until"]
+    }
 
-async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
-    global request_counter
-    reddit = await init_reddit_client()
-    reddit.is_shared = True
+async def get_reddit_submission_content_batch(submission_ids, subreddit=None, max_replies=250):
+    """
+    批量抓取多個貼文的回覆內容。
+    """
     results = []
     rate_limit_info = []
     
-    try:
-        batch_size = 3  # 減少並行數量
-        for i in range(0, len(post_ids), batch_size):
-            batch = post_ids[i:i + batch_size]
-            logger.info(f"開始抓取批次 {i//batch_size + 1}，貼文數量：{len(batch)}")
-            
-            tasks = [get_reddit_thread_content(post_id, subreddit, max_comments, reddit) for post_id in batch]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for post_id, result in zip(batch, batch_results):
-                if isinstance(result, Exception):
-                    logger.warning(f"批量抓取貼文 {post_id} 失敗：{str(result)}")
-                    results.append({
-                        "thread_id": post_id,
-                        "replies": [],
-                        "title": None,
-                        "total_replies": 0,
-                        "fetched_pages": [],
-                        "rate_limit_info": [{"message": f"抓取錯誤：{str(result)}"}],
-                        "request_counter": request_counter,
-                        "last_reset": last_reset,
-                        "rate_limit_until": last_reset + 60 if "429" in str(result) else 0
-                    })
-                    rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(result)}"})
-                    continue
-                result["thread_id"] = post_id
-                rate_limit_info.extend(result.get("rate_limit_info", []))
-                results.append(result)
-            
-            # 強制批次間延遲
-            delay = max(5.0, 60 - (time.time() - last_reset))
-            logger.info(f"批次間延遲 {delay} 秒，當前請求次數 {request_counter}")
-            if i + batch_size < len(post_ids):
-                await asyncio.sleep(delay)
-        
-        aggregated_rate_limit_data = {
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": max(r.get("rate_limit_until", 0) for r in results)
-        }
-        
-        return {
-            "results": results,
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
-        }
-    finally:
-        await reddit.close()
+    for submission_id in submission_ids:
+        result = await get_reddit_submission_content(
+            submission_id=submission_id,
+            subreddit=subreddit,
+            max_replies=max_replies
+        )
+        result["thread_id"] = submission_id
+        rate_limit_info.extend(result.get("rate_limit_info", []))
+        results.append(result)
+    
+    aggregated_rate_limit_data = {
+        "request_counter": max([r.get("request_counter", 0) for r in results]),
+        "last_reset": min([r.get("last_reset", time.time()) for r in results]),
+        "rate_limit_until": max([r.get("rate_limit_until", 0) for r in results])
+    }
+    
+    return {
+        "results": results,
+        "rate_limit_info": rate_limit_info,
+        "request_counter": aggregated_rate_limit_data["request_counter"],
+        "last_reset": aggregated_rate_limit_data["last_reset"],
+        "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
+    }
