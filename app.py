@@ -82,10 +82,7 @@ async def main():
         "LIHKG - 成人台": {"source": "lihkg", "cat_id": "29"},
         "LIHKG - 創意台": {"source": "lihkg", "cat_id": "31"},
         "Reddit - wallstreetbets": {"source": "reddit", "subreddit": "wallstreetbets"},
-        "Reddit - personalfinance": {"source": "reddit", "subreddit": "personalfinance"},
-        "Reddit - investing": {"source": "reddit", "subreddit": "investing"},
-        "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"},
-        "Reddit - options": {"source": "reddit", "subreddit": "options"}
+        "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"}
     }
 
     def on_source_change():
@@ -204,11 +201,10 @@ async def main():
             )
             logger.info(f"Analysis completed: intent={analysis.get('intent')}")
 
-            # 檢查緩存，避免重複抓取
             cache_key = f"{source_id}_topics"
             if cache_key in st.session_state.thread_cache:
                 cached_data = st.session_state.thread_cache[cache_key]
-                if time.time() - cached_data["timestamp"] < 300:  # 緩存 5 分鐘
+                if time.time() - cached_data["timestamp"] < 300:
                     logger.info(f"使用 app 層緩存數據，來源：{source_id}")
                     result = cached_data["data"]
                 else:
