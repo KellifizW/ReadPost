@@ -81,7 +81,11 @@ async def main():
         "LIHKG - 財經台": {"source": "lihkg", "cat_id": "15"},
         "LIHKG - 成人台": {"source": "lihkg", "cat_id": "29"},
         "LIHKG - 創意台": {"source": "lihkg", "cat_id": "31"},
-        "Reddit - wallstreetbets": {"source": "reddit", "subreddit": "wallstreetbets"}
+        "Reddit - wallstreetbets": {"source": "reddit", "subreddit": "wallstreetbets"},
+        "Reddit - personalfinance": {"source": "reddit", "subreddit": "personalfinance"},
+        "Reddit - investing": {"source": "reddit", "subreddit": "investing"},
+        "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"},
+        "Reddit - options": {"source": "reddit", "subreddit": "options"}
     }
 
     def on_source_change():
