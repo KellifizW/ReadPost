@@ -17,7 +17,6 @@ logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 100000
 API_TIMEOUT = 90
-MAX_CACHE_SIZE = 100  # 最大緩存條目數
 
 # 全局鎖和信號量
 cache_lock = asyncio.Lock()
@@ -35,12 +34,6 @@ class PromptBuilder:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 self.config = json.loads(f.read())
-            # 驗證 prompts.json 結構
-            required_keys = ["analyze", "prioritize", "response", "system"]
-            missing_keys = [key for key in required_keys if key not in self.config]
-            if missing_keys:
-                logger.error(f"prompts.json 缺少必要鍵：{missing_keys}")
-                raise ValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
         except Exception as e:
             logger.error(f"載入 prompts.json 失敗：{str(e)}")
             raise
@@ -53,20 +46,12 @@ class PromptBuilder:
         )
         return f"{config['system']}\n{context}\n{config['instructions']}"
 
-    def build_prioritize(self, query, source_name, source_id, source_type, threads):
+    def build_prioritize(self, query, source_name, source_id, threads):
         config = self.config.get("prioritize")
         if not config:
             logger.error("未找到 'prioritize' 的提示配置")
             raise ValueError("未找到 'prioritize' 的提示配置")
-        try:
-            context = config["context"].format(
-                query=query, cat_name=source_name, cat_id=source_id, source_type=source_type or "lihkg"
-            )
-        except KeyError as e:
-            logger.error(f"格式化 prioritize context 失敗，缺少參數：{str(e)}")
-            context = config["context"].format(
-                query=query, cat_name=source_name, cat_id=source_id, source_type="lihkg"
-            )
+        context = config["context"].format(query=query, cat_name=source_name, cat_id=source_id)
         data = config["data"].format(threads=json.dumps(threads, ensure_ascii=False))
         return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
 
@@ -79,7 +64,7 @@ class PromptBuilder:
         data = config["data"].format(
             metadata=json.dumps(metadata or [], ensure_ascii=False),
             thread_data=json.dumps(thread_data or [], ensure_ascii=False),
-            filters=json.dumps(filters or {}, ensure_ascii=False)
+            filters=json.dumps(filters, ensure_ascii=False)
         )
         return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
 
@@ -146,11 +131,11 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     status_code = response.status
                     if status_code != 200:
-                        logger.debug(f"關鍵詞提取失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
+                        logger.warning(f"關鍵詞提取失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
+                        logger.warning(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -167,7 +152,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
                     time_sensitive = result.get("time_sensitive", False)
                     return {"keywords": keywords, "reason": reason, "time_sensitive": time_sensitive}
         except Exception as e:
-            logger.debug(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
+            logger.warning(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
@@ -231,7 +216,7 @@ async def extract_relevant_thread(conversation_context, query):
     
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
-            matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
+            matches = re.findall(r"\[帖子 ID: ([a-z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
                 title_keyword_result = await extract_keywords_with_grok(title, conversation_context)
                 title_keywords = set(title_keyword_result["keywords"])
@@ -244,7 +229,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     conversation_context = conversation_context or []
     prompt_builder = PromptBuilder()
     
-    id_match = re.search(r'(?:ID|帖子)\s*(\d+)', user_query, re.IGNORECASE)
+    id_match = re.search(r'(?:ID|帖子)\s*([a-z0-9]+)', user_query, re.IGNORECASE)
     if id_match:
         thread_id = id_match.group(1)
         return {
@@ -298,7 +283,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
         
-        matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+        matches = re.findall(r"\[帖子 ID: ([a-z0-9]+)\]", last_response)
         referenced_thread_ids = matches
         
         last_query_keywords = (await extract_keywords_with_grok(last_user_query, conversation_context))["keywords"]
@@ -396,11 +381,11 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     status_code = response.status
                     if status_code != 200:
-                        logger.debug(f"語義意圖分析失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
+                        logger.warning(f"語義意圖分析失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.debug(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
+                        logger.warning(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -456,11 +441,10 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
                         "theme_keywords": theme_keywords
                     }
         except Exception as e:
-            logger.debug(f"語義意圖分析錯誤：{str(e)}，嘗試次數={attempt + 1}")
+            logger.warning(f"語義意圖分析錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
-            logger.error(f"語義意圖分析失敗，嘗試 {max_retries} 次後放棄")
             return {
                 "direct_response": False,
                 "intent": "summarize_posts",
@@ -478,7 +462,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
                 "theme_keywords": historical_keywords
             }
 
-async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, source_type="lihkg", intent="summarize_posts"):
+async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, intent="summarize_posts"):
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -490,7 +474,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         context = st.session_state.get("conversation_context", [])
         if context:
             last_response = context[-1].get("content", "")
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            matches = re.findall(r"\[帖子 ID: ([a-z0-9]+)\]", last_response)
             referenced_thread_ids = [tid for tid in matches if any(t["thread_id"] == tid for t in threads)]
         if referenced_thread_ids:
             return {"top_thread_ids": referenced_thread_ids[:2], "reason": "使用追問的參考帖子 ID"}
@@ -501,7 +485,6 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
             query=user_query,
             source_name=source_name,
             source_id=source_id,
-            source_type=source_type,
             threads=[{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
         )
     except Exception as e:
@@ -523,11 +506,11 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     status_code = response.status
                     if status_code != 200:
-                        logger.debug(f"帖子優先級排序失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
+                        logger.warning(f"帖子優先級排序失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.debug(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
+                        logger.warning(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -545,7 +528,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         logger.warning(f"無法解析優先級排序結果：{response_content}")
                         return {"top_thread_ids": [], "reason": "無法解析 API 回應"}
         except Exception as e:
-            logger.debug(f"帖子優先級排序錯誤：{str(e)}，嘗試次數={attempt + 1}")
+            logger.warning(f"帖子優先級排序錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 continue
@@ -668,7 +651,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 referenced_thread_ids = [thread_id]
             else:
                 last_response = conversation_context[-1].get("content", "") if conversation_context else ""
-                matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+                matches = re.findall(r"\[帖子 ID: ([a-z0-9]+)\]", last_response)
                 referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
         else:
             top_thread_ids = processing.get("top_thread_ids", [])
@@ -827,6 +810,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             selected_source=selected_source,
             conversation_context=conversation_context,
             metadata=metadata,
+            thread_data=list(filteredCSCS
             thread_data=list(filtered_thread_data.values()),
             filters=filters
         ) + thread_id_prompt
@@ -846,6 +830,22 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "temperature": 0.7,
         "stream": True
     }
+
+    # 驗證 payload 格式
+    try:
+        json.dumps(payload)  # 確保 payload 可序列化
+        if not payload["messages"] or not isinstance(payload["messages"], list):
+            logger.error("無效的 payload：messages 為空或格式錯誤")
+            yield "錯誤：API 請求格式無效，請聯繫支持。"
+            return
+        if payload["max_tokens"] <= 0 or payload["max_tokens"] > max_tokens_limit:
+            logger.error(f"無效的 max_tokens：{payload['max_tokens']}，應在 1 到 {max_tokens_limit} 之間")
+            yield f"錯誤：無效的 max_tokens 值（{payload['max_tokens']}）。請聯繫支持。"
+            return
+    except Exception as e:
+        logger.error(f"payload 序列化失敗：{str(e)}")
+        yield f"錯誤：API 請求格式無效（{str(e)}）。請聯繫支持。"
+        return
     
     response_content = ""
     prompt_tokens = 0
@@ -855,8 +855,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 status_code = response.status
                 if status_code != 200:
-                    logger.error(f"回應生成失敗：狀態碼={status_code}")
-                    yield f"錯誤：生成回應失敗（狀態碼 {status_code}）。請稍後重試。"
+                    error_data = await response.text()
+                    logger.error(f"回應生成失敗：狀態碼={status_code}，錯誤信息={error_data}，請求 payload={json.dumps(payload)}")
+                    yield f"錯誤：生成回應失敗（狀態碼 {status_code}，錯誤信息：{error_data}）。請稍後重試或聯繫支持。"
                     return
                 
                 async for line in response.content:
@@ -885,10 +886,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                                     completion_tokens = usage.get("completion_tokens", completion_tokens)
                             except json.JSONDecodeError:
-                                logger.warning(f"流式數據 JSON 解碼錯誤")
+                                logger.warning(f"流式數據 JSON 解碼錯誤：{line_str}")
                                 continue
         except Exception as e:
-            logger.error(f"回應生成失敗：{str(e)}")
+            logger.error(f"回應生成失敗：{str(e)}，請求 payload={json.dumps(payload)}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
@@ -898,15 +899,6 @@ def clean_cache(max_age=3600):
     expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
     for key in expired_keys:
         del st.session_state.thread_cache[key]
-    # 限制緩存大小
-    if len(st.session_state.thread_cache) > MAX_CACHE_SIZE:
-        sorted_keys = sorted(
-            st.session_state.thread_cache.items(),
-            key=lambda x: x[1]["timestamp"]
-        )
-        for key, _ in sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]:
-            del st.session_state.thread_cache[key]
-        logger.info(f"清理緩存，移除 {len(sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE])} 個過舊條目，當前緩存大小：{len(st.session_state.thread_cache)}")
 
 def unix_to_readable(timestamp):
     try:
@@ -932,7 +924,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         clean_cache()
         
         if rate_limit_until > time.time():
-            logger.warning(f"速率限制生效，直到 {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
+            logger.warning(f"速率限制生效，直到 {rate_limit_until}")
             return {
                 "selected_source": selected_source,
                 "thread_data": [],
@@ -950,8 +942,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
         intent = analysis.get("intent", "summarize_posts")
         
-        logger.info(f"處理用戶問題：intent={intent}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
-        
         keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
@@ -968,7 +958,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
                         cached_data = st.session_state.thread_cache[thread_id_str]["data"]
                         thread_data.append(cached_data)
-                        logger.debug(f"緩存命中：thread_id={thread_id_str}")
                         continue
                 if source_type == "lihkg":
                     tasks.append(get_lihkg_thread_content(
@@ -1150,7 +1139,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             ]
         else:
             initial_threads = []
-            for page in range(1, 4):  # 減少抓取頁數至 3
+            for page in range(1, 6):
                 async with request_semaphore:
                     if source_type == "lihkg":
                         result = await get_lihkg_topic_list(
@@ -1176,7 +1165,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     initial_threads = initial_threads[:150]
                     break
                 if progress_callback:
-                    progress_callback(f"已抓取第 {page}/3 頁帖子", 0.1 + 0.2 * (page / 3))
+                    progress_callback(f"已抓取第 {page}/5 頁帖子", 0.1 + 0.2 * (page / 5))
             
             filtered_items = [
                 item for item in initial_threads
@@ -1211,9 +1200,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 candidate_threads = sorted_items[:post_limit]
             else:
                 if filtered_items:
-                    prioritization = await prioritize_threads_with_grok(
-                        user_query, filtered_items, selected_source, source_id, source_type, intent
-                    )
+                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_source, source_id, intent)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
                         sorted_items = sorted(
@@ -1238,7 +1225,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
                     cached_data = st.session_state.thread_cache[thread_id]["data"]
                     thread_data.append(cached_data)
-                    logger.debug(f"緩存命中：thread_id={thread_id}")
                     continue
             if source_type == "lihkg":
                 tasks.append((idx, get_lihkg_thread_content(
