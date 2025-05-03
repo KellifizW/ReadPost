@@ -67,7 +67,7 @@ async def get_subreddit_name(subreddit, reddit=None):
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
 
-async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pages=1, reddit=None):
+async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=None):
     global request_counter, topic_cache
     cache_key = f"{subreddit}"  # 移除 start_page 依賴，確保緩存有效
     
@@ -126,7 +126,7 @@ async def get_reddit_topic_list(subreddit="wallstreetbets", start_page=1, max_pa
         "rate_limit_until": 0
     }
 
-async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_comments=50, reddit=None):
+async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=None):
     global request_counter, thread_cache
     cache_key = f"{post_id}_subreddit_{subreddit}"
     
@@ -225,7 +225,7 @@ async def get_reddit_thread_content(post_id, subreddit="wallstreetbets", max_com
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
 
-async def get_reddit_thread_content_batch(post_ids, subreddit="wallstreetbets", max_comments=50):
+async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
     global request_counter
     reddit = await init_reddit_client()
     reddit.is_shared = True
