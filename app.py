@@ -102,13 +102,13 @@ async def main():
                 key="source_select",
                 on_change=on_source_change
             )
-            source_info = source_map[selected_source]
-            source_type = source_info["source"]
+            source_info = source_map.get(selected_source, {"source": "lihkg", "cat_id": "1"})
+            source_type = source_info.get("source", "lihkg")
             if source_type == "lihkg":
-                source_id = source_info["cat_id"]
+                source_id = source_info.get("cat_id", "1")
                 selected_cat = selected_source
             else:
-                source_id = source_info["subreddit"]
+                source_id = source_info.get("subreddit", "stocks")
                 selected_cat = selected_source
         except Exception as e:
             logger.error(f"數據來源選擇錯誤：{str(e)}")
@@ -131,6 +131,8 @@ async def main():
         logger.info(f"Source unchanged: {selected_source}, preserving conversation history")
 
     st.write(f"當前數據來源：{selected_cat}")
+    st.write(f"速率限制狀態：剩餘請求數約 {60 - st.session_state.request_counter}，"
+             f"下次重置：{datetime.fromtimestamp(st.session_state.last_reset + 60, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
     logger.info(f"Selected source: {selected_source}, source_type: {source_type}, source_id: {source_id}")
 
     for idx, chat in enumerate(st.session_state.chat_history):
