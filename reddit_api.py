@@ -196,6 +196,8 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
+        logger.info(f"單貼文抓取開始：{post_id}，子版：{subreddit}")
+        
         submission = await reddit.submission(id=post_id)
         if not submission:
             logger.error(f"無法獲取貼文：{post_id}")
@@ -247,6 +249,8 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         local_last_reset = time.time()
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
+        
+        logger.info(f"單貼文抓取完成：{post_id}，回覆數：{len(replies)}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
@@ -401,6 +405,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             results.append(result)
             fetch_status[post_id] = {"status": "success", "replies": len(replies)}
             
+            logger.debug(f"貼文 {post_id} 抓取完成，狀態：{fetch_status[post_id]['status']}，回覆數：{len(replies)}")
+            
             thread_cache[cache_key] = {
                 "timestamp": time.time(),
                 "data": result
@@ -410,6 +416,10 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
         fetch_summary = {pid: status["replies"] for pid, status in fetch_status.items() if status["status"] in ["success", "cached"]}
         total_replies = sum(status["replies"] for status in fetch_status.values() if status["status"] in ["success", "cached"])
         logger.info(f"抓取貼文完成：{fetch_summary}，總回覆數：{total_replies}")
+        
+        # 記錄最終 thread_data 摘要
+        thread_data_summary = [{"thread_id": result["title"], "replies_count": len(result["replies"])} for result in results]
+        logger.info(f"最終 thread_data 摘要：{thread_data_summary}")
         
     except Exception as e:
         logger.error(f"批次抓取貼文內容失敗：{str(e)}")
