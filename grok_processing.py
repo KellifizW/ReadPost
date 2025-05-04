@@ -954,6 +954,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         configure_lihkg_api_logger()
     else:
         configure_reddit_api_logger()
+    
     try:
         clean_cache()
         
