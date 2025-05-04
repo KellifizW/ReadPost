@@ -51,12 +51,6 @@ async def main():
         st.session_state.chat_history = []
     if "thread_cache" not in st.session_state:
         st.session_state.thread_cache = {}
-    if "rate_limit_until" not in st.session_state:
-        st.session_state.rate_limit_until = 0
-    if "request_counter" not in st.session_state:
-        st.session_state.request_counter = 0
-    if "last_reset" not in st.session_state:
-        st.session_state.last_reset = time.time()
     if "awaiting_response" not in st.session_state:
         st.session_state.awaiting_response = False
     if "conversation_context" not in st.session_state:
@@ -68,10 +62,6 @@ async def main():
     if "page_reload_logged" not in st.session_state:
         st.session_state.page_reload_logged = True
         logger.info(f"Page reloaded, last_selected_source: {st.session_state.get('last_selected_source', 'None')}")
-
-    logger.info(f"Rate limit status: request_counter={st.session_state.request_counter}, "
-                f"last_reset={datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}, "
-                f"rate_limit_until={datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else 'No limit'}")
 
     source_map = {
         "LIHKG - 吹水台": {"source": "lihkg", "cat_id": "1"},
@@ -131,9 +121,6 @@ async def main():
         logger.info(f"Source unchanged: {selected_source}, preserving conversation history")
 
     st.write(f"當前數據來源：{selected_cat}")
-    st.write(f"速率限制狀態：剩餘請求數約 {60 - st.session_state.request_counter}，"
-             f"下次重置：{datetime.fromtimestamp(st.session_state.last_reset + 60, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
-    logger.info(f"Selected source: {selected_source}, source_type: {source_type}, source_id: {source_id}")
 
     for idx, chat in enumerate(st.session_state.chat_history):
         with st.chat_message("user"):
@@ -180,19 +167,6 @@ async def main():
         try:
             update_progress("正在初始化", 0.0)
 
-            if time.time() < st.session_state.rate_limit_until:
-                error_message = f"速率限制中，請在 {datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S} 後重試。"
-                logger.warning(error_message)
-                with st.chat_message("assistant"):
-                    st.markdown(error_message)
-                st.session_state.chat_history.append({"question": user_query, "answer": error_message})
-                update_progress("處理失敗", 1.0)
-                time.sleep(0.5)
-                status_text.empty()
-                progress_bar.empty()
-                st.session_state.awaiting_response = False
-                return
-
             st.session_state.chat_history.append({"question": user_query, "answer": ""})
             st.session_state.last_user_query = user_query
 
@@ -221,9 +195,6 @@ async def main():
                         source_id=source_id,
                         source_type=source_type,
                         analysis=analysis,
-                        request_counter=st.session_state.request_counter,
-                        last_reset=st.session_state.last_reset,
-                        rate_limit_until=st.session_state.rate_limit_until,
                         conversation_context=st.session_state.conversation_context,
                         progress_callback=update_progress
                     )
@@ -239,9 +210,6 @@ async def main():
                     source_id=source_id,
                     source_type=source_type,
                     analysis=analysis,
-                    request_counter=st.session_state.request_counter,
-                    last_reset=st.session_state.last_reset,
-                    rate_limit_until=st.session_state.rate_limit_until,
                     conversation_context=st.session_state.conversation_context,
                     progress_callback=update_progress
                 )
@@ -249,13 +217,6 @@ async def main():
                     "timestamp": time.time(),
                     "data": result
                 }
-
-            st.session_state.request_counter = result.get("request_counter", st.session_state.request_counter)
-            st.session_state.last_reset = result.get("last_reset", st.session_state.last_reset)
-            st.session_state.rate_limit_until = result.get("rate_limit_until", st.session_state.rate_limit_until)
-            logger.info(f"Updated rate limit status: request_counter={st.session_state.request_counter}, "
-                        f"last_reset={datetime.fromtimestamp(st.session_state.last_reset, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}, "
-                        f"rate_limit_until={datetime.fromtimestamp(st.session_state.rate_limit_until, tz=HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S') if st.session_state.rate_limit_until > time.time() else 'No limit'}")
 
             response = ""
             with st.chat_message("assistant"):
