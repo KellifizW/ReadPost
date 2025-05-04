@@ -40,7 +40,7 @@ class PromptBuilder:
             missing_keys = [key for key in required_keys if key not in self.config]
             if missing_keys:
                 logger.error(f"prompts.json 缺少必要鍵：{missing_keys}")
-                raise ValueValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
+                raise ValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
         except Exception as e:
             logger.error(f"載入 prompts.json 失敗：{str(e)}")
             raise
@@ -129,7 +129,7 @@ async def extract_keywords_with_grok(query, conversation_context=None):
 """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
-        "model": "grok-3-beta",
+        "model": "grok-3",
         "messages": [
             {"role": "system", "content": "你是 LIHKG 論壇的語義分析助手，以繁體中文回答，專注於理解用戶意圖並提取關鍵詞。"},
             *conversation_context,
@@ -193,7 +193,7 @@ async def summarize_context(conversation_context):
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
-        "model": "grok-3-beta",
+        "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 100,
         "temperature": 0.5
@@ -405,7 +405,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         {"role": "user", "content": semantic_prompt}
     ]
     payload = {
-        "model": "grok-3-beta",
+        "model": "grok-3",
         "messages": messages,
         "max_tokens": 200,
         "temperature": 0.5
@@ -533,7 +533,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
-        "model": "grok-3-beta",
+        "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 300,
         "temperature": 0.7
@@ -649,7 +649,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
 """
         payload = {
-            "model": "grok-3-beta",
+            "model": "grok-3",
             "messages": [{"role": "user", "content": reply_count_prompt}],
             "max_tokens": 100,
             "temperature": 0.5
@@ -866,7 +866,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         {"role": "user", "content": prompt}
     ]
     payload = {
-        "model": "grok-3-beta",
+        "model": "grok-3",
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.7,
