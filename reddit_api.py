@@ -215,7 +215,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 "rate_limit_until": 0
             }
         
-        # 在 follow_up 意圖下（max_comments=200）展開 MoreComments
+        # 在 follow_up 意圖下（max_comments>=200）展開 MoreComments
         if max_comments >= 200:
             await submission.comments.replace_more(limit=None)
         else:
@@ -250,7 +250,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
         
-        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總請求次數：{request_counter}")
+        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
@@ -351,7 +351,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 fetch_status[post_id] = {"status": "failed", "replies": 0}
                 continue
             
-            # 在 follow_up 意圖下（max_comments=200）展開 MoreComments
+            # 在 follow_up 意圖下（max_comments>=200）展開 MoreComments
             if max_comments >= 200:
                 await submission.comments.replace_more(limit=None)
             else:
@@ -407,7 +407,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 "data": result
             }
         
-        logger.info(f"抓取貼文完成：{fetch_status}，總請求次數：{request_counter}")
+        total_replies = sum(status["replies"] for status in fetch_status.values() if status["status"] in ["success", "cached"])
+        logger.info(f"抓取貼文完成：{fetch_status}，總回覆數：{total_replies}")
         
     except Exception as e:
         logger.error(f"批次抓取貼文內容失敗：{str(e)}")
