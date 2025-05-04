@@ -16,7 +16,7 @@ logger = configure_logger(__name__, "reddit_api.log")
 # 記錄當前請求次數和速率限制狀態
 request_counter = 0
 last_reset = time.time()
-RATE_LIMIT_REQUESTS_PER_MINUTE = 600  # Reddit API 速率限制：每分鐘 600 個請求（認證用戶）
+RATE_LIMIT_REQUESTS_PER_MINUTE = 660  # Reddit API 速率限制：每分鐘 660 個請求（認證用戶，放寬 10%）
 client_initialized = False  # 全局標誌，避免重複日誌
 
 # 簡單緩存：存儲子版抓取結果和貼文內容
@@ -196,8 +196,6 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
-        logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
-        
         submission = await reddit.submission(id=post_id)
         if not submission:
             logger.error(f"無法獲取貼文：{post_id}")
@@ -249,8 +247,6 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         local_last_reset = time.time()
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
-        
-        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
