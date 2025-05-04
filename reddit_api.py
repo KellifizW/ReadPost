@@ -196,7 +196,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
-        logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
+        logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
         
         submission = await reddit.submission(id=post_id)
         if not submission:
@@ -250,7 +250,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
         
-        logger.info(f"抓取貼文 {post_id} 成功，總回覆數 {len(replies)}")
+        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}}，總請求次數：{request_counter}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
@@ -304,9 +304,12 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     results = []
     rate_limit_info = []
     local_last_reset = last_reset
+    fetch_status = {}  # 記錄每個貼文的抓取結果
     
     reddit = await init_reddit_client()
     try:
+        logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
+        
         for post_id in post_ids:
             cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
             clean_cache(thread_cache, "thread")
@@ -315,6 +318,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 if time.time() - cached_data["timestamp"] < CACHE_DURATION:
                     logger.info(f"使用緩存數據，貼文：{post_id}, 鍵：{cache_key}")
                     results.append(cached_data["data"])
+                    fetch_status[post_id] = {"status": "cached", "replies": len(cached_data["data"]["replies"])}
                     continue
             
             request_counter += 1
@@ -327,8 +331,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                     local_last_reset = time.time()
                     last_reset = local_last_reset
                     logger.info("速率限制計數器重置")
-            
-            logger.info(f"開始抓取貼文 {post_id}，當前請求次數 {request_counter}")
             
             submission = await reddit.submission(id=post_id)
             if not submission:
@@ -346,6 +348,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                     "last_reset": local_last_reset,
                     "rate_limit_until": 0
                 })
+                fetch_status[post_id] = {"status": "failed", "replies": 0}
                 continue
             
             # 在 follow_up 意圖下（max_comments=200）展開 MoreComments
@@ -384,8 +387,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                             last_reset = local_last_reset
                             logger.info("速率限制計數器重置")
             
-            logger.info(f"抓取貼文 {post_id} 成功，總回覆數 {len(replies)}")
-            
             result = {
                 "title": title,
                 "total_replies": total_replies,
@@ -399,11 +400,15 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 "rate_limit_until": 0
             }
             results.append(result)
+            fetch_status[post_id] = {"status": "success", "replies": len(replies)}
             
             thread_cache[cache_key] = {
                 "timestamp": time.time(),
                 "data": result
             }
+        
+        logger.info(f"抓取貼文完成：{fetch_status}，總請求次數：{request_counter}")
+        
     except Exception as e:
         logger.error(f"批次抓取貼文內容失敗：{str(e)}")
         rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(e)}"})
@@ -419,6 +424,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             "last_reset": local_last_reset,
             "rate_limit_until": 0
         })
+        fetch_status[post_id] = {"status": "failed", "replies": 0}
     finally:
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
