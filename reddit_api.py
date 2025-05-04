@@ -16,7 +16,7 @@ logger = configure_logger(__name__, "reddit_api.log")
 # 記錄當前請求次數和速率限制狀態
 request_counter = 0
 last_reset = time.time()
-RATE_LIMIT_REQUESTS_PER_MINUTE = 600  # Reddit API 速率限制：每分鐘 600 個請求（認證用戶）
+RATE_LIMIT_REQUESTS_PER_MINUTE = 720  # Reddit API 速率限制：每分鐘 720 個請求（認證用戶）
 client_initialized = False  # 全局標誌，避免重複日誌
 
 # 簡單緩存：存儲子版抓取結果和貼文內容
