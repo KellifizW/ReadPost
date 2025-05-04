@@ -306,10 +306,11 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     local_last_reset = last_reset
     fetch_status = {}  # 記錄每個貼文的抓取結果
     
+    # 收集所有貼文 ID 並記錄單一「開始抓取」日誌
+    logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
+    
     reddit = await init_reddit_client()
     try:
-        logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
-        
         for post_id in post_ids:
             cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
             clean_cache(thread_cache, "thread")
@@ -407,8 +408,10 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 "data": result
             }
         
+        # 記錄單一「抓取完成」日誌
+        fetch_summary = {pid: status["replies"] for pid, status in fetch_status.items() if status["status"] in ["success", "cached"]}
         total_replies = sum(status["replies"] for status in fetch_status.values() if status["status"] in ["success", "cached"])
-        logger.info(f"抓取貼文完成：{fetch_status}，總回覆數：{total_replies}")
+        logger.info(f"抓取貼文完成：{fetch_summary}，總回覆數：{total_replies}")
         
     except Exception as e:
         logger.error(f"批次抓取貼文內容失敗：{str(e)}")
