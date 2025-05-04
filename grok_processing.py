@@ -40,7 +40,7 @@ class PromptBuilder:
             missing_keys = [key for key in required_keys if key not in self.config]
             if missing_keys:
                 logger.error(f"prompts.json 缺少必要鍵：{missing_keys}")
-                raise ValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
+                raise ValueValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
         except Exception as e:
             logger.error(f"載入 prompts.json 失敗：{str(e)}")
             raise
@@ -224,10 +224,13 @@ async def summarize_context(conversation_context):
 
 async def extract_relevant_thread(conversation_context, query):
     if not conversation_context or len(conversation_context) < 2:
-        return None, None, None
+        return None, None, None, "無對話歷史"
     
     query_keyword_result = await extract_keywords_with_grok(query, conversation_context)
     query_keywords = set(query_keyword_result["keywords"])
+    
+    follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"]
+    is_follow_up_query = any(phrase in query for phrase in follow_up_phrases)
     
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
@@ -236,9 +239,23 @@ async def extract_relevant_thread(conversation_context, query):
                 title_keyword_result = await extract_keywords_with_grok(title, conversation_context)
                 title_keywords = set(title_keyword_result["keywords"])
                 common_keywords = query_keywords.intersection(title_keywords)
-                if common_keywords or any(kw.lower() in title.lower() for kw in query_keywords):
-                    return thread_id, title, message["content"]
-    return None, None, None
+                content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
+                if common_keywords:
+                    return thread_id, title, message["content"], f"關鍵詞匹配：{common_keywords}"
+                if content_contains_keywords:
+                    return thread_id, title, message["content"], f"回應內容包含關鍵詞：{query_keywords}"
+                if is_follow_up_query:
+                    return thread_id, title, message["content"], f"檢測到追問詞：{query}，匹配最近貼文"
+    
+    if is_follow_up_query:
+        for message in reversed(conversation_context):
+            if message["role"] == "assistant" and "帖子 ID" in message["content"]:
+                matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
+                if matches:
+                    thread_id, title = matches[0]
+                    return thread_id, title, message["content"], "無關鍵詞匹配，但檢測到追問詞，選擇最近貼文"
+    
+    return None, None, None, "無匹配貼文"
 
 async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
     conversation_context = conversation_context or []
@@ -247,6 +264,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     id_match = re.search(r'(?:ID|帖子)\s*(\d+)', user_query, re.IGNORECASE)
     if id_match:
         thread_id = id_match.group(1)
+        logger.info(f"檢測到明確帖子 ID：{thread_id}")
         return {
             "direct_response": False,
             "intent": "fetch_thread_by_id",
@@ -267,8 +285,9 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
     query_keywords = keyword_result["keywords"]
     
-    thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
+    thread_id, thread_title, last_response, match_reason = await extract_relevant_thread(conversation_context, user_query)
     if thread_id:
+        logger.info(f"上下文匹配：thread_id={thread_id}, title={thread_title}, 原因={match_reason}")
         return {
             "direct_response": False,
             "intent": "follow_up",
@@ -282,7 +301,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "candidate_thread_ids": [thread_id],
             "top_thread_ids": [thread_id],
             "needs_advanced_analysis": False,
-            "reason": f"匹配追問查詢到帖子 ID={thread_id}，標題={thread_title}，關鍵詞：{query_keywords}",
+            "reason": f"匹配追問查詢到帖子 ID={thread_id}，標題={thread_title}，關鍵詞：{query_keywords}，原因：{match_reason}",
             "theme_keywords": query_keywords
         }
     
@@ -294,6 +313,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     
     is_follow_up = False
     referenced_thread_ids = []
+    follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"]
     if conversation_context and len(conversation_context) >= 2:
         last_user_query = conversation_context[-2].get("content", "")
         last_response = conversation_context[-1].get("content", "")
@@ -303,16 +323,18 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         
         last_query_keywords = (await extract_keywords_with_grok(last_user_query, conversation_context))["keywords"]
         common_words = set(query_keywords).intersection(set(last_query_keywords))
-        explicit_follow_up = any(keyword in user_query for keyword in ["詳情", "更多", "進一步", "點解", "為什麼", "原因"])
+        explicit_follow_up = any(keyword in user_query.lower() for keyword in follow_up_phrases)
         
-        if len(common_words) >= 1 or explicit_follow_up:
+        if len(common_words) >= 1 or explicit_follow_up or (len(query_keywords) < 2 and referenced_thread_ids):
             is_follow_up = True
+            logger.info(f"檢測到追問意圖：common_words={common_words}, explicit_follow_up={explicit_follow_up}, query_keywords={query_keywords}")
     
     if is_follow_up and not thread_id:
         intent = "search_keywords"
         reason = "檢測到追問意圖，但無歷史帖子 ID 匹配，回退到關鍵詞搜索"
         theme = query_keywords[0] if query_keywords else historical_theme
         theme_keywords = query_keywords or historical_keywords
+        logger.info(f"追問回退到關鍵詞搜索：reason={reason}, theme={theme}, keywords={theme_keywords}")
         return {
             "direct_response": False,
             "intent": intent,
@@ -333,7 +355,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     semantic_prompt = f"""
 你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
 若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
-若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」等詞或與前問題/回應的帖子標題有重疊），選擇「follow_up」意圖。
+若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」「講多D」「再講」「繼續」「仲有咩」等詞或與前問題/回應的帖子標題或內容有重疊），選擇「follow_up」意圖。
 用戶問題：{user_query}
 數據來源：{source_type} ({source_name})
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
@@ -439,6 +461,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
                     elif intent in ["general_query", "introduce"]:
                         data_type = "none"
                     
+                    logger.info(f"語義分析結果：intent={intent}, confidence={confidence}, reason={reason}")
                     return {
                         "direct_response": intent in ["general_query", "introduce"],
                         "intent": intent,
@@ -610,9 +633,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_tokens = min(target_tokens + 500, max_tokens_limit)
 
     max_replies_per_thread = 100
-    max_comments = 50  # 默認 Reddit max_comments
+    max_comments = 100  # 默認 Reddit max_comments
     if source_type == "reddit" and intent == "follow_up":
-        max_comments = 100  # follow_up 意圖下增加 max_comments
+        max_comments = 200  # follow_up 意圖下增加 max_comments
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     
     if intent in ["follow_up", "fetch_thread_by_id"]:
@@ -666,7 +689,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if intent in ["follow_up", "fetch_thread_by_id"]:
         referenced_thread_ids = []
         if intent == "follow_up":
-            thread_id, thread_title, last_response = await extract_relevant_thread(conversation_context, user_query)
+            thread_id, thread_title, last_response, match_reason = await extract_relevant_thread(conversation_context, user_query)
             if thread_id:
                 referenced_thread_ids = [thread_id]
             else:
@@ -935,7 +958,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         clean_cache()
         
         if rate_limit_until > time.time():
-            logger.warning(f"速率限制生效，直到 {datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
+            logger.warning(f"速率限制生效，直到 {datetime.datetime.fromtimestamp(rate_limit_until, tz=HONG_KONG_TZ):%Y-%m-%d %H:%M:%S}")
             return {
                 "selected_source": selected_source,
                 "thread_data": [],
@@ -959,10 +982,10 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
         # 根據 source_type 和 intent 動態設置 max_comments
-        max_comments = 50
+        max_comments = 100
         max_replies = 100
         if source_type == "reddit" and intent == "follow_up":
-            max_comments = 100
+            max_comments = 200
         
         if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
             thread_data = []
