@@ -7,25 +7,20 @@ import time
 import pytz
 from logging_config import configure_logger
 
-# 香港時區
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 配置日誌記錄器
 logger = configure_logger(__name__, "reddit_api.log")
 
-# 記錄當前請求次數和速率限制狀態
 request_counter = 0
 last_reset = time.time()
-RATE_LIMIT_REQUESTS_PER_MINUTE = 720  # Reddit API 速率限制：每分鐘 720 個請求（認證用戶）
-client_initialized = False  # 全局標誌，避免重複日誌
+RATE_LIMIT_REQUESTS_PER_MINUTE = 780
+client_initialized = False
 
-# 簡單緩存：存儲子版抓取結果和貼文內容
 topic_cache = {}
 thread_cache = {}
 CACHE_DURATION = 300  # 緩存 5 分鐘
 MAX_CACHE_SIZE = 100  # 最大緩存條目數
 
-# 初始化 Reddit 客戶端
 async def init_reddit_client():
     global request_counter, last_reset, client_initialized
     try:
