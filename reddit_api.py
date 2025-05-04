@@ -250,7 +250,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
         
-        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}}，總請求次數：{request_counter}")
+        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總請求次數：{request_counter}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
