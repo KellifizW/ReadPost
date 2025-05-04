@@ -6,11 +6,11 @@ import datetime
 import time
 import logging
 import streamlit as st
-import os
 import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
+from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
@@ -22,68 +22,6 @@ MAX_CACHE_SIZE = 100  # 最大緩存條目數
 # 全局鎖和信號量
 cache_lock = asyncio.Lock()
 request_semaphore = asyncio.Semaphore(5)
-
-class PromptBuilder:
-    def __init__(self, config_path=None):
-        if config_path is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(base_dir, "prompts.json")
-        
-        if not os.path.exists(config_path):
-            logger.error(f"未找到 prompts.json：{config_path}")
-            raise FileNotFoundError(f"未找到 prompts.json：{config_path}")
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                self.config = json.loads(f.read())
-            required_keys = ["analyze", "prioritize", "response", "system"]
-            missing_keys = [key for key in required_keys if key not in self.config]
-            if missing_keys:
-                logger.error(f"prompts.json 缺少必要鍵：{missing_keys}")
-                raise ValueError(f"prompts.json 缺少必要鍵：{missing_keys}")
-        except Exception as e:
-            logger.error(f"載入 prompts.json 失敗：{str(e)}")
-            raise
-
-    def build_analyze(self, query, source_name, source_id, conversation_context=None):
-        config = self.config["analyze"]
-        context = config["context"].format(
-            query=query, cat_name=source_name, cat_id=source_id,
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
-        )
-        return f"{config['system']}\n{context}\n{config['instructions']}"
-
-    def build_prioritize(self, query, source_name, source_id, source_type, threads):
-        config = self.config.get("prioritize")
-        if not config:
-            logger.error("未找到 'prioritize' 的提示配置")
-            raise ValueError("未找到 'prioritize' 的提示配置")
-        try:
-            context = config["context"].format(
-                query=query, cat_name=source_name, cat_id=source_id, source_type=source_type or "lihkg"
-            )
-        except KeyError as e:
-            logger.error(f"格式化 prioritize context 失敗，缺少參數：{str(e)}")
-            context = config["context"].format(
-                query=query, cat_name=source_name, cat_id=source_id, source_type="lihkg"
-            )
-        data = config["data"].format(threads=json.dumps(threads, ensure_ascii=False))
-        return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
-
-    def build_response(self, intent, query, selected_source, conversation_context=None, metadata=None, thread_data=None, filters=None):
-        config = self.config["response"].get(intent, self.config["response"]["general"])
-        context = config["context"].format(
-            query=query, selected_cat=selected_source,
-            conversation_context=json.dumps(conversation_context or [], ensure_ascii=False)
-        )
-        data = config["data"].format(
-            metadata=json.dumps(metadata or [], ensure_ascii=False),
-            thread_data=json.dumps(thread_data or [], ensure_ascii=False),
-            filters=json.dumps(filters or {}, ensure_ascii=False)
-        )
-        return f"{config['system']}\n{context}\n{data}\n{config['instructions']}"
-
-    def get_system_prompt(self, mode):
-        return self.config["system"].get(mode, "")
 
 def clean_html(text):
     if not isinstance(text, str):
@@ -104,74 +42,6 @@ def clean_response(response):
         cleaned = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', response)
         return cleaned
     return response
-
-async def extract_keywords_with_grok(query, conversation_context=None):
-    conversation_context = conversation_context or []
-    try:
-        GROK3_API_KEY = st.secrets["grok3key"]
-    except KeyError as e:
-        logger.error(f"缺少 Grok 3 API 密鑰：{str(e)}")
-        return {"keywords": [], "reason": "缺少 API 密鑰", "time_sensitive": False}
-
-    prompt = f"""
-請從以下查詢提取 1-3 個核心關鍵詞（僅保留名詞或核心動詞，過濾停用詞如「的」「是」）。關鍵詞應反映主題或意圖。保留「你點睇」作為意圖短語，映射到「分析」。過濾無意義粵語俚語（如「講D咩」）。若查詢包含時間性詞語（如「今晚」「今日」「最近」「呢排」），設置 time_sensitive 為 true。以 JSON 格式返回，附簡要邏輯說明（70字內）。
-
-查詢："{query}"
-對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-
-返回格式：
-{{
-  "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"],
-  "reason": "提取邏輯說明（70字以內）",
-  "time_sensitive": true/false
-}}
-"""
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
-    payload = {
-        "model": "grok-3",
-        "messages": [
-            {"role": "system", "content": "你是 LIHKG 論壇的語義分析助手，以繁體中文回答，專注於理解用戶意圖並提取關鍵詞。"},
-            *conversation_context,
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 150,
-        "temperature": 0.3
-    }
-
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    status_code = response.status
-                    if status_code != 200:
-                        logger.debug(f"關鍵詞提取失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
-                        continue
-                    data = await response.json()
-                    if not data.get("choices"):
-                        logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
-                        continue
-                    usage = data.get("usage", {})
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-                    response_content = data["choices"][0]["message"]["content"]
-                    logger.info(
-                        f"Grok3 API 調用：函數=extract_keywords_with_grok, "
-                        f"查詢={query}, 狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                        f"輸出 token={completion_tokens}, 回應={response_content}"
-                    )
-                    result = json.loads(response_content)
-                    keywords = result.get("keywords", [])[:3]
-                    reason = result.get("reason", "未提供原因")[:70]
-                    time_sensitive = result.get("time_sensitive", False)
-                    return {"keywords": keywords, "reason": reason, "time_sensitive": time_sensitive}
-        except Exception as e:
-            logger.debug(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2)
-                continue
-            logger.error(f"關鍵詞提取失敗，嘗試 {max_retries} 次後放棄")
-            return {"keywords": [], "reason": f"提取失敗：{str(e)}"[:70], "time_sensitive": False}
 
 async def summarize_context(conversation_context):
     if not conversation_context:
@@ -221,150 +91,8 @@ async def summarize_context(conversation_context):
         logger.warning(f"對話摘要錯誤：{str(e)}")
         return {"theme": "一般", "keywords": []}
 
-async def extract_relevant_thread(conversation_context, query):
-    if not conversation_context or len(conversation_context) < 2:
-        return None, None, None, "無對話歷史"
-    
-    query_keyword_result = await extract_keywords_with_grok(query, conversation_context)
-    query_keywords = set(query_keyword_result["keywords"])
-    
-    follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩", "係講D咩"]
-    is_follow_up_query = any(phrase in query for phrase in follow_up_phrases)
-    
-    for message in reversed(conversation_context):
-        if message["role"] == "assistant" and "帖子 ID" in message["content"]:
-            matches = re.findall(r"\[帖子 ID: (\d+)\] ([^\n]+)", message["content"])
-            for thread_id, title in matches:
-                title_keyword_result = await extract_keywords_with_grok(title, conversation_context)
-                title_keywords = set(title_keyword_result["keywords"])
-                common_keywords = query_keywords.intersection(title_keywords)
-                content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
-                if common_keywords or content_contains_keywords or is_follow_up_query:
-                    return thread_id, title, message["content"], f"關鍵詞匹配：{common_keywords or query_keywords}, 追問詞：{is_follow_up_query}"
-    
-    return None, None, None, "無匹配貼文"
-
 async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
     conversation_context = conversation_context or []
-    prompt_builder = PromptBuilder()
-    
-    id_match = re.search(r'(?:ID|帖子)\s*(\d+)', user_query, re.IGNORECASE)
-    if id_match:
-        thread_id = id_match.group(1)
-        logger.info(f"檢測到明確帖子 ID：{thread_id}")
-        return {
-            "direct_response": False,
-            "intent": "fetch_thread_by_id",
-            "theme": "特定帖子查詢",
-            "source_type": source_type,
-            "source_ids": [source_id],
-            "data_type": "replies",
-            "post_limit": 1,
-            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": []},
-            "processing": {"intent": "fetch_thread_by_id", "top_thread_ids": [thread_id]},
-            "candidate_thread_ids": [thread_id],
-            "top_thread_ids": [thread_id],
-            "needs_advanced_analysis": False,
-            "reason": f"檢測到明確的帖子 ID {thread_id}",
-            "theme_keywords": []
-        }
-    
-    thread_id, thread_title, last_response, match_reason = await extract_relevant_thread(conversation_context, user_query)
-    if thread_id:
-        logger.info(f"上下文匹配：thread_id={thread_id}, title={thread_title}, 原因={match_reason}")
-        keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
-        query_keywords = keyword_result["keywords"]
-        return {
-            "direct_response": False,
-            "intent": "follow_up",
-            "theme": thread_title or "追問相關主題",
-            "source_type": source_type,
-            "source_ids": [source_id],
-            "data_type": "replies",
-            "post_limit": 1,
-            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": query_keywords},
-            "processing": {"intent": "follow_up", "top_thread_ids": [thread_id]},
-            "candidate_thread_ids": [thread_id],
-            "top_thread_ids": [thread_id],
-            "needs_advanced_analysis": False,
-            "reason": f"匹配追問查詢到帖子 ID={thread_id}，標題={thread_title}，關鍵詞：{query_keywords}，原因：{match_reason}",
-            "theme_keywords": query_keywords
-        }
-    
-    keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
-    query_keywords = keyword_result["keywords"]
-    
-    context_summary = await summarize_context(conversation_context)
-    historical_theme = context_summary.get("theme", "一般")
-    historical_keywords = context_summary.get("keywords", [])
-    
-    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
-    
-    is_follow_up = False
-    referenced_thread_ids = []
-    follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩", "係講D咩"]
-    if conversation_context and len(conversation_context) >= 2:
-        last_user_query = conversation_context[-2].get("content", "")
-        last_response = conversation_context[-1].get("content", "")
-        
-        matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-        referenced_thread_ids = matches
-        
-        last_query_keywords = (await extract_keywords_with_grok(last_user_query, conversation_context))["keywords"]
-        common_words = set(query_keywords).intersection(set(last_query_keywords))
-        explicit_follow_up = any(keyword in user_query.lower() for keyword in follow_up_phrases)
-        
-        if len(common_words) >= 1 or explicit_follow_up:
-            is_follow_up = True
-            logger.info(f"檢測到追問意圖：common_words={common_words}, explicit_follow_up={explicit_follow_up}, query_keywords={query_keywords}")
-    
-    if is_follow_up:
-        intent = "follow_up"
-        reason = "檢測到追問意圖，搜索與關鍵詞相關的帖子"
-        theme = query_keywords[0] if query_keywords else historical_theme
-        theme_keywords = query_keywords or historical_keywords
-        logger.info(f"追問識別為 follow_up：reason={reason}, theme={theme}, keywords={theme_keywords}")
-        return {
-            "direct_response": False,
-            "intent": intent,
-            "theme": theme,
-            "source_type": source_type,
-            "source_ids": [source_id],
-            "data_type": "both",
-            "post_limit": 2,
-            "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
-            "processing": {"intent": intent, "top_thread_ids": referenced_thread_ids[:2]},
-            "candidate_thread_ids": [],
-            "top_thread_ids": referenced_thread_ids[:2],
-            "needs_advanced_analysis": False,
-            "reason": reason,
-            "theme_keywords": theme_keywords
-        }
-    
-    semantic_prompt = f"""
-你是語義分析助手，請比較用戶問題與以下意圖描述，選擇最匹配的意圖。
-若問題模糊，優先延續對話歷史的意圖（歷史主題：{historical_theme}）。
-若問題涉及對之前回應的追問（包含「詳情」「更多」「進一步」「點解」「為什麼」「原因」「講多D」「再講」「繼續」「仲有咩」「係講D咩」等詞或與前問題/回應的帖子標題或內容有重疊），選擇「follow_up」意圖。
-用戶問題：{user_query}
-數據來源：{source_type} ({source_name})
-對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-歷史主題：{historical_theme}
-歷史關鍵詞：{json.dumps(historical_keywords, ensure_ascii=False)}
-意圖描述：
-{json.dumps({
-    "list_titles": "列出帖子標題或清單",
-    "summarize_posts": "總結帖子內容或討論",
-    "analyze_sentiment": "分析帖子或回覆的情緒",
-    "general_query": "與LIHKG或Reddit無關或模糊的問題",
-    "find_themed": "尋找特定主題的帖子",
-    "fetch_dates": "提取帖子或回覆的日期資料",
-    "search_keywords": "根據關鍵詞搜索帖子",
-    "recommend_threads": "推薦相關或熱門帖子",
-    "follow_up": "追問之前回應中提到的帖子內容",
-    "fetch_thread_by_id": "根據明確的帖子 ID 抓取內容"
-}, ensure_ascii=False, indent=2)}
-輸出格式：{{"intent": "最匹配的意圖", "confidence": 0.0-1.0, "reason": "匹配原因"}}
-"""
     
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -373,7 +101,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         return {
             "direct_response": True,
             "intent": "general_query",
-            "theme": historical_theme,
+            "theme": "一般",
             "source_type": source_type,
             "source_ids": [],
             "data_type": "none",
@@ -384,111 +112,55 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "top_thread_ids": [],
             "needs_advanced_analysis": False,
             "reason": "缺少 API 密鑰",
-            "theme_keywords": historical_keywords
+            "theme_keywords": []
         }
     
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
-    messages = [
-        {"role": "system", "content": prompt_builder.get_system_prompt("analyze")},
-        *conversation_context,
-        {"role": "user", "content": semantic_prompt}
-    ]
-    payload = {
-        "model": "grok-3",
-        "messages": messages,
-        "max_tokens": 200,
-        "temperature": 0.5
-    }
+    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
+    intent = parsed_query["intent"]
+    query_keywords = parsed_query["keywords"]
+    top_thread_ids = parsed_query["thread_ids"]
+    reason = parsed_query["reason"]
+    confidence = parsed_query["confidence"]
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    status_code = response.status
-                    if status_code != 200:
-                        logger.debug(f"語義意圖分析失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
-                        continue
-                    data = await response.json()
-                    if not data.get("choices"):
-                        logger.debug(f"語義意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
-                        continue
-                    usage = data.get("usage", {})
-                    prompt_tokens = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
-                    response_content = data["choices"][0]["message"]["content"]
-                    logger.info(
-                        f"Grok3 API 調用：函數=analyze_and_screen, "
-                        f"查詢={user_query}, 狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                        f"輸出 token={completion_tokens}, 回應={response_content}"
-                    )
-                    result = json.loads(response_content)
-                    intent = result.get("intent", "summarize_posts")
-                    confidence = result.get("confidence", 0.7)
-                    reason = result.get("reason", "語義匹配")
-                    
-                    if is_vague and historical_theme != "一般":
-                        intent = "summarize_posts"
-                        reason = f"問題模糊，延續歷史主題：{historical_theme}"
-                    elif is_vague:
-                        intent = "summarize_posts"
-                        reason = "問題模糊，默認總結帖子"
-                    
-                    theme = historical_theme if is_vague else "一般"
-                    theme_keywords = historical_keywords if is_vague else query_keywords
-                    post_limit = 20
-                    data_type = "both"
-                    processing = {"intent": intent, "top_thread_ids": []}
-                    if intent in ["search_keywords", "find_themed"]:
-                        theme = query_keywords[0] if query_keywords else historical_theme
-                        theme_keywords = query_keywords or historical_keywords
-                    elif intent == "follow_up":
-                        theme = historical_theme
-                        post_limit = min(len(referenced_thread_ids), 2) or 2
-                        data_type = "replies"
-                        processing["top_thread_ids"] = referenced_thread_ids[:2]
-                    elif intent in ["general_query", "introduce"]:
-                        data_type = "none"
-                    
-                    logger.info(f"語義分析結果：intent={intent}, confidence={confidence}, reason={reason}")
-                    return {
-                        "direct_response": intent in ["general_query", "introduce"],
-                        "intent": intent,
-                        "theme": theme,
-                        "source_type": source_type,
-                        "source_ids": [source_id],
-                        "data_type": "both",
-                        "post_limit": post_limit,
-                        "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
-                        "processing": processing,
-                        "candidate_thread_ids": [],
-                        "top_thread_ids": referenced_thread_ids[:2],
-                        "needs_advanced_analysis": confidence < 0.7,
-                        "reason": reason,
-                        "theme_keywords": theme_keywords
-                    }
-        except Exception as e:
-            logger.debug(f"語義意圖分析錯誤：{str(e)}，嘗試次數={attempt + 1}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2)
-                continue
-            logger.error(f"語義意圖分析失敗，嘗試 {max_retries} 次後放棄")
-            return {
-                "direct_response": False,
-                "intent": "summarize_posts",
-                "theme": historical_theme,
-                "source_type": source_type,
-                "source_ids": [source_id],
-                "data_type": "both",
-                "post_limit": 5,
-                "filters": {"min_replies": 10, "min_likes": 0, "keywords": historical_keywords},
-                "processing": {"intent": "summarize"},
-                "candidate_thread_ids": [],
-                "top_thread_ids": [],
-                "needs_advanced_analysis": False,
-                "reason": f"語義分析失敗，默認使用歷史主題：{historical_theme}",
-                "theme_keywords": historical_keywords
-            }
+    context_summary = await summarize_context(conversation_context)
+    historical_theme = context_summary.get("theme", "一般")
+    historical_keywords = context_summary.get("keywords", [])
+    
+    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
+    
+    if is_vague and historical_theme != "一般":
+        intent = "summarize_posts"
+        reason = f"問題模糊，延續歷史主題：{historical_theme}"
+    elif is_vague:
+        intent = "summarize_posts"
+        reason = "問題模糊，默認總結帖子"
+    
+    theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
+    theme_keywords = historical_keywords if is_vague else query_keywords
+    post_limit = 20 if intent in ["search_keywords", "find_themed"] else 5
+    data_type = "both" if intent not in ["general_query", "introduce"] else "none"
+    
+    if intent == "follow_up":
+        post_limit = len(top_thread_ids) or 2
+        data_type = "replies"
+    
+    logger.info(f"語義分析結果：intent={intent}, confidence={confidence}, reason={reason}")
+    return {
+        "direct_response": intent in ["general_query", "introduce"],
+        "intent": intent,
+        "theme": theme,
+        "source_type": source_type,
+        "source_ids": [source_id],
+        "data_type": data_type,
+        "post_limit": post_limit,
+        "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
+        "processing": {"intent": intent, "top_thread_ids": top_thread_ids},
+        "candidate_thread_ids": top_thread_ids,
+        "top_thread_ids": top_thread_ids,
+        "needs_advanced_analysis": confidence < 0.7,
+        "reason": reason,
+        "theme_keywords": theme_keywords
+    }
 
 async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, source_type="lihkg", intent="summarize_posts"):
     try:
@@ -507,18 +179,16 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         if referenced_thread_ids:
             return {"top_thread_ids": referenced_thread_ids[:2], "reason": "使用追問的參考帖子 ID"}
 
-    prompt_builder = PromptBuilder()
-    try:
-        prompt = prompt_builder.build_prioritize(
-            query=user_query,
-            source_name=source_name,
-            source_id=source_id,
-            source_type=source_type,
-            threads=[{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads]
-        )
-    except Exception as e:
-        logger.error(f"構建優先級提示失敗：{str(e)}")
-        return {"top_thread_ids": [], "reason": f"提示構建失敗：{str(e)}"}
+    prompt = f"""
+你是帖子優先級排序助手，請根據用戶查詢和意圖，從提供的帖子中選出最多20個最相關的帖子。
+查詢：{user_query}
+意圖：{intent}
+討論區：{source_name} (ID: {source_id})
+來源類型：{source_type}
+帖子數據：
+{json.dumps([{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
+輸出格式：{{"top_thread_ids": ["id1", "id2", ...], "reason": "排序原因"}}
+"""
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
@@ -574,13 +244,12 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
-    prompt_builder = PromptBuilder()
     
     if not isinstance(processing, dict):
         logger.error(f"無效的處理數據格式：預期 dict，得到 {type(processing)}")
         yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
         return
-    intent = processing.get('intent', 'summarize')
+    intent = processing.get('intent', 'summarize_posts')
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -676,10 +345,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if intent in ["follow_up", "fetch_thread_by_id"]:
         referenced_thread_ids = []
         if intent == "follow_up":
-            thread_id, thread_title, last_response, match_reason = await extract_relevant_thread(conversation_context, user_query)
-            if thread_id:
-                referenced_thread_ids = [thread_id]
-            else:
+            parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
+            referenced_thread_ids = parsed_query["thread_ids"]
+            if not referenced_thread_ids:
                 last_response = conversation_context[-1].get("content", "") if conversation_context else ""
                 matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
                 referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
@@ -688,7 +356,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             referenced_thread_ids = [tid for tid in top_thread_ids if str(tid) in thread_data_dict]
         
         if not referenced_thread_ids and intent == "follow_up":
-            keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+            keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
             theme_keywords = keyword_result["keywords"]
             async with request_semaphore:
                 if source_type == "lihkg":
@@ -825,16 +493,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    thread_id_prompt = "\n請在回應中明確包含相關帖子 ID，格式為 [帖子 ID: xxx]。禁止包含 [post_id: ...] 格式。"
-    prompt = prompt_builder.build_response(
-        intent=intent,
+    prompt = await build_dynamic_prompt(
         query=user_query,
-        selected_source=selected_source,
         conversation_context=conversation_context,
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
-        filters=filters
-    ) + thread_id_prompt
+        filters=filters,
+        intent=intent,
+        selected_source=selected_source,
+        grok3_api_key=GROK3_API_KEY
+    )
     
     prompt_length = len(prompt)
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -854,21 +522,26 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             } for tid, data in filtered_thread_data.items()
         }
         total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
-        prompt = prompt_builder.build_response(
-            intent=intent,
+        prompt = await build_dynamic_prompt(
             query=user_query,
-            selected_source=selected_source,
             conversation_context=conversation_context,
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
-            filters=filters
-        ) + thread_id_prompt
+            filters=filters,
+            intent=intent,
+            selected_source=selected_source,
+            grok3_api_key=GROK3_API_KEY
+        )
         target_tokens = min_tokens + (total_replies_count / 500) * (max_tokens - min_tokens) * 0.9
         target_tokens = min(max(int(target_tokens), min_tokens), max_tokens_limit)
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
-        {"role": "system", "content": prompt_builder.get_system_prompt("response")},
+        {"role": "system", "content": (
+            "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
+            "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
+            "禁止使用 [post_id: ...] 格式。"
+        )},
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
@@ -976,16 +649,32 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 "analysis": analysis
             }
         
+        try:
+            GROK3_API_KEY = st.secrets["grok3key"]
+        except KeyError as e:
+            logger.error(f"缺少 Grok 3 API 密鑰：{str(e)}")
+            return {
+                "selected_source": selected_source,
+                "thread_data": [],
+                "rate_limit_info": [{"message": "缺少 API 密鑰"}],
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis
+            }
+        
+        if not analysis:
+            analysis = await analyze_and_screen(user_query, selected_source, source_id, source_type, conversation_context)
+        
         post_limit = min(analysis.get("post_limit", 5), 20)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
-        min_likes = 0
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
         intent = analysis.get("intent", "summarize_posts")
         
         logger.info(f"處理用戶問題：intent={intent}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
         
-        keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+        keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
         max_comments = 200 if source_type == "reddit" and intent == "follow_up" else 100
@@ -1069,7 +758,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             }
             
             if len(thread_data) == 1 and intent == "follow_up":
-                keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
+                keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
                 theme_keywords = keyword_result["keywords"]
                 
                 async with request_semaphore:
