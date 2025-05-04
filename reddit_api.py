@@ -163,7 +163,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, reddit=Non
         "rate_limit_until": 0
     }
 
-async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=None):
+async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit=None):
     global request_counter, last_reset, thread_cache
     cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
     
@@ -215,8 +215,8 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
                 "rate_limit_until": 0
             }
         
-        # 在 follow_up 意圖下展開 MoreComments
-        if max_comments > 50:  # 假設 max_comments > 50 對應 follow_up 意圖
+        # 在 follow_up 意圖下（max_comments=200）展開 MoreComments
+        if max_comments >= 200:
             await submission.comments.replace_more(limit=None)
         else:
             await submission.comments.replace_more(limit=0)  # 默認不展開 MoreComments
@@ -299,7 +299,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=50, reddit=
         "rate_limit_until": 0
     }
 
-async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
+async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100):
     global request_counter, last_reset, thread_cache
     results = []
     rate_limit_info = []
@@ -348,8 +348,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=50):
                 })
                 continue
             
-            # 在 follow_up 意圖下展開 MoreComments
-            if max_comments > 50:  # 假設 max_comments > 50 對應 follow_up 意圖
+            # 在 follow_up 意圖下（max_comments=200）展開 MoreComments
+            if max_comments >= 200:
                 await submission.comments.replace_more(limit=None)
             else:
                 await submission.comments.replace_more(limit=0)  # 默認不展開 MoreComments
