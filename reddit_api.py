@@ -16,7 +16,7 @@ logger = configure_logger(__name__, "reddit_api.log")
 # 記錄當前請求次數和速率限制狀態
 request_counter = 0
 last_reset = time.time()
-RATE_LIMIT_REQUESTS_PER_MINUTE = 660  # Reddit API 速率限制：每分鐘 660 個請求（認證用戶，放寬 10%）
+RATE_LIMIT_REQUESTS_PER_MINUTE = 600  # Reddit API 速率限制：每分鐘 600 個請求（認證用戶）
 client_initialized = False  # 全局標誌，避免重複日誌
 
 # 簡單緩存：存儲子版抓取結果和貼文內容
@@ -196,7 +196,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 last_reset = local_last_reset  # 更新全局 last_reset
                 logger.info("速率限制計數器重置")
         
-        logger.info(f"單貼文抓取開始：{post_id}，子版：{subreddit}")
+        logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
         
         submission = await reddit.submission(id=post_id)
         if not submission:
@@ -250,7 +250,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                         last_reset = local_last_reset
                         logger.info("速率限制計數器重置")
         
-        logger.info(f"單貼文抓取完成：{post_id}，回覆數：{len(replies)}")
+        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
         
         thread_cache[cache_key] = {
             "timestamp": time.time(),
@@ -301,18 +301,15 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
 
 async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100):
     global request_counter, last_reset, thread_cache
-    logger.debug(f"進入 get_reddit_thread_content_batch，貼文數：{len(post_ids)}，子版：{subreddit}")
-    
     results = []
     rate_limit_info = []
     local_last_reset = last_reset
     fetch_status = {}  # 記錄每個貼文的抓取結果
     
-    # 收集所有貼文 ID 並記錄單一「開始抓取」日誌
-    logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
-    
     reddit = await init_reddit_client()
     try:
+        logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
+        
         for post_id in post_ids:
             cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
             clean_cache(thread_cache, "thread")
@@ -405,21 +402,13 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             results.append(result)
             fetch_status[post_id] = {"status": "success", "replies": len(replies)}
             
-            logger.debug(f"貼文 {post_id} 抓取完成，狀態：{fetch_status[post_id]['status']}，回覆數：{len(replies)}")
-            
             thread_cache[cache_key] = {
                 "timestamp": time.time(),
                 "data": result
             }
         
-        # 記錄單一「抓取完成」日誌
-        fetch_summary = {pid: status["replies"] for pid, status in fetch_status.items() if status["status"] in ["success", "cached"]}
         total_replies = sum(status["replies"] for status in fetch_status.values() if status["status"] in ["success", "cached"])
-        logger.info(f"抓取貼文完成：{fetch_summary}，總回覆數：{total_replies}")
-        
-        # 記錄最終 thread_data 摘要
-        thread_data_summary = [{"thread_id": result["title"], "replies_count": len(result["replies"])} for result in results]
-        logger.info(f"最終 thread_data 摘要：{thread_data_summary}")
+        logger.info(f"抓取貼文完成：{fetch_status}，總回覆數：{total_replies}")
         
     except Exception as e:
         logger.error(f"批次抓取貼文內容失敗：{str(e)}")
@@ -441,7 +430,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
     
-    logger.debug(f"離開 get_reddit_thread_content_batch，抓取結果數：{len(results)}")
     return {
         "results": results,
         "rate_limit_info": rate_limit_info,
