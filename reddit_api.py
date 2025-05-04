@@ -297,6 +297,8 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
 
 async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100):
     global request_counter, last_reset, thread_cache
+    logger.debug(f"進入 get_reddit_thread_content_batch，貼文數：{len(post_ids)}，子版：{subreddit}")
+    
     results = []
     rate_limit_info = []
     local_last_reset = last_reset
@@ -429,6 +431,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
     
+    logger.debug(f"離開 get_reddit_thread_content_batch，抓取結果數：{len(results)}")
     return {
         "results": results,
         "rate_limit_info": rate_limit_info,
