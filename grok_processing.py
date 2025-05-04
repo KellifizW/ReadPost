@@ -610,6 +610,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_tokens = min(target_tokens + 500, max_tokens_limit)
 
     max_replies_per_thread = 100
+    max_comments = 50  # 默認 Reddit max_comments
+    if source_type == "reddit" and intent == "follow_up":
+        max_comments = 100  # follow_up 意圖下增加 max_comments
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     
     if intent in ["follow_up", "fetch_thread_by_id"]:
@@ -738,7 +741,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         content_result = await get_reddit_thread_content(
                             post_id=tid,
                             subreddit=source_id,
-                            max_comments=max_replies_per_thread - data["total_fetched_replies"]
+                            max_comments=max_comments
                         )
                 if content_result.get("replies"):
                     total_replies = content_result.get("total_replies", data["no_of_reply"])
@@ -955,6 +958,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         keyword_result = await extract_keywords_with_grok(user_query, conversation_context)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
+        # 根據 source_type 和 intent 動態設置 max_comments
+        max_comments = 50
+        max_replies = 100
+        if source_type == "reddit" and intent == "follow_up":
+            max_comments = 100
+        
         if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
             thread_data = []
             rate_limit_info = []
@@ -974,7 +983,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id_str,
                         cat_id=source_id,
-                        max_replies=100,
+                        max_replies=max_replies,
                         fetch_last_pages=fetch_last_pages,
                         specific_pages=[],
                         start_page=1
@@ -983,7 +992,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     tasks.append(get_reddit_thread_content(
                         post_id=thread_id_str,
                         subreddit=source_id,
-                        max_comments=100
+                        max_comments=max_comments
                     ))
             
             if tasks:
@@ -1067,7 +1076,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         supplemental_tasks.append(get_lihkg_thread_content(
                             thread_id=thread_id,
                             cat_id=source_id,
-                            max_replies=100,
+                            max_replies=max_replies,
                             fetch_last_pages=fetch_last_pages,
                             specific_pages=[],
                             start_page=1
@@ -1076,7 +1085,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         supplemental_tasks.append(get_reddit_thread_content(
                             post_id=thread_id,
                             subreddit=source_id,
-                            max_comments=100
+                            max_comments=max_comments
                         ))
                 
                 if supplemental_tasks:
@@ -1244,7 +1253,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 tasks.append((idx, get_lihkg_thread_content(
                     thread_id=thread_id,
                     cat_id=source_id,
-                    max_replies=100,
+                    max_replies=max_replies,
                     fetch_last_pages=fetch_last_pages,
                     specific_pages=[],
                     start_page=1
@@ -1253,7 +1262,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 tasks.append((idx, get_reddit_thread_content(
                     post_id=thread_id,
                     subreddit=source_id,
-                    max_comments=100
+                    max_comments=max_comments
                 )))
         
         if tasks:
