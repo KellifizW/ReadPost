@@ -29,7 +29,7 @@ logger = configure_logger(__name__, "lihkg_api.log")
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
-LIHKG_COOKIE = "PHPSESSID=33mda4rq2c68ka0q69j3qli704; __cfruid=6613e31ceda225cd19b78296f41fcdd792896165-1746435095; cf_clearance=lKvL5WE.wiQ3OPQ1vBByvADiC7YQyySKHwbpY.OIMDM-1746437382-1.2.1.1-yvhsMxUOu2oIxxQWYDQ8RLr6DSql1PiOJoewKLjnP4cUk1kpehYNcPdBMd5db78MFblUmscp9x3IZcZF6GLrq6iQogh7XT6_KrQv4mv_yRfDvUzHv8VTTtDB_3NJjSn6hkj5rZ68etejlTWzje51WQRHzaNNzUEzwSgyq5B1Orhc75wvzbibCJYtQm7kZwDbOyvT3ZI8EpVTckCdutk_F8tQ7iEIuXaclhuWrMa1h0wgJjXEeZGxvVHOfSAHiC837fxwz2m.uQ5vAe8nsaU8dY5W_8P1OCDpcHChWhWoK5JeYaXHq7Zsb8yfv9TceR7PaCU0XDP2KU_m_44b4uX.vGqZWa1qumQttbxUBciyQu4"
+LIHKG_COOKIE = "PHPSESSID=33mda4rq2c68ka0q69j3qli704; __cfruid=6613e31ceda225cd19b78296f41fcdd792896165-1746435095; cf_clearance=V5VbqEgMJ8R5rFaqbhJhR7qITm6993KVLkMQAenumD4-1746438471-1.2.1.1-wZGiUV9LX059J.A67knGNlY9gTcE8iilhYHrdPKlU_1lrpWw_cbBgUPFgTEb0Im2.wbFQSMGmeF5ZfG6MKlMZbTqdNgAgiBhys5TVIyhpGewDVTIAEPkzPlrIo19a7W6slS4iGmOanYRL6bDHKqhTQBYIg5uITmnTVjs0IcWX4c1JwHFcw5LFjQBPvM8GC9m87UusjwwMWWGro1YE31hykVPOjyio8veAPwhgb5Aqg7vD58avnV9y7gJt9Fe2NXcVEi3m0j8Yl2cawp.l3brh2fXzrssoB8CXeYO8lLlfw9FW3tvIXFyOOMvCw4qsZeRZAXENX339AAamrH_XEX5Z9EjROeLjyS2wWEzHEwJ55k"
 
 # 用戶代理列表
 USER_AGENTS = [
@@ -122,7 +122,7 @@ class ApiClient:
                 start_time = time.time()
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, headers=self.generate_headers(url, int(time.time())), params=params, timeout=timeout) as response:
-                        response_time = time.time() - start_time
+                        response_time = time.time() - start_start_time
                         self.rate_limiter.last_response_time = response_time
                         logger.debug(f"API response time: {response_time:.2f} seconds for {function_name}")
                         status = "success" if response.status == 200 else f"failed_status_{response.status}"
@@ -196,7 +196,10 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, target_items=2
     attempts = 0
 
     while len(items) < target_items and current_page < start_page + max_pages and attempts < 2:
-        url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&page={current_page}&count=60&type=now"
+        if cat_id == "2":  # 熱門台
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/hot?cat_id={cat_id}&page={current_page}&count=60&type=now"
+        else:
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&page={current_page}&count=60&type=now"
         data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_topic_list")
         rate_limit_info.extend(page_rate_limit_info)
         
@@ -212,7 +215,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, target_items=2
                 thread_id = str(item.get("thread_id"))
                 verification = await verify_lihkg_thread_category(thread_id, selected_cat_id=cat_id)
                 item_cat_id = verification.get("cat_id") if "cat_id" in verification else None
-                if item_cat_id == cat_id or (cat_id in ["1", "2"] and item_cat_id):
+                if item_cat_id == cat_id:  # 嚴格過濾，僅接受匹配的 cat_id
                     filtered_items.append(item)
             
             items.extend(filtered_items[:target_items - len(items)])
@@ -224,7 +227,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, target_items=2
                     "raw_items": len(raw_items),
                     "filtered_items": len(filtered_items),
                     "item_cat_ids": [item.get("cat_id") for item in raw_items],
-                    "verified_cat_ids": [verification.get("cat_id") for item in filtered_items]
+                    "verified_cat_ids": [item_cat_id for item in filtered_items]
                 }, ensure_ascii=False)
             )
             attempts = 0  # 重置重試計數
