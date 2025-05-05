@@ -333,13 +333,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     max_tokens_limit = 8000
     max_tokens = min(target_tokens + 500, max_tokens_limit)
-    max_replies_per_thread = 200 if any(intent == "follow_up" for intent in intents) else 100
-    max_comments = 200 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
+    max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 100
+    max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         reply_count_prompt = f"""
-你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（100、200、250、500 條）。
+你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（100、200、250、300、500 條）。
 僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
 問題：{user_query}
 意圖：{json.dumps(intents, ensure_ascii=False)}
@@ -369,7 +369,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             f"輸出 token={completion_tokens}, 回應={response_content}"
                         )
                         result = json.loads(response_content)
-                        max_replies_per_thread = min(result.get("replies_per_thread", 200 if any(intent == "follow_up" for intent in intents) else 100), 500)
+                        max_replies_per_thread = min(result.get("replies_per_thread", 300 if any(intent == "follow_up" for intent in intents) else 100), 500)
                     else:
                         logger.warning(f"無法確定每帖子回覆數，狀態碼={status_code}")
         except Exception as e:
@@ -720,8 +720,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
-        max_comments = 200 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
-        max_replies = 200 if any(i["intent"] == "follow_up" for i in intents) else 100
+        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
+        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 100
         
         if any(i["intent"] in ["fetch_thread_by_id", "follow_up"] for i in intents) and top_thread_ids:
             thread_data = []
