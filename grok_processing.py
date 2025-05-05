@@ -587,7 +587,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     )
     
     if prompt_length > GROK3_TOKEN_LIMIT:
-        logger.warning(f"提示長度超過限制：{prompt_length} > {GROK3_TOKEN_LIMIT}，縮減數據")
+        logger.warning(f"提示長度超過限制：初始長度={prompt_length} > {GROK3_TOKEN_LIMIT}，縮減數據")
         max_replies_per_thread = max_replies_per_thread // 2
         total_replies_count = 0
         filtered_thread_data = {
