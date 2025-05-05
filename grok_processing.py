@@ -53,17 +53,17 @@ async def summarize_context(conversation_context):
         return {"theme": "一般", "keywords": []}
     
     prompt = f"""
-你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
-特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
+你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多5個）。
+特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」「時間敏感」）和回應中的帖子標題。
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
+輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", ...]}}
 """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
+        "max_tokens": 150,
         "temperature": 0.5
     }
     
@@ -183,7 +183,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         context = st.session_state.get("conversation_context", [])
         if context:
             last_response = context[-1].get("content", "")
-            matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+            matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\]", last_response)
             referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in threads)]
         if referenced_thread_ids:
             logger.info(f"追問檢測到參考帖子：thread_ids={referenced_thread_ids}")
@@ -210,7 +210,9 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     ...
   ]
 }}
-請確保 reason 說明簡潔，不超過50字。
+按意圖信心值加權排序，優先滿足高信心意圖（如 time_sensitive_analysis 要求最新帖子）。
+確保各意圖的帖子分配均衡，避免重複帖子被多個意圖選取。
+reason 說明簡潔，不超過50字。
 """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
@@ -333,21 +335,24 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     intent_word_ranges = {
         "list_titles": (140, 400),
-        "summarize_posts": (700, 2800),
-        "analyze_sentiment": (700, 2800),
-        "general_query": (700, 2800),
-        "find_themed": (700, 2800),
-        "fetch_dates": (700, 2800),
-        "search_keywords": (700, 2800),
-        "recommend_threads": (700, 2800),
+        "summarize_posts": (500, 800),
+        "analyze_sentiment": (500, 800),
+        "general_query": (280, 560),
+        "find_themed": (420, 1000),
+        "fetch_dates": (280, 800),
+        "search_keywords": (420, 1000),
+        "recommend_threads": (280, 800),
+        "contextual_analysis": (500, 800),
+        "semantic_query": (500, 800),
+        "time_sensitive_analysis": (500, 800),
         "follow_up": (1000, 5000),
-        "fetch_thread_by_id": (700, 2800)
+        "fetch_thread_by_id": (500, 800)
     }
     
     total_min_tokens = 0
     total_max_tokens = 0
     for intent in intents:
-        word_min, word_max = intent_word_ranges.get(intent, (700, 2800))
+        word_min, word_max = intent_word_ranges.get(intent, (500, 800))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
@@ -373,6 +378,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 問題：{user_query}
 意圖：{json.dumps(intents, ensure_ascii=False)}
 若問題需要深入分析（如情緒分析、意見分類、追問、特定帖子ID），建議較多回覆（200-500）。
+若包含時間敏感意圖（如 time_sensitive_analysis），優先最新回覆，建議200-300條。
 默認：100 條。
 輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
 """
@@ -418,10 +424,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         referenced_thread_ids = []
         if any(intent == "follow_up" for intent in intents):
-            referenced_thread_ids = parsed_query["thread_ids"]
+            referenced_thread_ids = processing.get("top_thread_ids", [])
             if not referenced_thread_ids:
                 last_response = conversation_context[-1].get("content", "") if conversation_context else ""
-                matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
+                matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\]", last_response)
                 referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in metadata)]
         else:
             top_thread_ids = processing.get("top_thread_ids", [])
@@ -474,7 +480,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             
             sorted_replies = sorted(
                 filtered_replies,
-                key=lambda x: x.get("like_count", 0),
+                key=lambda x: x.get("like_count", 0) if not any(intent == "time_sensitive_analysis" for intent in intents) else x.get("reply_time", "0"),
                 reverse=True
             )[:max_replies_per_thread]
             
@@ -565,13 +571,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
+    # 生成融合多意圖的提示
     prompt = await build_dynamic_prompt(
         query=user_query,
         conversation_context=conversation_context,
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
-        intent=intents[0],
+        intent=None,  # 傳遞 None，讓 build_dynamic_prompt 處理所有意圖
         selected_source=selected_source,
         grok3_api_key=GROK3_API_KEY
     )
@@ -581,7 +588,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(
         f"生成提示：函數=stream_grok3_response, 查詢={user_query}, "
         f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
-        f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
+        f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, "
+        f"intents={intents}"
     )
     
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -608,7 +616,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
-            intent=intents[0],
+            intent=None,
             selected_source=selected_source,
             grok3_api_key=GROK3_API_KEY
         )
@@ -628,7 +636,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
             "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
             "禁止使用 [post_id: ...] 格式。根據用戶意圖動態選擇回應格式（例如列表、段落、表格等），"
-            "確保結構清晰、內容連貫，且適合查詢的需求。"
+            "確保結構清晰、內容連貫，按主題分段，每個帖子僅在最適合的主題下引用一次，"
+            "避免內容重複，必要時附上情緒分佈表格或總結。"
         )},
         *conversation_context,
         {"role": "user", "content": prompt}
@@ -875,7 +884,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 ][:5 - len(thread_data)]
                 request_counter = supplemental_result.get("request_counter", request_counter)
                 last_reset = supplemental_result.get("last_reset", last_reset)
-                rate_limit_until = supplemental_result.get("rate_limit_until", rate_limit_until)
+                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(supplemental_result.get("rate_limit_info", []))
                 
                 supplemental_tasks = []
