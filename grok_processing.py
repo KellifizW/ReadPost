@@ -53,7 +53,7 @@ async def summarize_context(conversation_context):
         return {"theme": "一般", "keywords": []}
     
     prompt = f"""
-你是对話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
+你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
 特別注意用戶問題中的意圖（例如「熱門」「總結」「追問」）和回應中的帖子標題。
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
