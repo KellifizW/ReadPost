@@ -2,7 +2,7 @@
 LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 提供速率限制管理、錯誤處理和日誌記錄功能。
 主要函數：
-- get_lihkg_topic_list：抓取指定分類的帖子標題。
+- get_lihkg_topic_list：抓取指定分類的帖子標題列表。
 - get_lihkg_thread_content：抓取指定帖子的回覆內容，支援多頁迭代。
 - get_category_name：返回分類名稱。
 - get_lihkg_thread_content_batch：批量抓取多個帖子的回覆內容。
@@ -29,11 +29,11 @@ logger = configure_logger(__name__, "lihkg_api.log")
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
-LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
+LIHKG_COOKIE = "PHPSESSID=33mda4rq2c68ka0q69j3qli704; __cfruid=6613e31ceda225cd19b78296f41fcdd792896165-1746435095; cf_clearance=lKvL5WE.wiQ3OPQ1vBByvADiC7YQyySKHwbpY.OIMDM-1746437382-1.2.1.1-yvhsMxUOu2oIxxQWYDQ8RLr6DSql1PiOJoewKLjnP4cUk1kpehYNcPdBMd5db78MFblUmscp9x3IZcZF6GLrq6iQogh7XT6_KrQv4mv_yRfDvUzHv8VTTtDB_3NJjSn6hkj5rZ68etejlTWzje51WQRHzaNNzUEzwSgyq5B1Orhc75wvzbibCJYtQm7kZwDbOyvT3ZI8EpVTckCdutk_F8tQ7iEIuXaclhuWrMa1h0wgJjXEeZGxvVHOfSAHiC837fxwz2m.uQ5vAe8nsaU8dY5W_8P1OCDpcHChWhWoK5JeYaXHq7Zsb8yfv9TceR7PaCU0XDP2KU_m_44b4uX.vGqZWa1qumQttbxUBciyQu4"
 
 # 用戶代理列表
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
@@ -178,44 +178,83 @@ def get_category_name(cat_id):
     }
     return categories.get(str(cat_id), "未知分類")
 
-async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
+async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, target_items=20):
     """
-    抓取指定分類的帖子標題列表，確保返回的貼文符合指定分類。
+    抓取指定分類的帖子標題列表，動態調整頁數以達到目標貼文數量。
+    Args:
+        cat_id: 分類 ID
+        start_page: 起始頁數
+        max_pages: 最大頁數（可動態增加）
+        target_items: 目標貼文數量
+    Returns:
+        Dict: 包含貼文列表、速率限制信息等
     """
     items = []
     rate_limit_info = []
-    
-    for page in range(start_page, start_page + max_pages):
-        if cat_id == "2":  # 熱門台
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id=1&page={page}&count=60&type=now&order=hot"
-        else:
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/latest?cat_id={cat_id}&page={page}&count=60&type=now"
+    current_page = start_page
+    max_pages = max(max_pages, 10)  # 最多抓取 10 頁，避免過多請求
+    attempts = 0
+
+    while len(items) < target_items and current_page < start_page + max_pages and attempts < 2:
+        url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&page={current_page}&count=60&type=now"
         data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_topic_list")
         rate_limit_info.extend(page_rate_limit_info)
         
+        raw_items = []
         if data and data.get("response", {}).get("items"):
-            filtered_items = [
+            raw_items = [
                 item for item in data["response"]["items"]
-                if item.get("title") and item.get("no_of_reply", 0) > 0 and
-                (cat_id in ["1", "2"] or str(item.get("cat_id")) == str(cat_id))
+                if item.get("title") and item.get("no_of_reply", 0) > 0
             ]
-            items.extend(filtered_items)
+            # 驗證貼文分類
+            filtered_items = []
+            for item in raw_items:
+                thread_id = str(item.get("thread_id"))
+                verification = await verify_lihkg_thread_category(thread_id, selected_cat_id=cat_id)
+                item_cat_id = verification.get("cat_id") if "cat_id" in verification else None
+                if item_cat_id == cat_id or (cat_id in ["1", "2"] and item_cat_id):
+                    filtered_items.append(item)
+            
+            items.extend(filtered_items[:target_items - len(items)])
             logger.info(
                 json.dumps({
                     "event": "lihkg_topic_fetch",
                     "cat_id": cat_id,
-                    "page": page,
-                    "items_fetched": len(filtered_items),
-                    "item_cat_ids": [item.get("cat_id") for item in filtered_items]
+                    "page": current_page,
+                    "raw_items": len(raw_items),
+                    "filtered_items": len(filtered_items),
+                    "item_cat_ids": [item.get("cat_id") for item in raw_items],
+                    "verified_cat_ids": [verification.get("cat_id") for item in filtered_items]
                 }, ensure_ascii=False)
             )
+            attempts = 0  # 重置重試計數
         else:
-            logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
+            logger.error(
+                json.dumps({
+                    "event": "lihkg_topic_fetch",
+                    "cat_id": cat_id,
+                    "page": current_page,
+                    "error": "No data fetched",
+                    "api_response": data.get("error_message", "Unknown") if data else "No response"
+                }, ensure_ascii=False)
+            )
+            attempts += 1  # 記錄連續失敗次數
         
+        current_page += 1
         await asyncio.sleep(1)
     
+    logger.info(
+        json.dumps({
+            "event": "lihkg_topic_fetch_summary",
+            "cat_id": cat_id,
+            "total_items": len(items),
+            "pages_fetched": current_page - start_page,
+            "target_items": target_items
+        }, ensure_ascii=False)
+    )
+    
     return {
-        "items": items[:90],
+        "items": items[:target_items],
         "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
