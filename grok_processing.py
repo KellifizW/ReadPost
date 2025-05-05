@@ -181,21 +181,21 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
             return {"top_thread_ids": referenced_thread_ids[:2], "reason": "使用追問的參考帖子 ID"}
 
     prompt = f"""
-你是帖子優先級排序助手，請根據用戶查詢和意圖，從提供的帖子中選出最多20個最相關的帖子。
+你是帖子優先級排序助手，請根據用戶查詢和意圖，從提供的帖子中選出最多5個最相關的帖子。
 查詢：{user_query}
 意圖：{', '.join(intents)}
 討論區：{source_name} (ID: {source_id})
 來源類型：{source_type}
 帖子數據：
 {json.dumps([{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
-輸出格式：{{"top_thread_ids": ["id1", "id2", ...], "reason": "排序原因"}}
+輸出格式：{{"top_thread_ids": ["id1", "id2", ...], "reason": "排序原因（限100字）"}}
 """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,  # 增加 max_tokens
+        "max_tokens": 150,  # 減少 max_tokens 以避免截斷
         "temperature": 0.7
     }
     
@@ -223,19 +223,33 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                     )
                     try:
                         result = json.loads(response_content)
+                        # 限制 top_thread_ids 數量
+                        result["top_thread_ids"] = result.get("top_thread_ids", [])[:5]
+                        # 截斷 reason 字段
+                        result["reason"] = result.get("reason", "未提供原因")[:100]
                         return result
                     except json.JSONDecodeError as e:
-                        logger.warning(f"無法解析優先級排序結果：{response_content}")
-                        # 嘗試提取部分 thread_ids
-                        match = re.search(r'"top_thread_ids":\s*\[([^\]]*)\]', response_content)
-                        if match:
-                            ids_str = match.group(1)
-                            top_thread_ids = [tid.strip('"') for tid in ids_str.split(',') if tid.strip('"')]
-                            return {
-                                "top_thread_ids": top_thread_ids,
-                                "reason": "部分解析成功，提取 thread_ids"
-                            }
-                        return {"top_thread_ids": [], "reason": "無法解析 API 回應"}
+                        logger.warning(f"無法解析優先級排序結果：{response_content}, 錯誤：{str(e)}")
+                        # 嘗試修復截斷的 JSON
+                        try:
+                            fixed_content = response_content
+                            if not fixed_content.endswith('"}'):
+                                fixed_content = fixed_content.rsplit('"reason": "', 1)[0] + '"reason": "部分解析成功"}'
+                            result = json.loads(fixed_content)
+                            result["top_thread_ids"] = result.get("top_thread_ids", [])[:5]
+                            result["reason"] = "部分解析成功"
+                            return result
+                        except json.JSONDecodeError:
+                            # 提取 thread_ids
+                            match = re.search(r'"top_thread_ids":\s*\[([^\]]*)\]', response_content)
+                            if match:
+                                ids_str = match.group(1)
+                                top_thread_ids = [tid.strip('"') for tid in ids_str.split(',') if tid.strip('"')][:5]
+                                return {
+                                    "top_thread_ids": top_thread_ids,
+                                    "reason": "部分解析成功，提取 thread_ids"
+                                }
+                            return {"top_thread_ids": [], "reason": "無法解析 API 回應"}
         except Exception as e:
             logger.debug(f"帖子優先級排序錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
@@ -247,7 +261,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                 reverse=True
             )
             return {
-                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:20]],
+                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:5]],
                 "reason": "優先級排序失敗，回退到熱門度排序"
             }
 
@@ -711,7 +725,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 async with cache_lock:
                     if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
                         cached_data = st.session_state.thread_cache[thread_id_str]["data"]
-                        thread_data.append(cached_data)
+                        if thread_id_str not in [d["thread_id"] for d in thread_data]:  # 避免重複添加
+                            thread_data.append(cached_data)
                         logger.debug(f"緩存命中：thread_id={thread_id_str}")
                         continue
                 if source_type == "lihkg":
@@ -769,7 +784,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "fetched_pages": result.get("fetched_pages", []),
                             "total_fetched_replies": len(filtered_replies)
                         }
-                        thread_data.append(thread_info)
+                        if thread_id not in [d["thread_id"] for d in thread_data]:  # 避免重複添加
+                            thread_data.append(thread_info)
                         async with cache_lock:
                             st.session_state.thread_cache[thread_id] = {
                                 "data": thread_info,
@@ -833,7 +849,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         request_counter = result.get("request_counter", request_counter)
                         last_reset = result.get("last_reset", last_reset)
                         rate_limit_until = result.get("rate_limit_until", rate_limit_until)
-                        rate_limit_info.extend(result.get("rate_limit_info", []))
+                        rate_limit_info.extend(result.get("rate cover_limit_info", []))
                         
                         thread_id = str(filtered_supplemental[idx]["thread_id"])
                         if result.get("title"):
@@ -863,7 +879,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "fetched_pages": result.get("fetched_pages", []),
                                 "total_fetched_replies": len(filtered_replies)
                             }
-                            thread_data.append(thread_info)
+                            if thread_id not in [d["thread_id"] for d in thread_data]:  # 避免重複添加
+                                thread_data.append(thread_info)
                             async with cache_lock:
                                 st.session_state.thread_cache[thread_id] = {
                                     "data": thread_info,
@@ -989,7 +1006,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             async with cache_lock:
                 if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
                     cached_data = st.session_state.thread_cache[thread_id]["data"]
-                    thread_data.append(cached_data)
+                    if thread_id not in [d["thread_id"] for d in thread_data]:  # 避免重複添加
+                        thread_data.append(cached_data)
                     logger.debug(f"緩存命中：thread_id={thread_id}")
                     continue
             if source_type == "lihkg":
@@ -1048,7 +1066,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(filtered_replies)
                     }
-                    thread_data.append(thread_info)
+                    if thread_id not in [d["thread_id"] for d in thread_data]:  # 避免重複添加
+                        thread_data.append(thread_info)
                     async with cache_lock:
                         st.session_state.thread_cache[thread_id] = {
                             "data": thread_info,
