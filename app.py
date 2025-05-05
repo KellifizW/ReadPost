@@ -130,15 +130,6 @@ async def main():
 
     st.write(f"當前數據來源：{selected_cat}")
 
-    # 可選：顯示驗證日誌（實驗用途）
-    if st.checkbox("顯示驗證日誌（實驗用）"):
-        try:
-            with open("lihkg_api.log", "r", encoding="utf-8") as f:
-                logs = f.readlines()
-                st.text_area("LIHKG 驗證日誌", value="".join(logs[-50:]), height=200)
-        except FileNotFoundError:
-            st.warning("日誌文件未找到")
-
     for idx, chat in enumerate(st.session_state.chat_history):
         with st.chat_message("user"):
             st.markdown(chat["question"])
