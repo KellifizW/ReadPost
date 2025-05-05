@@ -623,7 +623,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         {"role": "system", "content": (
             "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
             "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-            "禁止使用 [post_id: ...] 格式。回應應為單一連貫段落，避免使用 ### 分隔，除非用戶明確要求分段。"
+            "禁止使用 [post_id: ...] 格式。回應必須分段，每段以 ### 分隔，結構清晰，包含以下段落："
+            "1. 簡介段：概述查詢背景和主要發現。"
+            "2. 詳細分析段：根據意圖提供具體內容（如總結、情緒分析、標題列表等）。"
+            "3. 結論段：總結回答並提供建議或後續行動。"
         )},
         *conversation_context,
         {"role": "user", "content": prompt}
