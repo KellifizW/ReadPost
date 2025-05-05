@@ -4,10 +4,8 @@ import time
 from datetime import datetime
 import pytz
 import nest_asyncio
-import re
 from streamlit.components.v1 import html
 from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question
-from lihkg_api import verify_lihkg_thread_category
 from logging_config import configure_logger
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -44,12 +42,6 @@ def render_new_conversation_button():
         st.session_state.awaiting_response = False
         logger.info("New conversation started, session state cleared")
         st.rerun()
-
-def extract_lihkg_thread_id(query):
-    """從查詢中提取 LIHKG 帖子 ID"""
-    pattern = r"https?://lihkg\.com/thread/(\d+)/page/\d+"
-    match = re.search(pattern, query)
-    return match.group(1) if match else None
 
 async def main():
     st.set_page_config(page_title="Social Media Chat Bot", layout="centered")
@@ -121,9 +113,9 @@ async def main():
             st.session_state.chat_history = []
             st.session_state.conversation_context = []
             st.session_state.context_timestamps = []
-            st.session_state.thread_cache = {}  # 清除所有緩存，包括驗證緩存
+            st.session_state.thread_cache = {}
             st.session_state.last_user_query = None
-            logger.info(f"Source changed to {selected_source}, cleared conversation history and cache")
+            logger.info(f"Source changed to {selected_source}, cleared conversation history")
         st.session_state.last_selected_source = selected_source
     else:
         logger.info(f"Source unchanged: {selected_source}, preserving conversation history")
@@ -153,29 +145,6 @@ async def main():
         with st.chat_message("user"):
             st.markdown(user_query)
         st.session_state.awaiting_response = True
-
-        # 檢查是否包含 LIHKG 帖子 URL
-        thread_id = extract_lihkg_thread_id(user_query)
-        if thread_id and source_type == "lihkg":
-            try:
-                verification_result = await verify_lihkg_thread_category(thread_id, selected_cat_id=source_id)
-                if "categories" in verification_result:
-                    categories = [cat["category_name"] for cat in verification_result["categories"]]
-                    verification_message = f"帖子 {thread_id} 屬於以下分類：{', '.join(categories)}"
-                else:
-                    verification_message = f"帖子 {thread_id} 屬於分類：{verification_result['category_name']}"
-                with st.chat_message("assistant"):
-                    st.info(verification_message)
-                st.session_state.chat_history.append({"question": user_query, "answer": verification_message})
-                logger.info(f"Verification result for thread {thread_id}: {verification_message}")
-            except Exception as e:
-                error_message = f"無法驗證帖子 {thread_id} 的分類：{str(e)}"
-                with st.chat_message("assistant"):
-                    st.error(error_message)
-                st.session_state.chat_history.append({"question": user_query, "answer": error_message})
-                logger.error(f"Verification failed for thread {thread_id}: {str(e)}")
-                st.session_state.awaiting_response = False
-                return
 
         current_time = time.time()
         valid_context = []
