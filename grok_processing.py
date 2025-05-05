@@ -223,8 +223,17 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                     try:
                         # 清理回應內容，修復可能的未完成 JSON
                         cleaned_content = response_content.strip()
+                        # 修復末尾逗號
                         if cleaned_content.endswith(','):
                             cleaned_content = cleaned_content[:-1] + '}'
+                        # 修復未閉合的 reason 字符串
+                        if '"reason": "' in cleaned_content and not cleaned_content.endswith('"}'):
+                            last_quote = cleaned_content.rfind('"')
+                            if last_quote > cleaned_content.rfind('"reason": "'):
+                                cleaned_content = cleaned_content[:last_quote] + '"}'
+                            else:
+                                cleaned_content = cleaned_content + '"}}'
+                        logger.debug(f"清理後的 JSON 回應：{cleaned_content}")
                         result = json.loads(cleaned_content)
                         top_thread_ids = result.get("top_thread_ids", [])
                         reason = result.get("reason", "無排序原因")
@@ -232,7 +241,22 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
                         return {"top_thread_ids": valid_thread_ids, "reason": reason}
                     except json.JSONDecodeError as e:
-                        logger.warning(f"無法解析優先級排序結果：{response_content[:500]}...，錯誤：{str(e)}")
+                        logger.warning(
+                            f"無法解析優先級排序結果：原始回應={response_content}, "
+                            f"清理後回應={cleaned_content}, 錯誤：{str(e)}"
+                        )
+                        # 嘗試提取部分 thread_ids
+                        try:
+                            match = re.search(r'"top_thread_ids":\s*\[(.*?)\]', response_content, re.DOTALL)
+                            if match:
+                                ids_str = match.group(1)
+                                ids = [id.strip().strip('"') for id in ids_str.split(',') if id.strip()]
+                                valid_thread_ids = list(dict.fromkeys([tid for tid in ids if tid in [t["thread_id"] for t in threads]]))
+                                if valid_thread_ids:
+                                    logger.info(f"成功從不完整回應中提取 thread_ids：{valid_thread_ids}")
+                                    return {"top_thread_ids": valid_thread_ids, "reason": "從不完整回應中提取的 thread_ids"}
+                        except Exception as extract_e:
+                            logger.warning(f"無法從不完整回應中提取 thread_ids：{str(extract_e)}")
                         return {"top_thread_ids": [], "reason": f"無法解析 API 回應：{str(e)}"}
         except Exception as e:
             logger.debug(f"帖子優先級排序錯誤：{str(e)}，嘗試次數={attempt + 1}")
@@ -845,13 +869,14 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                     "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                                     "reply_time": reply.get("reply_time", "0")
                                 }
-                                for reply in result.get("replies", [])
+                                for reply in result.get("replies", []) 
                                 if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
                                 and len(clean_html(reply.get("msg")).strip()) > 7
                             ]
                             thread_info = {
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
+                                "key": thread_id,
                                 "no_of_reply": total_replies,
                                 "last_reply_time": result.get("last_reply_time", "0"),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
