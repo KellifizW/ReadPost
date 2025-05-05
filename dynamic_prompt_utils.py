@@ -174,9 +174,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
                     intents = result.get("intents", [{"intent": "recommend_threads", "confidence": 0.7, "reason": "模糊查詢，默認推薦熱門帖子"}])
-                    reason = result.get("reason &
-
-quot;: "語義匹配")
+                    reason = result.get("reason", "語義匹配")
                     
                     # 強制 list_titles 若檢測到觸發詞
                     if detected_triggers:
