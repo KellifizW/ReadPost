@@ -368,6 +368,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_max_tokens += int(word_max / 0.8)
     
     # Validate thread_data type and convert if necessary
+    if isinstance(thread_data, str):
+        logger.info(f"thread_data 為字符串，嘗試 JSON 反序列化")
+        try:
+            thread_data = json.loads(thread_data)
+        except json.JSONDecodeError as e:
+            logger.error(f"無法解析 thread_data 字符串：{str(e)}，原始數據：{thread_data}")
+            yield f"錯誤：無效的 thread_data 格式（無法解析 JSON 字符串）。請聯繫支持。"
+            return
+    
     if isinstance(thread_data, dict):
         logger.info(f"thread_data 為 dict，轉換為 list")
         thread_data = list(thread_data.values())
@@ -626,7 +635,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": data["replies"][:max_replies_per_thread],
-                "fetched_pages": data["fetched_pages"],
+                "fetched_pages": data.get("fetched_pages", []),
                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
             } for tid, data in filtered_thread_data.items()
         }
@@ -952,7 +961,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                     "reply_id": reply.get("reply_id"),
                                     "msg": clean_html(reply.get("msg", "[無內容]")),
                                     "like_count": reply.get("like_count", 0),
-                                    "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                                    "dislike_count": reply.get("dislike_count", 0 # 修正缺少的右括號
                                     "reply_time": reply.get("reply_time", "0")
                                 }
                                 for reply in result.get("replies", [])
@@ -1137,7 +1146,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             progress_callback("正在準備數據", 0.5)
         
         logger.info(
-            f"最終 thread_data：{[{'thread_id': data['thread_id'], 'replies_count': len(data['replies'])} for data in thread_data]}"
+            f"最終 thread_data：{[{'thread_id': data['thread_id'], 'replies_count': len(data['replies'])} for data in thread_data]}, "
+            f"thread_data 類型：{type(thread_data)}"
         )
         
         # 確保 thread_data 是列表格式
