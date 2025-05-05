@@ -79,36 +79,37 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     
     # 語義意圖分析
     prompt = f"""
-你是語義分析助手，請分析以下查詢並分類最多3個意圖，考慮對話歷史和關鍵詞。
-查詢：{query}
-對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
-數據來源：{source_type}
-是否模糊查詢：{is_vague}
-是否包含多意圖指示詞：{has_multi_intent}
-意圖描述：
-{json.dumps({
-    "list_titles": "列出帖子標題或清單",
-    "summarize_posts": "總結帖子內容或討論",
-    "analyze_sentiment": "分析帖子或回覆的情緒",
-    "general_query": "模糊或非討論區相關問題",
-    "find_themed": "尋找特定主題的帖子",
-    "fetch_dates": "提取帖子或回覆的日期資料",
-    "search_keywords": "根據關鍵詞搜索帖子",
-    "recommend_threads": "推薦相關或熱門帖子",
-    "follow_up": "追問之前回應的帖子內容",
-    "fetch_thread_by_id": "根據明確的帖子 ID 抓取內容"
-}, ensure_ascii=False, indent=2)}
-輸出格式：{{
-  "intents": [
-    {{"intent": "意圖1", "confidence": 0.0-1.0, "reason": "匹配原因"}},
-    ...
-  ],
-  "reason": "整體匹配原因"
-}}
-若查詢模糊且無多意圖指示詞，僅返回1個高信心意圖（優先 recommend_threads 或 summarize_posts）。
-若查詢明確或有對話歷史支持，可返回最多3個意圖，但僅包含信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖。
-"""
+    你是語義分析助手，請分析以下查詢並分類最多3個意圖，考慮對話歷史和關鍵詞。
+    查詢：{query}
+    對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
+    關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
+    數據來源：{source_type}
+    是否模糊查詢：{is_vague}
+    是否包含多意圖指示詞：{has_multi_intent}
+    意圖描述：
+    {json.dumps({
+        "list_titles": "列出帖子標題或清單（觸發詞：列出、標題、清單、所有標題）",
+        "summarize_posts": "總結帖子內容或討論",
+        "analyze_sentiment": "分析帖子或回覆的情緒",
+        "general_query": "模糊或非討論區相關問題",
+        "find_themed": "尋找特定主題的帖子",
+        "fetch_dates": "提取帖子或回覆的日期資料",
+        "search_keywords": "根據關鍵詞搜索帖子",
+        "recommend_threads": "推薦相關或熱門帖子",
+        "follow_up": "追問之前回應的帖子內容",
+        "fetch_thread_by_id": "根據明確的帖子 ID 抓取內容"
+    }, ensure_ascii=False, indent=2)}
+    輸出格式：{{
+      "intents": [
+        {{"intent": "意圖1", "confidence": 0.0-1.0, "reason": "匹配原因"}},
+        ...
+      ],
+      "reason": "整體匹配原因"
+    }}
+    若查詢包含「列出」「標題」「清單」「所有標題」，優先返回 list_titles 意圖，信心值設為 0.95。
+    若查詢模糊且無多意圖指示詞，僅返回1個高信心意圖（優先 list_titles 若包含觸發詞，否則 recommend_threads 或 summarize_posts）。
+    若查詢明確或有對話歷史支持，可返回最多3個意圖，但僅包含信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖。
+    """
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {grok3_api_key}"
@@ -333,7 +334,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             )
         elif intent == "list_titles":
             instructions.append(
-                f"### 列出標題\n列出最多5個帖子的標題，聚焦關鍵詞 {keywords}。"
+                f"### 列出標題\n列出最多15個帖子的標題，聚焦關鍵詞 {keywords}。"
                 f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
             )
         elif intent == "find_themed":
