@@ -748,6 +748,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             processed_thread_ids = set()
             
             candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
+            logger.info(f"特定帖子/追問：candidate_threads={[(t['thread_id'], t['title']) for t in candidate_threads]}")
             
             tasks = []
             for idx, thread_id in enumerate(top_thread_ids):
@@ -1024,6 +1025,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             item for item in filtered_items
                             if str(item["thread_id"]) in map(str, top_thread_ids)
                         ][:post_limit]
+        
+        logger.info(f"候選帖子：candidate_threads={[(t['thread_id'], t['title']) for t in candidate_threads]}")
         
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
