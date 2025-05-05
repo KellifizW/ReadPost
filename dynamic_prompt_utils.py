@@ -4,19 +4,21 @@ import re
 import aiohttp
 import asyncio
 from logging_config import configure_logger
+import uuid
 
 # 配置日誌
 logger = configure_logger(__name__, "dynamic_prompt_utils.log")
 
 # 配置參數
 CONFIG = {
-    "max_prompt_length": 100000,  # 提示最大長度（token）
-    "max_parse_retries": 3,       # 查詢解析最大重試次數
-    "parse_timeout": 90,          # 查詢解析超時時間（秒）
-    "default_intents": ["summarize_posts", "general_query"],  # 默認意圖
+    "max_prompt_length": 100000,
+    "max_parse_retries": 3,
+    "parse_timeout": 90,
+    "default_intents": ["recommend_threads", "summarize_posts"],
     "error_prompt_template": "在 {selected_cat} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
-    "min_keywords": 1,            # 最小關鍵詞數量
-    "max_keywords": 3,            # 最大關鍵詞數量
+    "min_keywords": 1,
+    "max_keywords": 3,
+    "intent_confidence_threshold": 0.75,  # 新增：意圖信心閾值
     "default_word_ranges": {
         "summarize_posts": (600, 1000),
         "analyze_sentiment": (420, 700),
@@ -33,7 +35,7 @@ CONFIG = {
 
 async def parse_query(query, conversation_context, grok3_api_key, source_type="lihkg"):
     """
-    解析用戶查詢，提取多個意圖（最多3個）、關鍵詞、時間範圍和上下文。
+    解析用戶查詢，提取最多3個意圖，優先選擇高信心意圖，對於模糊查詢限制意圖數量。
     返回結構化 JSON 結果。
     """
     conversation_context = conversation_context or []
@@ -70,13 +72,20 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             "confidence": 0.90
         }
     
-    # 語義意圖分析（支持多意圖）
+    # 檢查查詢是否模糊
+    is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
+    multi_intent_indicators = ["並且", "同時", "總結並", "列出並", "分析並"]
+    has_multi_intent = any(indicator in query for indicator in multi_intent_indicators)
+    
+    # 語義意圖分析
     prompt = f"""
 你是語義分析助手，請分析以下查詢並分類最多3個意圖，考慮對話歷史和關鍵詞。
 查詢：{query}
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
 數據來源：{source_type}
+是否模糊查詢：{is_vague}
+是否包含多意圖指示詞：{has_multi_intent}
 意圖描述：
 {json.dumps({
     "list_titles": "列出帖子標題或清單",
@@ -93,11 +102,12 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
 輸出格式：{{
   "intents": [
     {{"intent": "意圖1", "confidence": 0.0-1.0, "reason": "匹配原因"}},
-    {{"intent": "意圖2", "confidence": 0.0-1.0, "reason": "匹配原因"}},
     ...
   ],
   "reason": "整體匹配原因"
 }}
+若查詢模糊且無多意圖指示詞，僅返回1個高信心意圖（優先 recommend_threads 或 summarize_posts）。
+若查詢明確或有對話歷史支持，可返回最多3個意圖，但僅包含信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖。
 """
     headers = {
         "Content-Type": "application/json",
@@ -110,7 +120,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 300,  # 增加 max_tokens 以支持多意圖輸出
+        "max_tokens": 300,
         "temperature": 0.5
     }
     
@@ -131,12 +141,21 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         logger.debug(f"意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    intents = result.get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "語義匹配"}])
+                    intents = result.get("intents", [{"intent": "recommend_threads", "confidence": 0.7, "reason": "模糊查詢，默認推薦熱門帖子"}])
                     reason = result.get("reason", "語義匹配")
+                    
+                    # 過濾低信心意圖
+                    intents = [i for i in intents if i["confidence"] >= CONFIG["intent_confidence_threshold"]]
+                    if not intents:
+                        intents = [{"intent": "recommend_threads", "confidence": 0.7, "reason": "無高信心意圖，默認推薦"}]
+                    
+                    # 對於模糊查詢，限制為單一意圖
+                    if is_vague and not has_multi_intent:
+                        intents = [max(intents, key=lambda x: x["confidence"])]
                     
                     time_range = "recent" if time_sensitive else "all"
                     return {
-                        "intents": intents[:3],  # 限制最多3個意圖
+                        "intents": intents[:3],
                         "keywords": keywords,
                         "time_range": time_range,
                         "thread_ids": [],
@@ -151,22 +170,26 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     
     # 回退到默認意圖
     return {
-        "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "意圖分析失敗，默認總結帖子"}],
+        "intents": [{"intent": "recommend_threads", "confidence": 0.5, "reason": "意圖分析失敗，默認推薦熱門帖子"}],
         "keywords": keywords,
         "time_range": "all",
         "thread_ids": [],
-        "reason": "意圖分析失敗，默認總結帖子",
+        "reason": "意圖分析失敗，默認推薦熱門帖子",
         "confidence": 0.5
     }
 
 async def extract_keywords(query, conversation_context, grok3_api_key):
     """
-    提取查詢中的關鍵詞和時間敏感性。
+    提取查詢中的關鍵詞，過濾通用詞並考慮語義意圖。
     """
+    generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何"]
+    
     prompt = f"""
-請從以下查詢提取 {CONFIG['min_keywords']}-{CONFIG['max_keywords']} 個核心關鍵詞（僅保留名詞或核心動詞）。
+請從以下查詢提取 {CONFIG['min_keywords']}-{CONFIG['max_keywords']} 個核心關鍵詞（優先名詞或核心動詞，排除通用詞如 {generic_terms}）。
 若查詢包含時間性詞語（如「今晚」「今日」「最近」），設置 time_sensitive 為 true。
+若查詢模糊（如「有咩post 分享」），根據對話歷史推測語義意圖（如尋找熱門或可分享內容）。
 查詢：{query}
+對話歷史：{json.dumps(conintreprted as utf-8
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 返回格式：
 {{
@@ -207,8 +230,9 @@ async def extract_keywords(query, conversation_context, grok3_api_key):
                         logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
+                    keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
                     return {
-                        "keywords": result.get("keywords", [])[:CONFIG["max_keywords"]],
+                        "keywords": keywords[:CONFIG["max_keywords"]],
                         "reason": result.get("reason", "未提供原因")[:70],
                         "time_sensitive": result.get("time_sensitive", False)
                     }
@@ -248,7 +272,7 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
 
 async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
     """
-    動態構建提示，根據查詢解析結果、上下文和數據生成，支持多意圖。
+    動態構建提示，根據查詢解析結果、上下文和數據生成，限制模糊查詢的多意圖輸出。
     """
     parsed_query = await parse_query(query, conversation_context, grok3_api_key)
     intents = parsed_query["intents"]
@@ -276,9 +300,11 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
         f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
     )
     
-    # 動態指導語（支持多意圖）
+    # 動態指導語
     instructions = ["任務："]
-    for intent_info in intents[:3]:  # 限制最多3個意圖
+    is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
+    
+    for intent_info in intents[:3]:
         intent = intent_info["intent"]
         word_min, word_max = CONFIG["default_word_ranges"].get(intent, (420, 1000))
         if intent == "summarize_posts":
@@ -301,7 +327,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
                 f"### 特定帖子\n根據提供的帖子 ID 總結內容，引用高點讚或最新回覆。"
                 f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
             )
-        elif intent == "general_query":
+        elif intent == "general_query" and not is_vague:
             instructions.append(
                 f"### 一般查詢\n提供與問題相關的簡化總結或回答，基於元數據推測話題。"
                 f"字數：{word_min}-{word_max}字。"
@@ -328,7 +354,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             )
         elif intent == "recommend_threads":
             instructions.append(
-                f"### 推薦帖子\n推薦2-3個熱門或相關帖子，基於回覆數和點讚數。"
+                f"### 推薦帖子\n推薦2-3個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
                 f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
             )
     
@@ -350,7 +376,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     
     if len(prompt) > CONFIG["max_prompt_length"]:
         logger.warning("提示長度超過限制，縮減數據")
-        thread_data = thread_data[:2]  # 限制帖子數量
+        thread_data = thread_data[:2]
         data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n篩選條件：{json.dumps(filters, ensure_ascii=False)}"
         prompt = (
             f"[System]\n{system}\n"
