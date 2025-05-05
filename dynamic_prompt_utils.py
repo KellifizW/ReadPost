@@ -34,10 +34,6 @@ CONFIG = {
 }
 
 async def parse_query(query, conversation_context, grok3_api_key, source_type="lihkg"):
-    """
-    解析用戶查詢，提取最多3個意圖，優先選擇高信心意圖，對於模糊查詢限制意圖數量。
-    返回結構化 JSON 結果。
-    """
     conversation_context = conversation_context or []
     
     # 提取關鍵詞
@@ -49,6 +45,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     id_match = re.search(r'(?:ID|帖子)\s*(\d+)', query, re.IGNORECASE)
     if id_match:
         thread_id = id_match.group(1)
+        logger.info(f"檢測到特定帖子 ID 查詢：thread_id={thread_id}")
         return {
             "intents": [{"intent": "fetch_thread_by_id", "confidence": 0.95, "reason": f"檢測到明確帖子 ID {thread_id}"}],
             "keywords": keywords,
@@ -63,6 +60,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
         conversation_context, query, grok3_api_key
     )
     if thread_id:
+        logger.info(f"檢測到追問：thread_id={thread_id}, 原因={match_reason}")
         return {
             "intents": [{"intent": "follow_up", "confidence": 0.90, "reason": f"檢測到追問，匹配帖子 ID {thread_id}"}],
             "keywords": keywords,
@@ -72,7 +70,10 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             "confidence": 0.90
         }
     
-    # 檢查查詢是否模糊
+    # 檢查是否模糊查詢並檢測 list_titles 觸發詞
+    trigger_words = ["列出", "標題", "清單", "所有標題"]
+    detected_triggers = [word for word in trigger_words if word in query]
+    logger.info(f"查詢觸發詞檢測：query={query}, 檢測到觸發詞={detected_triggers}")
     is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
     multi_intent_indicators = ["並且", "同時", "總結並", "列出並", "分析並"]
     has_multi_intent = any(indicator in query for indicator in multi_intent_indicators)
@@ -107,7 +108,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
       "reason": "整體匹配原因"
     }}
     若查詢包含「列出」「標題」「清單」「所有標題」，優先返回 list_titles 意圖，信心值設為 0.95。
-    若查詢模糊且無多意圖指示詞，僅返回1個高信心意圖（優先 list_titles 若包含觸發詞，否則 recommend_threads 或 summarize_posts）。
+    若查詢模糊且無多意圖指示詞，僅返回1個高信心意圖（優先 list_titles 若包含觸發詞，否則 recommend_threads）。
     若查詢明確或有對話歷史支持，可返回最多3個意圖，但僅包含信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖。
     """
     headers = {
@@ -145,6 +146,11 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                     intents = result.get("intents", [{"intent": "recommend_threads", "confidence": 0.7, "reason": "模糊查詢，默認推薦熱門帖子"}])
                     reason = result.get("reason", "語義匹配")
                     
+                    # 強制 list_titles 若檢測到觸發詞
+                    if detected_triggers:
+                        intents = [{"intent": "list_titles", "confidence": 0.95, "reason": f"檢測到 list_titles 觸發詞：{detected_triggers}"}]
+                        reason = f"檢測到 list_titles 觸發詞：{detected_triggers}"
+                    
                     # 過濾低信心意圖
                     intents = [i for i in intents if i["confidence"] >= CONFIG["intent_confidence_threshold"]]
                     if not intents:
@@ -155,6 +161,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         intents = [max(intents, key=lambda x: x["confidence"])]
                     
                     time_range = "recent" if time_sensitive else "all"
+                    logger.info(f"意圖分析完成：intents={[i['intent'] for i in intents]}, reason={reason}, confidence={max(i['confidence'] for i in intents)}")
                     return {
                         "intents": intents[:3],
                         "keywords": keywords,
@@ -170,6 +177,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             continue
     
     # 回退到默認意圖
+    logger.warning(f"意圖分析失敗，回退到默認意圖：recommend_threads")
     return {
         "intents": [{"intent": "recommend_threads", "confidence": 0.5, "reason": "意圖分析失敗，默認推薦熱門帖子"}],
         "keywords": keywords,
