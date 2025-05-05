@@ -287,7 +287,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         if data and data.get("response"):
             page_replies = data["response"].get("item_data", [])
             for reply in page_replies:
-                reply["like_count"] = int(reply.get swelled_count", "0"))
+                reply["like_count"] = int(reply.get like_count", "0"))
                 reply["dislike_count"] = int(reply.get("dislike_count", "0"))
                 reply["reply_time"] = reply.get("reply_time", "0")
             remaining_slots = max_replies - len(replies)
