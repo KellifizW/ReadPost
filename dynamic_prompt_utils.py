@@ -287,7 +287,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
         "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-        "禁止使用 [post_id: ...] 格式。每個任務的回應以 ### 標題分隔，例如 ### 總結, ### 情緒分析。"
+        "禁止使用 [post_id: ...] 格式。回應應為單一連貫段落，避免使用 ### 分隔，除非用戶明確要求分段。"
     )
     
     context = (
@@ -302,72 +302,82 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
         f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
     )
     
-    instructions = ["任務："]
+    # 動態計算字數範圍
+    word_min = 0
+    word_max = 0
+    for intent_info in intents:
+        intent = intent_info["intent"]
+        min_w, max_w = CONFIG["default_word_ranges"].get(intent, (420, 1000))
+        word_min += min_w
+        word_max += max_w
+    # 根據意圖數量調整字數範圍，確保單一回應不過長
+    intent_count = len(intents)
+    word_min = max(280, word_min // intent_count)  # 平均分配並設置下限
+    word_max = min(1500, word_max // max(1, intent_count - 1))  # 限制上限
+    
     is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
     
+    # 合併多意圖指令
+    instruction_parts = []
     for intent_info in intents[:3]:
         intent = intent_info["intent"]
-        word_min, word_max = CONFIG["default_word_ranges"].get(intent, (420, 1000))
         if intent == "summarize_posts":
-            instructions.append(
-                f"### 總結\n總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，引用高點讚回覆。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，引用高點讚回覆，簡明扼要。"
             )
         elif intent == "analyze_sentiment":
-            instructions.append(
-                f"### 情緒分析\n分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例，融入總結。"
             )
         elif intent == "follow_up":
-            instructions.append(
-                f"### 追問\n深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，引用高點讚或最新回覆。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，引用高點讚或最新回覆，補充上下文。"
             )
         elif intent == "fetch_thread_by_id":
-            instructions.append(
-                f"### 特定帖子\n根據提供的帖子 ID 總結內容，引用高點讚或最新回覆。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"根據提供的帖子 ID 總結內容，引用高點讚或最新回覆，突出核心討論。"
             )
         elif intent == "general_query" and not is_vague:
-            instructions.append(
-                f"### 一般查詢\n提供與問題相關的簡化總結或回答，基於元數據推測話題。"
-                f"字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"提供與問題相關的簡化總結，基於元數據推測話題，保持簡潔。"
             )
         elif intent == "list_titles":
-            instructions.append(
-                f"### 列出標題\n列出最多15個帖子的標題，聚焦關鍵詞 {keywords}。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，並簡述其相關性。"
             )
         elif intent == "find_themed":
-            instructions.append(
-                f"### 主題搜索\n尋找與關鍵詞 {keywords} 相關的帖子，總結其內容。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"尋找與關鍵詞 {keywords} 相關的帖子，總結其內容，突出主題關聯。"
             )
         elif intent == "fetch_dates":
-            instructions.append(
-                f"### 日期提取\n提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，融入總結。"
             )
         elif intent == "search_keywords":
-            instructions.append(
-                f"### 關鍵詞搜索\n搜索包含關鍵詞 {keywords} 的帖子，總結其內容。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"搜索包含關鍵詞 {keywords} 的帖子，總結其內容，強調關鍵詞匹配。"
             )
         elif intent == "recommend_threads":
-            instructions.append(
-                f"### 推薦帖子\n推薦2-3個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
-                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            instruction_parts.append(
+                f"推薦2-3個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
             )
+    
+    # 合併指令為單一任務
+    combined_instruction = (
+        f"根據以下意圖綜合生成一個連貫的回應（字數：{word_min}-{word_max}字）：{'；'.join(instruction_parts)}"
+        f"確保回應聚焦用戶問題，綜合所有意圖，生成單一段落，引用帖子時標註 [帖子 ID: {{thread_id}}] {{標題}}。"
+        f"若有多個意圖，優先考慮主要意圖（信心值最高者），其他意圖作為輔助，確保內容不重複且流暢。"
+    )
     
     # 時間範圍
     if time_range != "all":
-        instructions.append(f"僅考慮 {time_range} 內的帖子。")
+        combined_instruction += f"僅考慮 {time_range} 內的帖子。"
     
     prompt = (
         f"[System]\n{system}\n"
         f"[Context]\n{context}\n"
         f"[Data]\n{data}\n"
-        f"[Instructions]\n{'\n'.join(instructions)}"
+        f"[Instructions]\n{combined_instruction}"
     )
     
     if len(prompt) > CONFIG["max_prompt_length"]:
@@ -378,7 +388,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             f"[System]\n{system}\n"
             f"[Context]\n{context}\n"
             f"[Data]\n{data}\n"
-            f"[Instructions]\n{'\n'.join(instructions)}"
+            f"[Instructions]\n{combined_instruction}"
         )
     
     return prompt
