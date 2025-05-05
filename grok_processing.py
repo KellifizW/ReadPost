@@ -15,11 +15,10 @@ from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keyw
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 100000
+GROK3_TOKEN_LIMIT = 120000
 API_TIMEOUT = 90
-MAX_CACHE_SIZE = 100  # 最大緩存條目數
+MAX_CACHE_SIZE = 100
 
-# 全局鎖和信號量
 cache_lock = asyncio.Lock()
 request_semaphore = asyncio.Semaphore(5)
 
@@ -182,9 +181,9 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         if referenced_thread_ids:
             logger.info(f"追問檢測到參考帖子：thread_ids={referenced_thread_ids}")
             return {
-                "top_thread_ids": referenced_thread_ids[:2],
+                "top_thread_ids": referenced_thread_ids[:5],
                 "reason": "使用追問的參考帖子 ID",
-                "intent_breakdown": [{"intent": "follow_up", "thread_ids": referenced_thread_ids[:2]}]
+                "intent_breakdown": [{"intent": "follow_up", "thread_ids": referenced_thread_ids[:5]}]
             }
 
     threads = [{"thread_id": str(t["thread_id"]), **t} for t in threads]
@@ -329,31 +328,27 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     intent_word_ranges = {
         "list_titles": (140, 400),
-        "summarize_posts": (420, 1000),
-        "analyze_sentiment": (420, 1000),
-        "general_query": (280, 800),
-        "find_themed": (420, 1000),
-        "fetch_dates": (280, 800),
-        "search_keywords": (420, 1000),
-        "recommend_threads": (280, 800),
-        "follow_up": (700, 4000),
-        "fetch_thread_by_id": (420, 1500)
+        "summarize_posts": (700, 2800),
+        "analyze_sentiment": (700, 2800),
+        "general_query": (700, 2800),
+        "find_themed": (700, 2800),
+        "fetch_dates": (700, 2800),
+        "search_keywords": (700, 2800),
+        "recommend_threads": (700, 2800),
+        "follow_up": (1000, 5000),
+        "fetch_thread_by_id": (700, 2800)
     }
     
     total_min_tokens = 0
     total_max_tokens = 0
     for intent in intents:
-        word_min, word_max = intent_word_ranges.get(intent, (420, 1000))
+        word_min, word_max = intent_word_ranges.get(intent, (700, 2800))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
-    target_tokens = int((total_min_tokens + total_max_tokens) / 2)
-    
-    total_replies_count = sum(len(data.get("replies", [])) for data in (thread_data if isinstance(thread_data, list) else thread_data.values()))
-    
-    if total_replies_count:
-        complexity_factor = 1.5 if any(intent in ["follow_up", "fetch_thread_by_id", "summarize_posts", "analyze_sentiment"] for intent in intents) else 1.0
-        target_tokens = total_min_tokens + (total_replies_count / 500) * (total_max_tokens - total_min_tokens) * 0.9 * complexity_factor
+    prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
+    length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
+    target_tokens = total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor
     target_tokens = min(max(int(target_tokens), total_min_tokens), total_max_tokens)
 
     max_tokens_limit = 8000
@@ -361,7 +356,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 100
     max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
 
-    # 對於 list_titles 意圖，限制回覆數量以減少提示長度
     if any(intent == "list_titles" for intent in intents):
         max_replies_per_thread = 10
 
@@ -439,7 +433,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         start_page=1,
                         max_pages=2
                     )
-                else:  # reddit
+                else:
                     supplemental_result = await get_reddit_topic_list(
                         subreddit=source_id,
                         start_page=1,
@@ -509,7 +503,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             fetch_last_pages=1,
                             start_page=max(data["fetched_pages"], default=0) + 1
                         )
-                    else:  # reddit
+                    else:
                         content_result = await get_reddit_thread_content(
                             post_id=tid,
                             subreddit=source_id,
@@ -629,7 +623,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         {"role": "system", "content": (
             "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
             "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-            "禁止使用 [post_id: ...] 格式。每個任務的回應以 ### 標題分隔，例如 ### 總結, ### 情緒分析。"
+            "禁止使用 [post_id: ...] 格式。回應應為單一連貫段落，避免使用 ### 分隔，除非用戶明確要求分段。"
         )},
         *conversation_context,
         {"role": "user", "content": prompt}
@@ -799,7 +793,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         specific_pages=[],
                         start_page=1
                     ))
-                else:  # reddit
+                else:
                     tasks.append(get_reddit_thread_content(
                         post_id=thread_id_str,
                         subreddit=source_id,
@@ -852,7 +846,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "timestamp": time.time()
                             }
             
-            if len(thread_data) == 1 and any(i["intent"] == "follow_up" for i in intents):
+            if len(thread_data) < 5 and any(i["intent"] == "follow_up" for i in intents):
                 keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
                 theme_keywords = keyword_result["keywords"]
                 
@@ -863,7 +857,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             start_page=1,
                             max_pages=2
                         )
-                    else:  # reddit
+                    else:
                         supplemental_result = await get_reddit_topic_list(
                             subreddit=source_id,
                             start_page=1,
@@ -874,7 +868,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     item for item in supplemental_threads
                     if str(item["thread_id"]) not in top_thread_ids
                     and any(kw.lower() in item["title"].lower() for kw in theme_keywords)
-                ][:1]
+                ][:5 - len(thread_data)]
                 request_counter = supplemental_result.get("request_counter", request_counter)
                 last_reset = supplemental_result.get("last_reset", last_reset)
                 rate_limit_until = supplemental_result.get("rate_limit_until", rate_limit_until)
@@ -896,7 +890,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             specific_pages=[],
                             start_page=1
                         ))
-                    else:  # reddit
+                    else:
                         supplemental_tasks.append(get_reddit_thread_content(
                             post_id=thread_id,
                             subreddit=source_id,
@@ -927,7 +921,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                     "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                                     "reply_time": reply.get("reply_time", "0")
                                 }
-                                for reply in result.get("replies", []) 
+                                for reply in result.get("replies", [])
                                 if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
                                 and len(clean_html(reply.get("msg")).strip()) > 7
                             ]
@@ -983,7 +977,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             start_page=page,
                             max_pages=1
                         )
-                    else:  # reddit
+                    else:
                         result = await get_reddit_topic_list(
                             subreddit=source_id,
                             start_page=page,
@@ -1080,7 +1074,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     specific_pages=[],
                     start_page=1
                 )))
-            else:  # reddit
+            else:
                 tasks.append((idx, get_reddit_thread_content(
                     post_id=thread_id,
                     subreddit=source_id,
