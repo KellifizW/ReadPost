@@ -221,11 +221,19 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         f"輸出 token={completion_tokens}, 回應={response_content}"
                     )
                     try:
-                        result = json.loads(response_content)
-                        return result
-                    except json.JSONDecodeError:
-                        logger.warning(f"無法解析優先級排序結果：{response_content}")
-                        return {"top_thread_ids": [], "reason": "無法解析 API 回應"}
+                        # 清理回應內容，修復可能的未完成 JSON
+                        cleaned_content = response_content.strip()
+                        if cleaned_content.endswith(','):
+                            cleaned_content = cleaned_content[:-1] + '}'
+                        result = json.loads(cleaned_content)
+                        top_thread_ids = result.get("top_thread_ids", [])
+                        reason = result.get("reason", "無排序原因")
+                        # 驗證 thread_ids 是否有效並移除重複
+                        valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
+                        return {"top_thread_ids": valid_thread_ids, "reason": reason}
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"無法解析優先級排序結果：{response_content[:500]}...，錯誤：{str(e)}")
+                        return {"top_thread_ids": [], "reason": f"無法解析 API 回應：{str(e)}"}
         except Exception as e:
             logger.debug(f"帖子優先級排序錯誤：{str(e)}，嘗試次數={attempt + 1}")
             if attempt < max_retries - 1:
@@ -238,7 +246,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
             )
             return {
                 "top_thread_ids": [t["thread_id"] for t in sorted_threads[:20]],
-                "reason": "優先級排序失敗，回退到熱門度排序"
+                "reason": f"優先級排序失敗（{str(e)}），回退到熱門度排序"
             }
 
 async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
@@ -581,7 +589,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                 if content:
                                     if "###" in content and ("Content Moderation" in content or "Blocked" in content):
-                                        logger.warning(f"檢測到內容審核：{content}")
+                                        logger.warning(f"檢測到限定: 3000
                                         raise ValueError("檢測到內容審核")
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
@@ -683,12 +691,17 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         if intent in ["fetch_thread_by_id", "follow_up"] and top_thread_ids:
             thread_data = []
             rate_limit_info = []
+            processed_thread_ids = set()  # 跟踪已處理的 thread_id
             
             candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
             
             tasks = []
             for idx, thread_id in enumerate(top_thread_ids):
                 thread_id_str = str(thread_id)
+                if thread_id_str in processed_thread_ids:
+                    logger.debug(f"跳過重複的 thread_id={thread_id_str}")
+                    continue
+                processed_thread_ids.add(thread_id_str)
                 async with cache_lock:
                     if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
                         cached_data = st.session_state.thread_cache[thread_id_str]["data"]
@@ -788,6 +801,10 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 supplemental_tasks = []
                 for item in filtered_supplemental:
                     thread_id = str(item["thread_id"])
+                    if thread_id in processed_thread_ids:
+                        logger.debug(f"跳過重複的補充 thread_id={thread_id}")
+                        continue
+                    processed_thread_ids.add(thread_id)
                     if source_type == "lihkg":
                         supplemental_tasks.append(get_lihkg_thread_content(
                             thread_id=thread_id,
@@ -867,6 +884,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         thread_data = []
         rate_limit_info = []
         candidate_threads = []
+        processed_thread_ids = set()  # 跟踪已處理的 thread_id
         
         if top_thread_ids:
             candidate_threads = [
@@ -959,6 +977,10 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         tasks = []
         for idx, item in enumerate(candidate_threads):
             thread_id = str(item["thread_id"])
+            if thread_id in processed_thread_ids:
+                logger.debug(f"跳過重複的 thread_id={thread_id}")
+                continue
+            processed_thread_ids.add(thread_id)
             async with cache_lock:
                 if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
                     cached_data = st.session_state.thread_cache[thread_id]["data"]
