@@ -18,7 +18,7 @@ CONFIG = {
     "error_prompt_template": "在 {selected_cat} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
     "min_keywords": 1,
     "max_keywords": 3,
-    "intent_confidence_threshold": 0.75,  # 新增：意圖信心閾值
+    "intent_confidence_threshold": 0.75,
     "default_word_ranges": {
         "summarize_posts": (600, 1000),
         "analyze_sentiment": (420, 700),
@@ -189,7 +189,6 @@ async def extract_keywords(query, conversation_context, grok3_api_key):
 若查詢包含時間性詞語（如「今晚」「今日」「最近」），設置 time_sensitive 為 true。
 若查詢模糊（如「有咩post 分享」），根據對話歷史推測語義意圖（如尋找熱門或可分享內容）。
 查詢：{query}
-對話歷史：{json.dumps(conintreprted as utf-8
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 返回格式：
 {{
@@ -377,7 +376,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     if len(prompt) > CONFIG["max_prompt_length"]:
         logger.warning("提示長度超過限制，縮減數據")
         thread_data = thread_data[:2]
-        data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n篩選條件：{json.dumps(filters, ensure_ascii=False)}"
+        data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n篩選條件： trombined_ascii=False)}"
         prompt = (
             f"[System]\n{system}\n"
             f"[Context]\n{context}\n"
