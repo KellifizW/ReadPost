@@ -316,8 +316,26 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
+    # 確保 selected_source 是字典
+    if isinstance(selected_source, str):
+        logger.warning(f"selected_source 是字符串：{selected_source}，嘗試轉換為字典")
+        if "Reddit" in selected_source:
+            source_name = selected_source.replace("Reddit - ", "").strip()
+            source_type = "reddit"
+        elif "LIHKG" in selected_source:
+            source_name = selected_source.replace("LIHKG - ", "").strip()
+            source_type = "lihkg"
+        else:
+            source_name = selected_source
+            source_type = source_type or "reddit"  # 預設為 reddit
+        selected_source = {"source_name": source_name, "source_type": source_type}
+    elif not isinstance(selected_source, dict):
+        logger.error(f"無效的 selected_source 格式：{type(selected_source)}")
+        yield f"錯誤：無效的討論區格式（{type(selected_source)}）。請聯繫支持。"
+        return
+    
     if not thread_data:
-        error_msg = f"在 {selected_source.get('source_name', '未知')} 中未找到符合條件的帖子（篩選：{json.dumps(filters)}）。建議嘗試其他關鍵詞或討論區！"
+        error_msg = f"在 {selected_source['source_name']} 中未找到符合條件的帖子（篩選：{json.dumps(filters)}）。建議嘗試其他關鍵詞或討論區！"
         logger.warning(f"無匹配帖子：{error_msg}")
         yield error_msg
         return
@@ -602,7 +620,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
         intent=intents[0],
-        selected_source={"source_name": selected_source.get("source_name", "未知"), "source_type": source_type},
+        selected_source=selected_source,
         grok3_api_key=GROK3_API_KEY
     )
     
@@ -639,7 +657,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
             intent=intents[0],
-            selected_source={"source_name": selected_source.get("source_name", "未知"), "source_type": source_type},
+            selected_source=selected_source,
             grok3_api_key=GROK3_API_KEY
         )
         prompt_length = len(prompt)
@@ -752,6 +770,31 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     else:
         configure_reddit_api_logger()
     
+    # 確保 selected_source 是字典
+    if isinstance(selected_source, str):
+        logger.warning(f"selected_source 是字符串：{selected_source}，嘗試轉換為字典")
+        if "Reddit" in selected_source:
+            source_name = selected_source.replace("Reddit - ", "").strip()
+            source_type = "reddit"
+        elif "LIHKG" in selected_source:
+            source_name = selected_source.replace("LIHKG - ", "").strip()
+            source_type = "lihkg"
+        else:
+            source_name = selected_source
+            source_type = source_type or "reddit"  # 預設為 reddit
+        selected_source = {"source_name": source_name, "source_type": source_type}
+    elif not isinstance(selected_source, dict):
+        logger.error(f"無效的 selected_source 格式：{type(selected_source)}")
+        return {
+            "selected_source": {"source_name": "未知", "source_type": source_type},
+            "thread_data": [],
+            "rate_limit_info": [{"message": f"無效的討論區格式：{type(selected_source)}"}],
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
+        }
+    
     try:
         clean_cache()
         
@@ -782,7 +825,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             }
         
         if not analysis:
-            analysis = await analyze_and_screen(user_query, selected_source.get("source_name", "未知"), source_id, source_type, conversation_context)
+            analysis = await analyze_and_screen(user_query, selected_source["source_name"], source_id, source_type, conversation_context)
         
         post_limit = min(analysis.get("post_limit", 5), 5)
         filters = analysis.get("filters", {})
@@ -1065,7 +1108,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             else:
                 if filtered_items:
                     prioritization = await prioritize_threads_with_grok(
-                        user_query, filtered_items, selected_source.get("source_name", "未知"), source_id, source_type, [i["intent"] for i in intents]
+                        user_query, filtered_items, selected_source["source_name"], source_id, source_type, [i["intent"] for i in intents]
                     )
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
