@@ -11,7 +11,7 @@ logger = configure_logger(__name__, "dynamic_prompt_utils.log")
 
 # 配置參數
 CONFIG = {
-    "max_prompt_length": 100000,
+    "max_prompt_length": 120000,  # 增加最大字元數
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "default_intents": ["recommend_threads", "summarize_posts"],
@@ -22,7 +22,7 @@ CONFIG = {
     "default_word_ranges": {
         "summarize_posts": (600, 1000),
         "analyze_sentiment": (420, 700),
-        "follow_up": (700, 2100),
+        "follow_up": (1000, 5000),  # 調整 follow_up 字數範圍
         "fetch_thread_by_id": (500, 800),
         "general_query": (280, 560),
         "list_titles": (280, 560),
@@ -303,17 +303,21 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     )
     
     # 動態計算字數範圍
-    word_min = 0
-    word_max = 0
+    word_min = 700  # 設置最小字數
+    word_max = 2800  # 設置最大字數
     for intent_info in intents:
         intent = intent_info["intent"]
-        min_w, max_w = CONFIG["default_word_ranges"].get(intent, (420, 1000))
-        word_min += min_w
-        word_max += max_w
-    # 根據意圖數量調整字數範圍，確保單一回應不過長
-    intent_count = len(intents)
-    word_min = max(280, word_min // intent_count)  # 平均分配並設置下限
-    word_max = min(1500, word_max // max(1, intent_count - 1))  # 限制上限
+        min_w, max_w = CONFIG["default_word_ranges"].get(intent, (700, 2800))
+        if intent == "follow_up":
+            min_w, max_w = 1000, 5000  # 特殊處理 follow_up 意圖
+        word_min = max(word_min, min_w)
+        word_max = min(word_max, max_w)
+    
+    # 根據提示長度動態調整字數
+    prompt_length = len(context) + len(data) + len(system) + 500  # 預估提示長度
+    length_factor = min(prompt_length / CONFIG["max_prompt_length"], 1.0)  # 比例因子
+    word_min = int(word_min + (word_max - word_min) * length_factor * 0.3)  # 動態調整最小字數
+    word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))  # 動態調整最大字數
     
     is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
     
@@ -359,7 +363,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             )
         elif intent == "recommend_threads":
             instruction_parts.append(
-                f"推薦2-3個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
+                f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
             )
     
     # 合併指令為單一任務
