@@ -17,7 +17,7 @@ CONFIG = {
     "default_intents": ["contextual_analysis", "semantic_query", "time_sensitive_analysis"],
     "error_prompt_template": "在 {selected_cat} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
     "min_keywords": 1,
-    "max_keywords": 8,  # 增加關鍵詞數量以捕捉更廣泛語義
+    "max_keywords": 8,
     "intent_confidence_threshold": 0.75,
     "default_word_ranges": {
         "contextual_analysis": (500, 800),
@@ -158,10 +158,15 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="r
                         logger.debug(f"意圖分析失敗：狀態碼={response.status}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
-                    if not data.get("choices"):
-                        logger.debug(f"意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
+                    if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                        logger.debug(f"意圖分析失敗：缺少有效回應，嘗試次數={attempt + 1}")
                         continue
-                    result = json.loads(data["choices"][0]["message"]["content"])
+                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        result = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"JSON 解析失敗：{str(e)}，原始回應={content}")
+                        continue
                     intents = result.get("intents", [{"intent": "semantic_query", "confidence": 0.7, "reason": "默認語義分析"}])
                     reason = result.get("reason", "語義匹配")
                     
@@ -198,9 +203,6 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="r
     }
 
 async def extract_keywords(query, conversation_context, grok3_api_key):
-    """
-    提取查詢中的語義關鍵詞和相關詞，考慮 Reddit 和 LIHKG 上下文。
-    """
     generic_terms = ["post", "分享", "什麼", "如何", "有咩", "點樣"]
     
     prompt = f"""
@@ -245,10 +247,15 @@ async def extract_keywords(query, conversation_context, grok3_api_key):
                         logger.debug(f"關鍵詞提取失敗：狀態碼={response.status}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
-                    if not data.get("choices"):
-                        logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
+                    if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                        logger.debug(f"關鍵詞提取失敗：缺少有效回應，嘗試次數={attempt + 1}")
                         continue
-                    result = json.loads(data["choices"][0]["message"]["content"])
+                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        result = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"JSON 解析失敗：{str(e)}，原始回應={content}")
+                        continue
                     keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
                     related_terms = result.get("related_terms", [])
                     return {
@@ -271,19 +278,15 @@ async def extract_keywords(query, conversation_context, grok3_api_key):
     }
 
 async def extract_relevant_thread(conversation_context, query, grok3_api_key):
-    """
-    從對話歷史中提取相關帖子，基於語義相似度。
-    """
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None, "無對話歷史"
     
-    query_keyword_result = await extract_keywords(query, conversation_context, grok3_api_key)
-    query_keywords = set(query_keyword_result["keywords"] + query_keyword_result["related_terms"])
+    keyword_result = await extract_keywords(query, conversation_context, grok3_api_key)
+    query_keywords = keyword_result["keywords"] + keyword_result["related_terms"]
     
     follow_up_phrases = ["詳情", "更多", "進一步", "為什麼", "再講", "繼續", "點解", "講多D", "仲有咩"]
     is_follow_up_query = any(phrase in query for phrase in follow_up_phrases)
     
-    # 語義相似度分析
     prompt = f"""
     比較以下查詢和對話歷史，找出最相關的帖子 ID，基於語義相似度。
     查詢：{query}
@@ -322,7 +325,15 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
                     logger.debug(f"相關帖子提取失敗：狀態碼={response.status}")
                     return None, None, None, "API 請求失敗"
                 data = await response.json()
-                result = json.loads(data["choices"][0]["message"]["content"])
+                if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                    logger.debug(f"相關帖子提取失敗：缺少有效回應")
+                    return None, None, None, "缺少有效回應"
+                content = data["choices"][0]["message"]["content"]
+                try:
+                    result = json.loads(content)
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON 解析失敗：{str(e)}，原始回應={content}")
+                    return None, None, None, "JSON 解析失敗"
                 thread_id = result.get("thread_id")
                 title = result.get("title")
                 reason = result.get("reason", "未提供原因")
@@ -358,7 +369,6 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
         f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
     )
     
-    # 動態計算字數範圍
     word_min = 500
     word_max = 800
     for intent_info in intents:
@@ -372,7 +382,6 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     word_min = int(word_min + (word_max - word_min) * length_factor * 0.3)
     word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))
     
-    # 動態生成指令
     instruction_parts = []
     format_instructions = []
     for intent_info in intents[:2]:
@@ -452,9 +461,6 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     return prompt
 
 def format_context(conversation_context):
-    """
-    格式化對話歷史，簡化為結構化 JSON。
-    """
     try:
         return [
             {"role": msg["role"], "content": msg["content"][:500]}
@@ -465,9 +471,6 @@ def format_context(conversation_context):
         return []
 
 def extract_thread_metadata(metadata):
-    """
-    提取帖子元數據的關鍵字段。
-    """
     try:
         return [
             {
