@@ -18,17 +18,22 @@ CONFIG = {
     "min_keywords": 1,            # 最小關鍵詞數量
     "max_keywords": 3,            # 最大關鍵詞數量
     "default_word_ranges": {
-        "summarize": (600, 1000),
-        "sentiment": (420, 700),
+        "summarize_posts": (600, 1000),
+        "analyze_sentiment": (420, 700),
         "follow_up": (700, 2100),
         "fetch_thread_by_id": (500, 800),
-        "general": (280, 560)
+        "general_query": (280, 560),
+        "list_titles": (280, 560),
+        "find_themed": (420, 1000),
+        "fetch_dates": (280, 800),
+        "search_keywords": (420, 1000),
+        "recommend_threads": (280, 800)
     }
 }
 
 async def parse_query(query, conversation_context, grok3_api_key, source_type="lihkg"):
     """
-    解析用戶查詢，提取意圖、關鍵詞、時間範圍和上下文。
+    解析用戶查詢，提取多個意圖（最多3個）、關鍵詞、時間範圍和上下文。
     返回結構化 JSON 結果。
     """
     conversation_context = conversation_context or []
@@ -43,7 +48,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     if id_match:
         thread_id = id_match.group(1)
         return {
-            "intent": "fetch_thread_by_id",
+            "intents": [{"intent": "fetch_thread_by_id", "confidence": 0.95, "reason": f"檢測到明確帖子 ID {thread_id}"}],
             "keywords": keywords,
             "time_range": "all",
             "thread_ids": [thread_id],
@@ -57,7 +62,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     )
     if thread_id:
         return {
-            "intent": "follow_up",
+            "intents": [{"intent": "follow_up", "confidence": 0.90, "reason": f"檢測到追問，匹配帖子 ID {thread_id}"}],
             "keywords": keywords,
             "time_range": "all",
             "thread_ids": [thread_id],
@@ -65,9 +70,9 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             "confidence": 0.90
         }
     
-    # 語義意圖分析
+    # 語義意圖分析（支持多意圖）
     prompt = f"""
-你是語義分析助手，請分析以下查詢並分類意圖，考慮對話歷史和關鍵詞。
+你是語義分析助手，請分析以下查詢並分類最多3個意圖，考慮對話歷史和關鍵詞。
 查詢：{query}
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
@@ -86,9 +91,12 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     "fetch_thread_by_id": "根據明確的帖子 ID 抓取內容"
 }, ensure_ascii=False, indent=2)}
 輸出格式：{{
-  "intent": "最匹配的意圖",
-  "confidence": 0.0-1.0,
-  "reason": "匹配原因"
+  "intents": [
+    {{"intent": "意圖1", "confidence": 0.0-1.0, "reason": "匹配原因"}},
+    {{"intent": "意圖2", "confidence": 0.0-1.0, "reason": "匹配原因"}},
+    ...
+  ],
+  "reason": "整體匹配原因"
 }}
 """
     headers = {
@@ -102,7 +110,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 200,
+        "max_tokens": 300,  # 增加 max_tokens 以支持多意圖輸出
         "temperature": 0.5
     }
     
@@ -123,18 +131,17 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         logger.debug(f"意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    intent = result.get("intent", "summarize_posts")
-                    confidence = result.get("confidence", 0.7)
+                    intents = result.get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "語義匹配"}])
                     reason = result.get("reason", "語義匹配")
                     
                     time_range = "recent" if time_sensitive else "all"
                     return {
-                        "intent": intent,
+                        "intents": intents[:3],  # 限制最多3個意圖
                         "keywords": keywords,
                         "time_range": time_range,
                         "thread_ids": [],
                         "reason": reason,
-                        "confidence": confidence
+                        "confidence": max(intent["confidence"] for intent in intents) if intents else 0.7
                     }
         except Exception as e:
             logger.debug(f"意圖分析錯誤：{str(e)}，嘗試次數={attempt + 1}")
@@ -144,7 +151,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     
     # 回退到默認意圖
     return {
-        "intent": "summarize_posts",
+        "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "意圖分析失敗，默認總結帖子"}],
         "keywords": keywords,
         "time_range": "all",
         "thread_ids": [],
@@ -241,10 +248,10 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
 
 async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
     """
-    動態構建提示，根據查詢解析結果、上下文和數據生成。
+    動態構建提示，根據查詢解析結果、上下文和數據生成，支持多意圖。
     """
     parsed_query = await parse_query(query, conversation_context, grok3_api_key)
-    intent = intent or parsed_query["intent"]
+    intents = parsed_query["intents"]
     keywords = parsed_query["keywords"]
     time_range = parsed_query["time_range"]
     
@@ -252,7 +259,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
         "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-        "禁止使用 [post_id: ...] 格式。"
+        "禁止使用 [post_id: ...] 格式。每個任務的回應以 ### 標題分隔，例如 ### 總結, ### 情緒分析。"
     )
     
     # 上下文
@@ -269,39 +276,65 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
         f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
     )
     
-    # 動態指導語
+    # 動態指導語（支持多意圖）
     instructions = ["任務："]
-    word_min, word_max = CONFIG["default_word_ranges"].get(intent, (420, 1000))
-    
-    if intent == "summarize_posts":
-        instructions.append(
-            f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，引用高點讚回覆。"
-            f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
-        )
-    elif intent == "analyze_sentiment":
-        instructions.append(
-            f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例。"
-            f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
-        )
-    elif intent == "follow_up":
-        instructions.append(
-            f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，引用高點讚或最新回覆。"
-            f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
-        )
-    elif intent == "fetch_thread_by_id":
-        instructions.append(
-            f"根據提供的帖子 ID 總結內容，引用高點讚或最新回覆。"
-            f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
-        )
-    elif intent == "general_query":
-        instructions.append(
-            f"提供與問題相關的簡化總結或回答，基於元數據推測話題。"
-            f"字數：{word_min}-{word_max}字。"
-        )
+    for intent_info in intents[:3]:  # 限制最多3個意圖
+        intent = intent_info["intent"]
+        word_min, word_max = CONFIG["default_word_ranges"].get(intent, (420, 1000))
+        if intent == "summarize_posts":
+            instructions.append(
+                f"### 總結\n總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，引用高點讚回覆。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "analyze_sentiment":
+            instructions.append(
+                f"### 情緒分析\n分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "follow_up":
+            instructions.append(
+                f"### 追問\n深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，引用高點讚或最新回覆。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "fetch_thread_by_id":
+            instructions.append(
+                f"### 特定帖子\n根據提供的帖子 ID 總結內容，引用高點讚或最新回覆。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "general_query":
+            instructions.append(
+                f"### 一般查詢\n提供與問題相關的簡化總結或回答，基於元數據推測話題。"
+                f"字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "list_titles":
+            instructions.append(
+                f"### 列出標題\n列出最多5個帖子的標題，聚焦關鍵詞 {keywords}。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "find_themed":
+            instructions.append(
+                f"### 主題搜索\n尋找與關鍵詞 {keywords} 相關的帖子，總結其內容。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "fetch_dates":
+            instructions.append(
+                f"### 日期提取\n提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "search_keywords":
+            instructions.append(
+                f"### 關鍵詞搜索\n搜索包含關鍵詞 {keywords} 的帖子，總結其內容。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
+        elif intent == "recommend_threads":
+            instructions.append(
+                f"### 推薦帖子\n推薦2-3個熱門或相關帖子，基於回覆數和點讚數。"
+                f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
+            )
     
     # 錯誤處理
     instructions.append(
-        f"若無匹配帖子，回應：「{CONFIG['error_prompt_template'].format(selected_cat=selected_source, filters=json.dumps(filters))}」"
+        f"### 錯誤處理\n若無匹配帖子，回應：「{CONFIG['error_prompt_template'].format(selected_cat=selected_source, filters=json.dumps(filters))}」"
     )
     
     # 時間範圍
