@@ -153,6 +153,11 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         post_limit = len(top_thread_ids) or 2
         data_type = "replies"
     
+    processing = {
+        "intents": [i["intent"] for i in intents],
+        "top_thread_ids": top_thread_ids
+    }
+    
     logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}")
     return {
         "direct_response": all(i["intent"] in ["general_query", "introduce"] for i in intents),
@@ -163,7 +168,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "data_type": data_type,
         "post_limit": post_limit,
         "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
-        "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids},
+        "processing": processing,
         "candidate_thread_ids": top_thread_ids,
         "top_thread_ids": top_thread_ids,
         "needs_advanced_analysis": confidence < 0.7,
@@ -324,7 +329,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         logger.error(f"無效的處理數據格式：預期 dict，得到 {type(processing)}")
         yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
         return
+    
     intents = processing.get('intents', ['summarize_posts'])
+    if not isinstance(intents, list):
+        logger.error(f"無效的 intents 格式：預期 list，得到 {type(intents)}")
+        intents = ['summarize_posts']
+    
+    logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}")
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -355,6 +366,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         word_min, word_max = intent_word_ranges.get(intent, (500, 800))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
+    
+    if isinstance(thread_data, str):
+        logger.error(f"無效的 thread_data 格式：預期 list 或 dict，得到 str：{thread_data}")
+        yield f"錯誤：無效的 thread_data 格式（字符串）。請聯繫支持。"
+        return
     
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
     length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
@@ -571,14 +587,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    # 生成融合多意圖的提示
+    # 傳遞 intents 列表而非單一 intent
     prompt = await build_dynamic_prompt(
         query=user_query,
         conversation_context=conversation_context,
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
-        intent=None,  # 傳遞 None，讓 build_dynamic_prompt 處理所有意圖
+        intents=intents,  # 傳遞完整的 intents 列表
         selected_source=selected_source,
         grok3_api_key=GROK3_API_KEY
     )
@@ -616,7 +632,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
-            intent=None,
+            intents=intents,
             selected_source=selected_source,
             grok3_api_key=GROK3_API_KEY
         )
@@ -884,7 +900,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 ][:5 - len(thread_data)]
                 request_counter = supplemental_result.get("request_counter", request_counter)
                 last_reset = supplemental_result.get("last_reset", last_reset)
-                rate_limit_until = result.get("rate_limit_until", rate_limit_until)
+                rate_limit_until = supplemental_result.get("rate_limit_until", rate_limit_until)
                 rate_limit_info.extend(supplemental_result.get("rate_limit_info", []))
                 
                 supplemental_tasks = []
