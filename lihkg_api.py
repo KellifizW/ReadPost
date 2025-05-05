@@ -180,7 +180,7 @@ def get_category_name(cat_id):
 
 async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
     """
-    抓取指定分類的帖子標題列表。
+    抓取指定分類的帖子標題列表，確保返回的貼文符合指定分類。
     """
     items = []
     rate_limit_info = []
@@ -194,9 +194,21 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response", {}).get("items"):
-            filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
+            filtered_items = [
+                item for item in data["response"]["items"]
+                if item.get("title") and item.get("no_of_reply", 0) > 0 and
+                (cat_id in ["1", "2"] or str(item.get("cat_id")) == str(cat_id))
+            ]
             items.extend(filtered_items)
-            logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
+            logger.info(
+                json.dumps({
+                    "event": "lihkg_topic_fetch",
+                    "cat_id": cat_id,
+                    "page": page,
+                    "items_fetched": len(filtered_items),
+                    "item_cat_ids": [item.get("cat_id") for item in filtered_items]
+                }, ensure_ascii=False)
+            )
         else:
             logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
         
@@ -396,19 +408,19 @@ async def verify_lihkg_thread_category(thread_id, selected_cat_id=None):
     Returns:
         Dict: 包含 thread_id 和找到的分類信息
     """
-    try:
-        import streamlit as st  # 假設使用 Streamlit 的 session_state
-    except ImportError:
-        st = None  # 如果不使用 Streamlit，緩存將使用本地字典
-        logger.warning("Streamlit not available, using local cache for verification")
-
-    # 初始化本地緩存（如果不使用 Streamlit）
+    # 初始化本地緩存
     local_cache = getattr(verify_lihkg_thread_category, "local_cache", {})
     verify_lihkg_thread_category.local_cache = local_cache
 
     # 檢查緩存
     cache_key = f"thread_{thread_id}_category"
-    cache = st.session_state.thread_cache if st and hasattr(st, "session_state") else local_cache
+    try:
+        import streamlit as st
+        cache = st.session_state.thread_cache if hasattr(st, "session_state") else local_cache
+    except ImportError:
+        cache = local_cache
+        logger.debug("Streamlit not available, using local cache for verification")
+
     if cache_key in cache:
         cached_data = cache[cache_key]
         if time.time() - cached_data["timestamp"] < 300:  # 緩存 5 分鐘
