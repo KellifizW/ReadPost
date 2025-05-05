@@ -10,17 +10,60 @@ import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
-from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords
+from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 120000
-API_TIMEOUT = 90
+GROK3_TOKEN_LIMIT = CONFIG["max_prompt_length"]
+API_TIMEOUT = CONFIG["parse_timeout"]
 MAX_CACHE_SIZE = 100
 
 cache_lock = asyncio.Lock()
 request_semaphore = asyncio.Semaphore(5)
+
+def clean_html(text):
+    if not isinstance(text, str):
+        return "[無內容]"
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text if text else "[無內容]"
+
+def clean_response(content):
+    content = content.replace('\n\n', '\n').strip()
+    content = re.sub(r'\[\s*\]', '', content)
+    return content
+
+async def summarize_context(conversation_context):
+    if not conversation_context:
+        return {"theme": "一般", "keywords": []}
+    last_messages = conversation_context[-3:]
+    prompt = f"""
+    總結以下對話歷史，提取主要主題（最多3個詞）和關鍵詞（最多5個）。
+    對話歷史：{json.dumps(last_messages, ensure_ascii=False)}
+    輸出格式：{{
+      "theme": "主題",
+      "keywords": ["關鍵詞1", "關鍵詞2", ...]
+    }}
+    """
+    try:
+        GROK3_API_KEY = st.secrets["grok3key"]
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
+        payload = {
+            "model": "grok-3",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 100,
+            "temperature": 0.5
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data["choices"][0]["message"]["content"]
+                    return json.loads(content)
+    except Exception as e:
+        logger.warning(f"上下文總結失敗：{str(e)}")
+    return {"theme": "一般", "keywords": []}
 
 async def analyze_and_screen(user_query, source_name, source_id, source_type="reddit", conversation_context=None):
     conversation_context = conversation_context or []
@@ -64,8 +107,8 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="re
     historical_theme = context_summary.get("theme", "一般")
     historical_keywords = context_summary.get("keywords", [])
     
-    has_high_confidence_list_titles = any(i["intent"] == "list_titles" and i["confidence"] >= 0.9 for i in intents)
-    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題"]) and not has_high_confidence_list_titles
+    has_high_confidence_list_titles = any(i["intent"] == "list_titles" and i["confidence"] >= CONFIG["intent_confidence_threshold"] for i in intents)
+    is_vague = len(query_keywords) < CONFIG["min_keywords"] and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題"]) and not has_high_confidence_list_titles
     
     if is_vague and historical_theme != "一般":
         intents = [{"intent": "contextual_analysis", "confidence": 0.7, "reason": f"問題模糊，延續歷史主題：{historical_theme}"}]
@@ -97,7 +140,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="re
         "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids},
         "candidate_thread_ids": top_thread_ids,
         "top_thread_ids": top_thread_ids,
-        "needs_advanced_analysis": confidence < 0.7,
+        "needs_advanced_analysis": confidence < CONFIG["intent_confidence_threshold"],
         "reason": reason,
         "theme_keywords": theme_keywords
     }
@@ -156,7 +199,7 @@ reason 簡潔，不超50字。
         "temperature": 0.7
     }
     
-    max_retries = 3
+    max_retries = CONFIG["max_parse_retries"]
     for attempt in range(max_retries):
         try:
             async with aiohttp.ClientSession() as session:
@@ -264,7 +307,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     
     if not thread_data:
-        error_msg = f"在 {selected_source['source_name']} 中未找到符合條件的帖子（篩選：{json.dumps(filters)}）。建議嘗試其他關鍵詞或討論區！"
+        error_msg = CONFIG["error_prompt_template"].format(selected_cat=selected_source['source_name'], filters=json.dumps(filters))
         logger.warning(f"無匹配帖子：{error_msg}")
         yield error_msg
         return
@@ -282,19 +325,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤：缺少 API 密鑰"
         return
     
-    intent_word_ranges = {
-        "contextual_analysis": (700, 2800),
-        "semantic_query": (700, 2800),
-        "time_sensitive_analysis": (700, 2800),
-        "follow_up": (1000, 5000),
-        "fetch_thread_by_id": (700, 2800),
-        "list_titles": (140, 400)
-    }
+    intent_word_ranges = CONFIG["default_word_ranges"]
     
     total_min_tokens = 0
     total_max_tokens = 0
     for intent in intents:
-        word_min, word_max = intent_word_ranges.get(intent, (700, 2800))
+        word_min, word_max = intent_word_ranges.get(intent, (500, 800))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
@@ -381,6 +417,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         if not referenced_thread_ids and any(intent == "follow_up" for intent in intents):
             keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
             theme_keywords = keyword_result["keywords"]
+            if not theme_keywords:
+                theme_keywords = user_query.split()[:CONFIG["max_keywords"]]
             async with request_semaphore:
                 if source_type == "lihkg":
                     supplemental_result = await get_lihkg_topic_list(
@@ -563,21 +601,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.warning(f"提示長度超過限制：初始長度={prompt_length} > {GROK3_TOKEN_LIMIT}，縮減數據")
-        max_replies_per_thread = max_replies_per_thread // 2
-        total_replies_count = 0
-        filtered_thread_data = {
-            tid: {
-                "thread_id": data["thread_id"],
-                "title": data["title"],
-                "no_of_reply": data.get("no_of_reply", 0),
-                "last_reply_time": data.get("last_reply_time", 0),
-                "like_count": data.get("like_count", 0),
-                "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
-                "replies": data["replies"][:max_replies_per_thread],
-                "fetched_pages": data.get("fetched_pages", []),
-                "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
-            } for tid, data in filtered_thread_data.items()
-        }
+        filtered_thread_data = dict(list(filtered_thread_data.items())[:2])
         total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
         prompt = await build_dynamic_prompt(
             query=user_query,
@@ -664,6 +688,32 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         finally:
             await session.close()
 
+def configure_lihkg_api_logger():
+    lihkg_logger = logging.getLogger("lihkg_api")
+    lihkg_logger.setLevel(logging.DEBUG)
+    if not lihkg_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        lihkg_logger.addHandler(handler)
+
+def configure_reddit_api_logger():
+    reddit_logger = logging.getLogger("reddit_api")
+    reddit_logger.setLevel(logging.DEBUG)
+    if not reddit_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        reddit_logger.addHandler(handler)
+
+def clean_cache():
+    current_time = time.time()
+    async with cache_lock:
+        expired = [k for k, v in st.session_state.get("thread_cache", {}).items() if current_time - v["timestamp"] > 3600]
+        for k in expired:
+            del st.session_state.thread_cache[k]
+        while len(st.session_state.get("thread_cache", {})) > MAX_CACHE_SIZE:
+            oldest_key = min(st.session_state.thread_cache, key=lambda k: st.session_state.thread_cache[k]["timestamp"])
+            del st.session_state.thread_cache[oldest_key]
+
 async def process_user_question(user_query, selected_source, source_id, source_type="reddit", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     if source_type == "lihkg":
         configure_lihkg_api_logger()
@@ -730,11 +780,15 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         min_replies = filters.get("min_replies", 10)
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
         intents = analysis.get("intents", [{"intent": "contextual_analysis", "confidence": 0.5, "reason": "默認意圖"}])
+        time_range = analysis.get("time_range", "all")
         
         logger.info(f"處理用戶問題：intents={[i['intent'] for i in intents]}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
         
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-        fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
+        theme_keywords = keyword_result["keywords"]
+        if not theme_keywords:
+            theme_keywords = user_query.split()[:CONFIG["max_keywords"]]
+        fetch_last_pages = 1 if time_range == "recent" or keyword_result.get("time_sensitive", False) else 0
         
         max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
         max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 100
@@ -822,9 +876,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             }
             
             if len(thread_data) < 5 and any(i["intent"] == "follow_up" for i in intents):
-                keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-                theme_keywords = keyword_result["keywords"]
-                
                 async with request_semaphore:
                     if source_type == "lihkg":
                         supplemental_result = await get_lihkg_topic_list(
