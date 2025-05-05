@@ -83,7 +83,8 @@ async def summarize_context(conversation_context):
                 logger.info(
                     f"Grok3 API 調用：函數=summarize_context, "
                     f"狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                    f"輸出 token={completion_tokens}, 回應={response_content}"
+                    f"輸出 token={completion_tokens}, 回應={response_content}, "
+                    f"提示長度={len(prompt)} 字符"
                 )
                 result = json.loads(response_content)
                 return result
@@ -126,7 +127,6 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     historical_theme = context_summary.get("theme", "一般")
     historical_keywords = context_summary.get("keywords", [])
     
-    # 檢查高信心的 list_titles 意圖
     has_high_confidence_list_titles = any(i["intent"] == "list_titles" and i["confidence"] >= 0.9 for i in intents)
     is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"]) and not has_high_confidence_list_titles
     
@@ -140,7 +140,6 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
     theme_keywords = historical_keywords if is_vague else query_keywords
     
-    # 設置 post_limit，確保 list_titles 為 15
     post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else (20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5)
     data_type = "both" if not all(i["intent"] in ["general_query", "introduce"] for i in intents) else "none"
     
@@ -188,7 +187,6 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                 "intent_breakdown": [{"intent": "follow_up", "thread_ids": referenced_thread_ids[:2]}]
             }
 
-    # 統一 threads 的 thread_id 為字符串
     threads = [{"thread_id": str(t["thread_id"]), **t} for t in threads]
     prompt = f"""
 你是帖子優先級排序助手，請根據用戶查詢和多個意圖，從提供的帖子中選出最多20個最相關的帖子。
@@ -237,14 +235,14 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                     logger.info(
                         f"Grok3 API 調用：函數=prioritize_threads_with_grok, "
                         f"查詢={user_query}, 狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                        f"輸出 token={completion_tokens}, 回應={response_content}"
+                        f"輸出 token={completion_tokens}, 回應={response_content}, "
+                        f"提示長度={len(prompt)} 字符"
                     )
                     try:
                         result = json.loads(response_content)
                         top_thread_ids = result.get("top_thread_ids", [])
                         reason = result.get("reason", "無排序原因")
                         intent_breakdown = result.get("intent_breakdown", [])
-                        # 統一 thread_id 為字符串
                         top_thread_ids = [str(tid) for tid in top_thread_ids]
                         thread_id_set = {str(t["thread_id"]) for t in threads}
                         valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in thread_id_set]))
@@ -310,6 +308,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
+    if not thread_data:
+        error_msg = f"在 {selected_source} 中未找到符合條件的帖子（篩選：{json.dumps(filters)}）。建議嘗試其他關鍵詞或討論區！"
+        logger.warning(f"無匹配帖子：{error_msg}")
+        yield error_msg
+        return
+
     if not isinstance(processing, dict):
         logger.error(f"無效的處理數據格式：預期 dict，得到 {type(processing)}")
         yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
@@ -356,6 +360,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_tokens = min(target_tokens + 500, max_tokens_limit)
     max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 100
     max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
+
+    # 對於 list_titles 意圖，限制回覆數量以減少提示長度
+    if any(intent == "list_titles" for intent in intents):
+        max_replies_per_thread = 10
+
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
@@ -387,7 +396,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         logger.info(
                             f"Grok3 API 調用：函數=stream_grok3_response (reply_count), "
                             f"查詢={user_query}, 狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                            f"輸出 token={completion_tokens}, 回應={response_content}"
+                            f"輸出 token={completion_tokens}, 回應={response_content}, "
+                            f"提示長度={len(reply_count_prompt)} 字符"
                         )
                         result = json.loads(response_content)
                         max_replies_per_thread = min(result.get("replies_per_thread", 300 if any(intent == "follow_up" for intent in intents) else 100), 500)
@@ -563,13 +573,21 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
-        intent=intents[0],  # 使用主導意圖傳遞給 build_dynamic_prompt
+        intent=intents[0],
         selected_source=selected_source,
         grok3_api_key=GROK3_API_KEY
     )
     
     prompt_length = len(prompt)
+    estimated_tokens = prompt_length // 4
+    logger.info(
+        f"生成提示：函數=stream_grok3_response, 查詢={user_query}, "
+        f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
+        f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
+    )
+    
     if prompt_length > GROK3_TOKEN_LIMIT:
+        logger.warning(f"提示長度超過限制：{prompt_length} > {GROK3_TOKEN_LIMIT}，縮減數據")
         max_replies_per_thread = max_replies_per_thread // 2
         total_replies_count = 0
         filtered_thread_data = {
@@ -595,6 +613,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             intent=intents[0],
             selected_source=selected_source,
             grok3_api_key=GROK3_API_KEY
+        )
+        prompt_length = len(prompt)
+        estimated_tokens = prompt_length // 4
+        logger.info(
+            f"縮減後提示：函數=stream_grok3_response, 查詢={user_query}, "
+            f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
+            f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
         )
         target_tokens = total_min_tokens + (total_replies_count / 500) * (total_max_tokens - total_min_tokens) * 0.9
         target_tokens = min(max(int(target_tokens), total_min_tokens), max_tokens_limit)
