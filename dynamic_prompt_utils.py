@@ -17,7 +17,7 @@ CONFIG = {
     "default_intents": ["recommend_threads", "summarize_posts", "contextual_analysis", "semantic_query", "time_sensitive_analysis"],
     "error_prompt_template": "在 {selected_cat} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
     "min_keywords": 1,
-    "max_keywords": 8,  # 增加關鍵詞數量以捕捉更廣泛語義
+    "max_keywords": 8,
     "intent_confidence_threshold": 0.75,
     "default_word_ranges": {
         "summarize_posts": (600, 1000),
@@ -220,9 +220,6 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     }
 
 async def extract_keywords(query, conversation_context, grok3_api_key):
-    """
-    提取查詢中的語義關鍵詞和相關詞，考慮 Reddit 和 LIHKG 上下文。
-    """
     generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何"]
     
     prompt = f"""
@@ -293,9 +290,6 @@ async def extract_keywords(query, conversation_context, grok3_api_key):
     }
 
 async def extract_relevant_thread(conversation_context, query, grok3_api_key):
-    """
-    從對話歷史中提取相關帖子，基於語義相似度。
-    """
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None, "無對話歷史"
     
@@ -305,7 +299,6 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
     follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"]
     is_follow_up_query = any(phrase in query for phrase in follow_up_phrases)
     
-    # 語義相似度分析
     prompt = f"""
     比較以下查詢和對話歷史，找出最相關的帖子 ID，基於語義相似度。
     查詢：{query}
@@ -355,12 +348,25 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
         logger.debug(f"相關帖子提取錯誤：{str(e)}")
         return None, None, None, f"提取錯誤：{str(e)}"
 
-async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
+async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intents, selected_source, grok3_api_key):
+    logger.info(f"生成動態提示：查詢={query}, intents={intents}")
+    
+    if not isinstance(intents, list) or not intents:
+        logger.warning(f"無效的 intents 格式：預期非空列表，得到 {type(intents)}，回退到 ['summarize_posts']")
+        intents = ["summarize_posts"]
+    
     parsed_query = await parse_query(query, conversation_context, grok3_api_key, selected_source.get("source_type", "lihkg"))
-    intents = parsed_query["intents"]
+    parsed_intents = parsed_query["intents"]
     keywords = parsed_query["keywords"]
     related_terms = parsed_query["related_terms"]
     time_range = parsed_query["time_range"]
+    
+    # 合併並去重 intents，保留 parsed_query 中的高信心意圖
+    intent_set = set(intent["intent"] for intent in parsed_intents)
+    for intent in intents:
+        if intent not in intent_set:
+            parsed_intents.append({"intent": intent, "confidence": 0.7, "reason": "從外部傳入的意圖"})
+    intents = parsed_intents[:3]  # 限制最多3個意圖
     
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
@@ -400,7 +406,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     # 動態生成指令並指定回應格式
     instruction_parts = []
     format_instructions = []
-    for intent_info in intents[:3]:
+    for intent_info in intents:
         intent = intent_info["intent"]
         if intent == "summarize_posts":
             instruction_parts.append(
@@ -523,12 +529,10 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             f"[Instructions]\n{combined_instruction}"
         )
     
+    logger.info(f"動態提示生成完成：長度={len(prompt)} 字符，intents={[i['intent'] for i in intents]}")
     return prompt
 
 def format_context(conversation_context):
-    """
-    格式化對話歷史，簡化為結構化 JSON。
-    """
     try:
         return [
             {"role": msg["role"], "content": msg["content"][:500]}
@@ -539,9 +543,6 @@ def format_context(conversation_context):
         return []
 
 def extract_thread_metadata(metadata):
-    """
-    提取帖子元數據的關鍵字段。
-    """
     try:
         return [
             {
