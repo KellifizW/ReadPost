@@ -367,12 +367,19 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
-    if isinstance(thread_data, str):
-        logger.error(f"無效的 thread_data 格式：預期 list 或 dict，得到 str：{thread_data}")
-        yield f"錯誤：無效的 thread_data 格式（字符串）。請聯繫支持。"
+    # Validate thread_data type
+    if not isinstance(thread_data, (list, dict)):
+        logger.error(f"無效的 thread_data 格式：預期 list 或 dict，得到 {type(thread_data)}：{thread_data}")
+        yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
         return
     
-    prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
+    thread_data_dict = {}
+    if isinstance(thread_data, list):
+        thread_data_dict = {str(data["thread_id"]): data for data in thread_data if isinstance(data, dict) and "thread_id" in data}
+    elif isinstance(thread_data, dict):
+        thread_data_dict = thread_data
+    
+    prompt_length = len(json.dumps(thread_data_dict, ensure_ascii=False)) + len(user_query) + 1000
     length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
     target_tokens = total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor
     target_tokens = min(max(int(target_tokens), total_min_tokens), total_max_tokens)
@@ -427,16 +434,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         except Exception as e:
             logger.warning(f"每帖子回覆數選擇失敗：{str(e)}")
 
-    thread_data_dict = {}
-    if isinstance(thread_data, list):
-        thread_data_dict = {str(data["thread_id"]): data for data in thread_data if isinstance(data, dict) and "thread_id" in data}
-    elif isinstance(thread_data, dict):
-        thread_data_dict = thread_data
-    else:
-        logger.error(f"無效的 thread_data 格式：預期 list 或 dict，得到 {type(thread_data)}")
-        yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
-        return
-    
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         referenced_thread_ids = []
         if any(intent == "follow_up" for intent in intents):
