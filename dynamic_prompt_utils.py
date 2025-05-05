@@ -287,7 +287,8 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
         "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-        "禁止使用 [post_id: ...] 格式。回應應為單一連貫段落，避免使用 ### 分隔，除非用戶明確要求分段。"
+        "禁止使用 [post_id: ...] 格式。根據用戶意圖動態選擇回應格式（例如列表、段落、表格等），"
+        "確保結構清晰、內容連貫，且適合查詢的需求。"
     )
     
     context = (
@@ -303,77 +304,106 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     )
     
     # 動態計算字數範圍
-    word_min = 700  # 設置最小字數
-    word_max = 2800  # 設置最大字數
+    word_min = 700
+    word_max = 2800
     for intent_info in intents:
         intent = intent_info["intent"]
         min_w, max_w = CONFIG["default_word_ranges"].get(intent, (700, 2800))
         if intent == "follow_up":
-            min_w, max_w = 1000, 5000  # 特殊處理 follow_up 意圖
+            min_w, max_w = 1000, 5000
         word_min = max(word_min, min_w)
         word_max = min(word_max, max_w)
     
-    # 根據提示長度動態調整字數
-    prompt_length = len(context) + len(data) + len(system) + 500  # 預估提示長度
-    length_factor = min(prompt_length / CONFIG["max_prompt_length"], 1.0)  # 比例因子
-    word_min = int(word_min + (word_max - word_min) * length_factor * 0.3)  # 動態調整最小字數
-    word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))  # 動態調整最大字數
+    prompt_length = len(context) + len(data) + len(system) + 500
+    length_factor = min(prompt_length / CONFIG["max_prompt_length"], 1.0)
+    word_min = int(word_min + (word_max - word_min) * length_factor * 0.3)
+    word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))
     
     is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
     
-    # 合併多意圖指令
+    # 動態生成指令並指定回應格式
     instruction_parts = []
+    format_instructions = []
     for intent_info in intents[:3]:
         intent = intent_info["intent"]
         if intent == "summarize_posts":
             instruction_parts.append(
                 f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，引用高點讚回覆，簡明扼要。"
             )
+            format_instructions.append(
+                "使用連貫段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，總結其核心討論。"
+            )
         elif intent == "analyze_sentiment":
             instruction_parts.append(
                 f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例，融入總結。"
+            )
+            format_instructions.append(
+                "使用段落格式，總結情緒分析結果，並以表格形式列出每個帖子的情緒比例。"
             )
         elif intent == "follow_up":
             instruction_parts.append(
                 f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，引用高點讚或最新回覆，補充上下文。"
             )
+            format_instructions.append(
+                "使用詳細段落格式，聚焦上下文連貫性，必要時分段以突出不同回覆的觀點。"
+            )
         elif intent == "fetch_thread_by_id":
             instruction_parts.append(
                 f"根據提供的帖子 ID 總結內容，引用高點讚或最新回覆，突出核心討論。"
+            )
+            format_instructions.append(
+                "使用單一段落格式，詳細總結指定帖子的內容，引用 [帖子 ID: {thread_id}]。"
             )
         elif intent == "general_query" and not is_vague:
             instruction_parts.append(
                 f"提供與問題相關的簡化總結，基於元數據推測話題，保持簡潔。"
             )
+            format_instructions.append(
+                "使用簡潔段落格式，直接回答問題，必要時引用相關帖子。"
+            )
         elif intent == "list_titles":
             instruction_parts.append(
                 f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，並簡述其相關性。"
+            )
+            format_instructions.append(
+                "使用有序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和簡短相關性說明。"
             )
         elif intent == "find_themed":
             instruction_parts.append(
                 f"尋找與關鍵詞 {keywords} 相關的帖子，總結其內容，突出主題關聯。"
             )
+            format_instructions.append(
+                "使用段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，強調主題相關性。"
+            )
         elif intent == "fetch_dates":
             instruction_parts.append(
                 f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，融入總結。"
+            )
+            format_instructions.append(
+                "使用表格格式，列出帖子 ID、標題和日期，後附簡短總結段落。"
             )
         elif intent == "search_keywords":
             instruction_parts.append(
                 f"搜索包含關鍵詞 {keywords} 的帖子，總結其內容，強調關鍵詞匹配。"
             )
+            format_instructions.append(
+                "使用段落格式，突出關鍵詞匹配，每個帖子以 [帖子 ID: {thread_id}] 開頭。"
+            )
         elif intent == "recommend_threads":
             instruction_parts.append(
                 f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
             )
+            format_instructions.append(
+                "使用無序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和推薦理由。"
+            )
     
-    # 合併指令為單一任務
     combined_instruction = (
         f"根據以下意圖綜合生成一個連貫的回應（字數：{word_min}-{word_max}字）：{'；'.join(instruction_parts)}"
-        f"確保回應聚焦用戶問題，綜合所有意圖，生成單一段落，引用帖子時標註 [帖子 ID: {{thread_id}}] {{標題}}。"
-        f"若有多個意圖，優先考慮主要意圖（信心值最高者），其他意圖作為輔助，確保內容不重複且流暢。"
+        f"根據意圖選擇最適合的回應格式：{'；'.join(format_instructions)}"
+        f"確保回應聚焦用戶問題，綜合所有意圖，內容不重複且流暢，引用帖子時標註 [帖子 ID: {{thread_id}}] {{標題}}。"
+        f"若有多個意圖，優先考慮主要意圖（信心值最高者），其他意圖作為輔助。"
     )
     
-    # 時間範圍
     if time_range != "all":
         combined_instruction += f"僅考慮 {time_range} 內的帖子。"
     
