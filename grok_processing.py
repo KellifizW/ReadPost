@@ -623,10 +623,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         {"role": "system", "content": (
             "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
             "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-            "禁止使用 [post_id: ...] 格式。回應必須分段，每段以 ### 分隔，結構清晰，包含以下段落："
-            "1. 簡介段：概述查詢背景和主要發現。"
-            "2. 詳細分析段：根據意圖提供具體內容（如總結、情緒分析、標題列表等）。"
-            "3. 結論段：總結回答並提供建議或後續行動。"
+            "禁止使用 [post_id: ...] 格式。根據用戶意圖動態選擇回應格式（例如列表、段落、表格等），"
+            "確保結構清晰、內容連貫，且適合查詢的需求。"
         )},
         *conversation_context,
         {"role": "user", "content": prompt}
@@ -666,7 +664,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 chunk = json.loads(line_str[6:])
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                 if content:
-                                    if "###" in content and ("Content Moderation" in content or "Blocked" in content):
+                                    if "Content Moderation" in content or "Blocked" in content:
                                         logger.warning(f"檢測到內容審核：{content}")
                                         raise ValueError("檢測到內容審核")
                                     cleaned_content = clean_response(content)
@@ -1072,7 +1070,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 tasks.append((idx, get_lihkg_thread_content(
                     thread_id=thread_id,
                     cat_id=source_id,
-                    max_replies=max_replies,
+                    max_replies=max_re pushes,
                     fetch_last_pages=fetch_last_pages,
                     specific_pages=[],
                     start_page=1
