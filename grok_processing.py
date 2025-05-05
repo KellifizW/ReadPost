@@ -213,7 +213,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     payload = {
         "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
+        "max_tokens": 500,
         "temperature": 0.7
     }
     
