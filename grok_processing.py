@@ -6,7 +6,7 @@ import datetime
 import time
 import logging
 import streamlit as st
-importELimport pytz
+import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
