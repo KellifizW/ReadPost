@@ -367,9 +367,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
-    # Validate thread_data type
-    if not isinstance(thread_data, list):
-        logger.error(f"無效的 thread_data 格式：預期 list，得到 {type(thread_data)}：{thread_data}")
+    # Validate thread_data type and convert if necessary
+    if isinstance(thread_data, dict):
+        logger.info(f"thread_data 為 dict，轉換為 list")
+        thread_data = list(thread_data.values())
+    elif not isinstance(thread_data, list):
+        logger.error(f"無效的 thread_data 格式：預期 list 或 dict，得到 {type(thread_data)}：{thread_data}")
         yield f"錯誤：無效的 thread_data 格式（{type(thread_data)}）。請聯繫支持。"
         return
     
@@ -590,7 +593,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    # 傳遞 intents 列表而非單一 intent
     prompt = await build_dynamic_prompt(
         query=user_query,
         conversation_context=conversation_context,
@@ -624,7 +626,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": data["replies"][:max_replies_per_thread],
-                "fetched_pages": data.get("fetched_pages", []),
+                "fetched_pages": data["fetched_pages"],
                 "total_fetched_replies": len(data["replies"][:max_replies_per_thread])
             } for tid, data in filtered_thread_data.items()
         }
@@ -1141,7 +1143,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         # 確保 thread_data 是列表格式
         if not isinstance(thread_data, list):
             logger.error(f"thread_data 格式錯誤：預期 list，得到 {type(thread_data)}")
-            thread_data = []
+            thread_data = list(thread_data.values()) if isinstance(thread_data, dict) else []
         
         return {
             "selected_source": selected_source,
