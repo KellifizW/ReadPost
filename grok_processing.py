@@ -85,7 +85,11 @@ async def summarize_context(conversation_context):
                     f"輸出 token={completion_tokens}, 回應={response_content}, "
                     f"提示長度={len(prompt)} 字符"
                 )
-                result = json.loads(response_content)
+                try:
+                    result = json.loads(response_content)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON 解析失敗：{str(e)}，原始回應={response_content}")
+                    return {"theme": "一般", "keywords": []}
                 return result
     except Exception as e:
         logger.warning(f"對話摘要錯誤：{str(e)}")
@@ -144,7 +148,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="re
         reason = "問題模糊，默認總結帖子"
     
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
-    theme_keywords = historical_keywords if is_vague else query_keywords
+    theme_keywords = list(historical_keywords if is_vague else query_keywords)  # Ensure list for JSON serialization
     
     post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else 5
     data_type = "both" if not all(i["intent"] in ["general_query"] for i in intents) else "none"
@@ -235,8 +239,8 @@ reason 簡潔，不超50字。
                         logger.debug(f"帖子優先級排序失敗：狀態碼={status_code}，嘗試次數={attempt + 1}")
                         continue
                     data = await response.json()
-                    if not data.get("choices"):
-                        logger.debug(f"帖子優先級排序失敗：缺少 choices，嘗試次數={attempt + 1}")
+                    if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                        logger.debug(f"帖子優先級排序失敗：缺少有效回應，嘗試次數={attempt + 1}")
                         continue
                     usage = data.get("usage", {})
                     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -316,9 +320,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
-    # 確保 selected_source 是字典
+    # Standardize selected_source as dictionary
     if isinstance(selected_source, str):
-        logger.warning(f"selected_source 是字符串：{selected_source}，嘗試轉換為字典")
         if "Reddit" in selected_source:
             source_name = selected_source.replace("Reddit - ", "").strip()
             source_type = "reddit"
@@ -327,7 +330,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             source_type = "lihkg"
         else:
             source_name = selected_source
-            source_type = source_type or "reddit"  # 預設為 reddit
+            source_type = source_type or "reddit"
         selected_source = {"source_name": source_name, "source_type": source_type}
     elif not isinstance(selected_source, dict):
         logger.error(f"無效的 selected_source 格式：{type(selected_source)}")
@@ -376,8 +379,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     max_tokens_limit = 8000
     max_tokens = min(target_tokens + 500, max_tokens_limit)
-    max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 15
-    max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 15
+    max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 25
+    max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 25
 
     if any(intent == "list_titles" for intent in intents):
         max_replies_per_thread = 10
@@ -386,14 +389,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         reply_count_prompt = f"""
-你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（10、15、50、100、300）。
+你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（10、25、50、100、300）。
 僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
 問題：{user_query}
 意圖：{json.dumps(intents, ensure_ascii=False)}
 若問題需要深入分析（如追問、特定帖子ID），建議較多回覆（50-300）。
-若意圖含 time_sensitive_analysis，優先最新回覆，建議15-50條。
-默認：15 條。
-輸出格式：{{"replies_per_thread": 15, "reason": "決定原因"}}
+若意圖含 time_sensitive_analysis，優先最新回覆，建議25-50條。
+默認：25 條。
+輸出格式：{{"replies_per_thread": 25, "reason": "決定原因"}}
 """
         payload = {
             "model": "grok-3",
@@ -417,8 +420,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             f"輸出 token={completion_tokens}, 回應={response_content}, "
                             f"提示長度={len(reply_count_prompt)} 字符"
                         )
-                        result = json.loads(response_content)
-                        max_replies_per_thread = min(result.get("replies_per_thread", 15), 300)
+                        try:
+                            result = json.loads(response_content)
+                            max_replies_per_thread = min(result.get("replies_per_thread", 25), 300)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"JSON 解析失敗：{str(e)}，原始回應={response_content}")
                     else:
                         logger.warning(f"無法確定每帖子回覆數，狀態碼={status_code}")
         except Exception as e:
@@ -476,7 +482,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filtered_thread_data = {}
     total_replies_count = 0
     
-    # 語義聚類回覆以確保多樣性
     for tid, data in thread_data_dict.items():
         try:
             replies = data.get("replies", [])
@@ -498,18 +503,16 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     "dislike_count": r.get("dislike_count", 0) if source_type == "lihkg" else 0
                 })
             
-            # 按點讚（30%）、時間（40%）、語義多樣性（30%）排序
             sorted_replies = sorted(
                 filtered_replies,
                 key=lambda x: (
                     x.get("like_count", 0) * 0.3 +
                     (1 if any(intent == "time_sensitive_analysis" for intent in intents) and isinstance(x.get("reply_time", 0), (int, float)) and x.get("reply_time", 0) >= time.time() - 86400 else 0) * 0.4 +
-                    0.3  # 語義多樣性由後續聚類處理
+                    0.3
                 ),
                 reverse=True
             )[:50]
             
-            # 簡單語義聚類（模擬 K-means，實際可使用嵌入模型）
             clustered_replies = []
             seen_msgs = set()
             for reply in sorted_replies:
@@ -770,9 +773,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     else:
         configure_reddit_api_logger()
     
-    # 確保 selected_source 是字典
+    # Standardize selected_source as dictionary
     if isinstance(selected_source, str):
-        logger.warning(f"selected_source 是字符串：{selected_source}，嘗試轉換為字典")
         if "Reddit" in selected_source:
             source_name = selected_source.replace("Reddit - ", "").strip()
             source_type = "reddit"
@@ -781,7 +783,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             source_type = "lihkg"
         else:
             source_name = selected_source
-            source_type = source_type or "reddit"  # 預設為 reddit
+            source_type = source_type or "reddit"
         selected_source = {"source_name": source_name, "source_type": source_type}
     elif not isinstance(selected_source, dict):
         logger.error(f"無效的 selected_source 格式：{type(selected_source)}")
@@ -831,15 +833,15 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
-        intents = analysis.get("intents", ["contextual_analysis"])
+        intents = analysis.get("intents", [{"intent": "contextual_analysis", "confidence": 0.5, "reason": "默認意圖"}])
         
         logger.info(f"處理用戶問題：intents={[i['intent'] for i in intents]}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
         
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
-        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 15
-        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 15
+        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 25
+        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 25
         
         if any(i["intent"] in ["fetch_thread_by_id", "follow_up"] for i in intents) and top_thread_ids:
             thread_data = []
