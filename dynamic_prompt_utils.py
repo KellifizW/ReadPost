@@ -279,36 +279,29 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
     return None, None, None, "無匹配貼文"
 
 async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
-    """
-    動態構建提示，根據查詢解析結果、上下文和數據生成，限制模糊查詢的多意圖輸出。
-    """
     parsed_query = await parse_query(query, conversation_context, grok3_api_key)
     intents = parsed_query["intents"]
     keywords = parsed_query["keywords"]
     time_range = parsed_query["time_range"]
     
-    # 系統指令
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
         "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
         "禁止使用 [post_id: ...] 格式。每個任務的回應以 ### 標題分隔，例如 ### 總結, ### 情緒分析。"
     )
     
-    # 上下文
     context = (
         f"用戶問題：{query}\n"
         f"討論區：{selected_source}\n"
         f"對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}"
     )
     
-    # 數據
     data = (
         f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n"
         f"帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n"
         f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
     )
     
-    # 動態指導語
     instructions = ["任務："]
     is_vague = len(keywords) < 2 and not any(kw in query for kw in ["分析", "總結", "討論", "主題", "時事", "推薦"])
     
@@ -365,11 +358,6 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
                 f"### 推薦帖子\n推薦2-3個熱門或相關帖子，基於回覆數和點讚數，聚焦熱門或可分享內容。"
                 f"每個帖子標註 [帖子 ID: {{thread_id}}] {{標題}}。字數：{word_min}-{word_max}字。"
             )
-    
-    # 錯誤處理
-    instructions.append(
-        f"### 錯誤處理\n若無匹配帖子，回應：「{CONFIG['error_prompt_template'].format(selected_cat=selected_source, filters=json.dumps(filters))}」"
-    )
     
     # 時間範圍
     if time_range != "all":
