@@ -188,13 +188,14 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
 帖子數據：
 {json.dumps([{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
 輸出格式：{{"top_thread_ids": ["id1", "id2", ...], "reason": "排序原因"}}
+請確保 reason 說明簡潔，不超過50字。
 """
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     payload = {
         "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,  # 降低以減少截斷風險
+        "max_tokens": 200,
         "temperature": 0.7
     }
     
@@ -221,35 +222,17 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         f"輸出 token={completion_tokens}, 回應={response_content}"
                     )
                     try:
-                        # 清理回應內容，修復可能的未完成 JSON
-                        cleaned_content = response_content.strip()
-                        # 修復末尾逗號
-                        if cleaned_content.endswith(','):
-                            cleaned_content = cleaned_content[:-1] + '}'
-                        # 修復未閉合的 reason 字符串
-                        if '"reason": "' in cleaned_content and not cleaned_content.endswith('"}'):
-                            last_quote = cleaned_content.rfind('"')
-                            if last_quote > cleaned_content.rfind('"reason": "'):
-                                cleaned_content = cleaned_content[:last_quote] + '"}'
-                            else:
-                                cleaned_content = cleaned_content + '"}}'
-                        # 修復缺少閉合大括號
-                        if cleaned_content.startswith('{') and not cleaned_content.endswith('}'):
-                            cleaned_content = cleaned_content + '}'
-                        logger.debug(f"清理後的 JSON 回應：{cleaned_content}")
-                        result = json.loads(cleaned_content)
+                        result = json.loads(response_content)
                         top_thread_ids = result.get("top_thread_ids", [])
                         reason = result.get("reason", "無排序原因")
-                        # 驗證 thread_ids 是否有效並移除重複
                         valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
                         logger.info(f"成功解析 JSON，回應包含 {len(valid_thread_ids)} 個有效 thread_ids")
                         return {"top_thread_ids": valid_thread_ids, "reason": reason}
                     except json.JSONDecodeError as e:
                         logger.warning(
                             f"無法解析優先級排序結果：原始回應={response_content}, "
-                            f"清理後回應={cleaned_content}, token 使用：輸入={prompt_tokens}, 輸出={completion_tokens}, 錯誤：{str(e)}"
+                            f"token 使用：輸入={prompt_tokens}, 輸出={completion_tokens}, 錯誤：{str(e)}"
                         )
-                        # 嘗試提取部分 thread_ids
                         try:
                             match = re.search(r'"top_thread_ids":\s*\[(.*?)\]', response_content, re.DOTALL)
                             if match:
@@ -259,16 +242,6 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                                 if valid_thread_ids:
                                     logger.info(f"成功從不完整回應中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
                                     return {"top_thread_ids": valid_thread_ids, "reason": "從不完整回應中提取的 thread_ids"}
-                            # 嘗試解析部分 JSON
-                            partial_json = re.match(r'\{.*"top_thread_ids":\s*\[.*?\]', response_content, re.DOTALL)
-                            if partial_json:
-                                partial_content = partial_json.group(0) + ']}'
-                                partial_result = json.loads(partial_content)
-                                top_thread_ids = partial_result.get("top_thread_ids", [])
-                                valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
-                                if valid_thread_ids:
-                                    logger.info(f"成功從部分 JSON 中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
-                                    return {"top_thread_ids": valid_thread_ids, "reason": "從部分 JSON 中提取的 thread_ids"}
                         except Exception as extract_e:
                             logger.warning(f"無法從不完整回應中提取 thread_ids：{str(extract_e)}")
                         return {"top_thread_ids": [], "reason": f"無法解析 API 回應：{str(e)}"}
@@ -904,9 +877,9 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             thread_data.append(thread_info)
                             async with cache_lock:
                                 st.session_state.thread_cache[thread_id] = {
-                                    "data": thread_info,
-                                    "timestamp": time.time()
-                                }
+                                "data": thread_info,
+                                "timestamp": time.time()
+                            }
             
             logger.info(
                 f"最終 thread_data：{[{'thread_id': data['thread_id'], 'replies_count': len(data['replies'])} for data in thread_data]}"
