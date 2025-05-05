@@ -128,7 +128,8 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="r
     }}
     若查詢提及「Reddit」或「LIHKG」或子版/分類，優先 contextual_analysis 和 semantic_query。
     若查詢包含時間敏感詞（如「今晚」「今日」），優先 time_sensitive_analysis。
-    僅返回信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖。
+    若對話歷史中提及帖子 ID 或上下文相關，優先 follow_up 意圖。
+    僅返回信心值高於 {CONFIG['intent_confidence_threshold']} 的意圖，若無高信心意圖，則根據上下文選擇 follow_up 或 semantic_query。
     """
     headers = {
         "Content-Type": "application/json",
@@ -167,12 +168,18 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="r
                     except json.JSONDecodeError as e:
                         logger.debug(f"JSON 解析失敗：{str(e)}，原始回應={content}")
                         continue
-                    intents = result.get("intents", [{"intent": "semantic_query", "confidence": 0.7, "reason": "默認語義分析"}])
+                    intents = result.get("intents", [])
                     reason = result.get("reason", "語義匹配")
                     
+                    # 過濾信心值低於閾值的意圖
                     intents = [i for i in intents if i["confidence"] >= CONFIG["intent_confidence_threshold"]]
+                    
+                    # 若無高信心意圖，檢查上下文是否支持 follow_up
                     if not intents:
-                        intents = [{"intent": "semantic_query", "confidence": 0.7, "reason": "無高信心意圖，默認語義分析"}]
+                        if conversation_context and any("帖子 ID" in msg.get("content", "") for msg in conversation_context):
+                            intents = [{"intent": "follow_up", "confidence": 0.8, "reason": "無高信心意圖，檢測到上下文提及帖子 ID，選擇 follow_up"}]
+                        else:
+                            intents = [{"intent": "semantic_query", "confidence": 0.7, "reason": "無高信心意圖，默認語義分析"}]
                     
                     time_range = "recent" if is_time_sensitive else "all"
                     logger.info(f"意圖分析完成：intents={[i['intent'] for i in intents]}, reason={reason}, confidence={max(i['confidence'] for i in intents)}")
@@ -190,6 +197,19 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="r
             if attempt < CONFIG["max_parse_retries"] - 1:
                 await asyncio.sleep(2)
             continue
+    
+    # 最終回退邏輯：優先檢查上下文是否支持 follow_up
+    if conversation_context and any("帖子 ID" in msg.get("content", "") for msg in conversation_context):
+        logger.warning(f"意圖分析失敗，檢測到上下文提及帖子 ID，回退到 follow_up")
+        return {
+            "intents": [{"intent": "follow_up", "confidence": 0.7, "reason": "意圖分析失敗，檢測到上下文提及帖子 ID，回退到 follow_up"}],
+            "keywords": keywords,
+            "related_terms": related_terms,
+            "time_range": "all",
+            "thread_ids": [],
+            "reason": "意圖分析失敗，檢測到上下文提及帖子 ID，回退到 follow_up",
+            "confidence": 0.7
+        }
     
     logger.warning(f"意圖分析失敗，回退到默認意圖：semantic_query")
     return {
