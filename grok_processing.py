@@ -1070,7 +1070,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 tasks.append((idx, get_lihkg_thread_content(
                     thread_id=thread_id,
                     cat_id=source_id,
-                    max_replies=max_re pushes,
+                    max_replies=max_replies,
                     fetch_last_pages=fetch_last_pages,
                     specific_pages=[],
                     start_page=1
