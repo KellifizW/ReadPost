@@ -138,8 +138,8 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
     theme_keywords = historical_keywords if is_vague else query_keywords
     
-    # 根據多意圖設置 post_limit 和 data_type
-    post_limit = 20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5
+    # 根據多意圖設置 post_limit 和 data_type  
+    post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else (20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5)
     data_type = "both" if not all(i["intent"] in ["general_query", "introduce"] for i in intents) else "none"
     
     if any(i["intent"] == "follow_up" for i in intents):
