@@ -22,79 +22,6 @@ MAX_CACHE_SIZE = 100
 cache_lock = asyncio.Lock()
 request_semaphore = asyncio.Semaphore(5)
 
-def clean_html(text):
-    if not isinstance(text, str):
-        text = str(text)
-    try:
-        clean = re.compile(r'<[^>]+>')
-        text = clean.sub('', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        if not text:
-            return "[表情符號]" if "hkgmoji" in text else "[圖片]" if any(ext in text.lower() for ext in ['.webp', '.jpg', '.png']) else "[無內容]"
-        return text
-    except Exception as e:
-        logger.error(f"HTML 清理失敗：{str(e)}")
-        return text
-
-def clean_response(response):
-    if isinstance(response, str):
-        cleaned = re.sub(r'\[post_id: [a-f0-9]{40}\]', '[回覆]', response)
-        return cleaned
-    return response
-
-async def summarize_context(conversation_context):
-    if not conversation_context:
-        return {"theme": "一般", "keywords": []}
-    
-    try:
-        GROK3_API_KEY = st.secrets["grok3key"]
-    except KeyError as e:
-        logger.error(f"缺少 Grok 3 API 密鑰：{str(e)}")
-        return {"theme": "一般", "keywords": []}
-    
-    prompt = f"""
-你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多8個）。
-特別注意用戶問題中的意圖和回應中的帖子標題。
-對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", ...]}}
-"""
-    
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
-    payload = {
-        "model": "grok-3",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
-        "temperature": 0.5
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                status_code = response.status
-                if status_code != 200:
-                    logger.warning(f"對話摘要失敗：狀態碼={status_code}")
-                    return {"theme": "一般", "keywords": []}
-                data = await response.json()
-                usage = data.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
-                response_content = data["choices"][0]["message"]["content"]
-                logger.info(
-                    f"Grok3 API 調用：函數=summarize_context, "
-                    f"狀態碼={status_code}, 輸入 token={prompt_tokens}, "
-                    f"輸出 token={completion_tokens}, 回應={response_content}, "
-                    f"提示長度={len(prompt)} 字符"
-                )
-                try:
-                    result = json.loads(response_content)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"JSON 解析失敗：{str(e)}，原始回應={response_content}")
-                    return {"theme": "一般", "keywords": []}
-                return result
-    except Exception as e:
-        logger.warning(f"對話摘要錯誤：{str(e)}")
-        return {"theme": "一般", "keywords": []}
-
 async def analyze_and_screen(user_query, source_name, source_id, source_type="reddit", conversation_context=None):
     conversation_context = conversation_context or []
     
@@ -148,13 +75,13 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="re
         reason = "問題模糊，默認總結帖子"
     
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
-    theme_keywords = list(historical_keywords if is_vague else query_keywords)  # Ensure list for JSON serialization
+    theme_keywords = list(historical_keywords if is_vague else query_keywords)
     
-    post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else 5
+    post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else 20
     data_type = "both" if not all(i["intent"] in ["general_query"] for i in intents) else "none"
     
     if any(i["intent"] == "follow_up" for i in intents):
-        post_limit = len(top_thread_ids) or 2
+        post_limit = len(top_thread_ids) or 5
         data_type = "replies"
     
     logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}")
@@ -199,7 +126,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
 
     threads = [{"thread_id": str(t["thread_id"]), **t} for t in threads]
     prompt = f"""
-你是帖子優先級排序助手，請根據用戶查詢和多個意圖，從提供的帖子中選出最多5個最相關的帖子。
+你是帖子優先級排序助手，請根據用戶查詢和多個意圖，從提供的帖子中選出最多20個最相關的帖子。
 查詢：{user_query}
 意圖：{json.dumps(intents, ensure_ascii=False)}
 討論區：{source_name} (ID: {source_id})
@@ -305,14 +232,14 @@ reason 簡潔，不超50字。
                 continue
             sorted_threads = sorted(
                 threads,
-                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4 + (0.5 if any(intent == "time_sensitive_analysis" for intent in intents) and x.get("last_reply_time", 0) >= time.time() - 86400 else 0),
+                key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                 reverse=True
             )
-            valid_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:5]]
-            logger.info(f"API 調用失敗，回退到熱門度和時間排序，返回 {len(valid_thread_ids)} 個 thread_ids")
+            valid_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]]
+            logger.info(f"API 調用失敗，回退到熱門度排序，返回 {len(valid_thread_ids)} 個 thread_ids")
             return {
                 "top_thread_ids": valid_thread_ids,
-                "reason": f"優先級排序失敗（{str(e)}），回退到熱門度和時間排序",
+                "reason": f"優先級排序失敗（{str(e)}），回退到熱門度排序",
                 "intent_breakdown": []
             }
 
@@ -320,7 +247,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
-    # Standardize selected_source as dictionary
     if isinstance(selected_source, str):
         if "Reddit" in selected_source:
             source_name = selected_source.replace("Reddit - ", "").strip()
@@ -357,18 +283,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     
     intent_word_ranges = {
-        "contextual_analysis": (500, 800),
-        "semantic_query": (500, 800),
-        "time_sensitive_analysis": (500, 800),
-        "follow_up": (600, 1000),
-        "fetch_thread_by_id": (400, 600),
-        "list_titles": (200, 400)
+        "contextual_analysis": (700, 2800),
+        "semantic_query": (700, 2800),
+        "time_sensitive_analysis": (700, 2800),
+        "follow_up": (1000, 5000),
+        "fetch_thread_by_id": (700, 2800),
+        "list_titles": (140, 400)
     }
     
     total_min_tokens = 0
     total_max_tokens = 0
     for intent in intents:
-        word_min, word_max = intent_word_ranges.get(intent, (500, 800))
+        word_min, word_max = intent_word_ranges.get(intent, (700, 2800))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
@@ -379,8 +305,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 
     max_tokens_limit = 8000
     max_tokens = min(target_tokens + 500, max_tokens_limit)
-    max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 25
-    max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 25
+    max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 100
+    max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
 
     if any(intent == "list_titles" for intent in intents):
         max_replies_per_thread = 10
@@ -389,14 +315,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         reply_count_prompt = f"""
-你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（10、25、50、100、300）。
+你是資料抓取助手，請根據問題和意圖決定每個帖子應下載的回覆數量（100、200、250、300、500 條）。
 僅以 JSON 格式回應，禁止生成自然語言或其他格式的內容。
 問題：{user_query}
 意圖：{json.dumps(intents, ensure_ascii=False)}
-若問題需要深入分析（如追問、特定帖子ID），建議較多回覆（50-300）。
-若意圖含 time_sensitive_analysis，優先最新回覆，建議25-50條。
-默認：25 條。
-輸出格式：{{"replies_per_thread": 25, "reason": "決定原因"}}
+若問題需要深入分析（如追問、特定帖子ID），建議較多回覆（200-500）。
+若意圖含 time_sensitive_analysis，優先最新回覆，建議100-250條。
+默認：100 條。
+輸出格式：{{"replies_per_thread": 100, "reason": "決定原因"}}
 """
         payload = {
             "model": "grok-3",
@@ -422,7 +348,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         )
                         try:
                             result = json.loads(response_content)
-                            max_replies_per_thread = min(result.get("replies_per_thread", 25), 300)
+                            max_replies_per_thread = min(result.get("replies_per_thread", 100), 500)
                         except json.JSONDecodeError as e:
                             logger.warning(f"JSON 解析失敗：{str(e)}，原始回應={response_content}")
                     else:
@@ -472,7 +398,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             filtered_supplemental = [
                 item for item in supplemental_threads
                 if any(kw.lower() in item["title"].lower() for kw in theme_keywords)
-            ][:1]
+            ][:5]
             referenced_thread_ids = [str(item["thread_id"]) for item in filtered_supplemental]
         
         prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
@@ -738,42 +664,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         finally:
             await session.close()
 
-def clean_cache(max_age=3600):
-    current_time = time.time()
-    expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
-    for key in expired_keys:
-        del st.session_state.thread_cache[key]
-    if len(st.session_state.thread_cache) > MAX_CACHE_SIZE:
-        sorted_keys = sorted(
-            st.session_state.thread_cache.items(),
-            key=lambda x: x[1]["timestamp"]
-        )
-        for key, _ in sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]:
-            del st.session_state.thread_cache[key]
-        logger.info(f"清理緩存，移除 {len(sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE])} 個過舊條目，當前緩存大小：{len(st.session_state.thread_cache)}")
-
-def unix_to_readable(timestamp):
-    try:
-        timestamp = int(timestamp)
-        dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        logger.warning(f"無法轉換時間戳 {timestamp}")
-        return "1970-01-01 00:00:00"
-
-def configure_lihkg_api_logger():
-    configure_logger("lihkg_api", "lihkg_api.log")
-
-def configure_reddit_api_logger():
-    configure_logger("reddit_api", "reddit_api.log")
-
 async def process_user_question(user_query, selected_source, source_id, source_type="reddit", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     if source_type == "lihkg":
         configure_lihkg_api_logger()
     else:
         configure_reddit_api_logger()
     
-    # Standardize selected_source as dictionary
     if isinstance(selected_source, str):
         if "Reddit" in selected_source:
             source_name = selected_source.replace("Reddit - ", "").strip()
@@ -829,7 +725,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         if not analysis:
             analysis = await analyze_and_screen(user_query, selected_source["source_name"], source_id, source_type, conversation_context)
         
-        post_limit = min(analysis.get("post_limit", 5), 5)
+        post_limit = min(analysis.get("post_limit", 20), 20)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
@@ -840,8 +736,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
-        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 25
-        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 25
+        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
+        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 100
         
         if any(i["intent"] in ["fetch_thread_by_id", "follow_up"] for i in intents) and top_thread_ids:
             thread_data = []
