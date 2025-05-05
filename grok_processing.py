@@ -194,7 +194,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     payload = {
         "model": "grok-3",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
+        "max_tokens": 200,  # 降低以減少截斷風險
         "temperature": 0.7
     }
     
@@ -233,17 +233,21 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                                 cleaned_content = cleaned_content[:last_quote] + '"}'
                             else:
                                 cleaned_content = cleaned_content + '"}}'
+                        # 修復缺少閉合大括號
+                        if cleaned_content.startswith('{') and not cleaned_content.endswith('}'):
+                            cleaned_content = cleaned_content + '}'
                         logger.debug(f"清理後的 JSON 回應：{cleaned_content}")
                         result = json.loads(cleaned_content)
                         top_thread_ids = result.get("top_thread_ids", [])
                         reason = result.get("reason", "無排序原因")
                         # 驗證 thread_ids 是否有效並移除重複
                         valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
+                        logger.info(f"成功解析 JSON，回應包含 {len(valid_thread_ids)} 個有效 thread_ids")
                         return {"top_thread_ids": valid_thread_ids, "reason": reason}
                     except json.JSONDecodeError as e:
                         logger.warning(
                             f"無法解析優先級排序結果：原始回應={response_content}, "
-                            f"清理後回應={cleaned_content}, 錯誤：{str(e)}"
+                            f"清理後回應={cleaned_content}, token 使用：輸入={prompt_tokens}, 輸出={completion_tokens}, 錯誤：{str(e)}"
                         )
                         # 嘗試提取部分 thread_ids
                         try:
@@ -253,8 +257,18 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                                 ids = [id.strip().strip('"') for id in ids_str.split(',') if id.strip()]
                                 valid_thread_ids = list(dict.fromkeys([tid for tid in ids if tid in [t["thread_id"] for t in threads]]))
                                 if valid_thread_ids:
-                                    logger.info(f"成功從不完整回應中提取 thread_ids：{valid_thread_ids}")
+                                    logger.info(f"成功從不完整回應中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
                                     return {"top_thread_ids": valid_thread_ids, "reason": "從不完整回應中提取的 thread_ids"}
+                            # 嘗試解析部分 JSON
+                            partial_json = re.match(r'\{.*"top_thread_ids":\s*\[.*?\]', response_content, re.DOTALL)
+                            if partial_json:
+                                partial_content = partial_json.group(0) + ']}'
+                                partial_result = json.loads(partial_content)
+                                top_thread_ids = partial_result.get("top_thread_ids", [])
+                                valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
+                                if valid_thread_ids:
+                                    logger.info(f"成功從部分 JSON 中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
+                                    return {"top_thread_ids": valid_thread_ids, "reason": "從部分 JSON 中提取的 thread_ids"}
                         except Exception as extract_e:
                             logger.warning(f"無法從不完整回應中提取 thread_ids：{str(extract_e)}")
                         return {"top_thread_ids": [], "reason": f"無法解析 API 回應：{str(e)}"}
@@ -268,8 +282,10 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                 reverse=True
             )
+            valid_thread_ids = [t["thread_id"] for t in sorted_threads[:20]]
+            logger.info(f"API 調用失敗，回退到熱門度排序，返回 {len(valid_thread_ids)} 個 thread_ids")
             return {
-                "top_thread_ids": [t["thread_id"] for t in sorted_threads[:20]],
+                "top_thread_ids": valid_thread_ids,
                 "reason": f"優先級排序失敗（{str(e)}），回退到熱門度排序"
             }
 
