@@ -177,14 +177,17 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         if context:
             last_response = context[-1].get("content", "")
             matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
-            referenced_thread_ids = [tid for tid in matches if any(t["thread_id"] == tid for t in threads)]
+            referenced_thread_ids = [tid for tid in matches if any(str(t["thread_id"]) == tid for t in threads)]
         if referenced_thread_ids:
+            logger.info(f"追問檢測到參考帖子：thread_ids={referenced_thread_ids}")
             return {
                 "top_thread_ids": referenced_thread_ids[:2],
                 "reason": "使用追問的參考帖子 ID",
                 "intent_breakdown": [{"intent": "follow_up", "thread_ids": referenced_thread_ids[:2]}]
             }
 
+    # 統一 threads 的 thread_id 為字符串
+    threads = [{"thread_id": str(t["thread_id"]), **t} for t in threads]
     prompt = f"""
 你是帖子優先級排序助手，請根據用戶查詢和多個意圖，從提供的帖子中選出最多20個最相關的帖子。
 查詢：{user_query}
@@ -192,7 +195,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
 討論區：{source_name} (ID: {source_id})
 來源類型：{source_type}
 帖子數據：
-{json.dumps([{"thread_id": t["thread_id"], "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
+{json.dumps([{"thread_id": str(t["thread_id"]), "title": clean_html(t["title"]), "no_of_reply": t.get("no_of_reply", 0), "like_count": t.get("like_count", 0)} for t in threads], ensure_ascii=False)}
 輸出格式：{{
   "top_thread_ids": ["id1", "id2", ...],
   "reason": "排序原因",
@@ -239,7 +242,16 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         top_thread_ids = result.get("top_thread_ids", [])
                         reason = result.get("reason", "無排序原因")
                         intent_breakdown = result.get("intent_breakdown", [])
-                        valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in [t["thread_id"] for t in threads]]))
+                        # 統一 thread_id 為字符串
+                        top_thread_ids = [str(tid) for tid in top_thread_ids]
+                        thread_id_set = {str(t["thread_id"]) for t in threads}
+                        valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in thread_id_set]))
+                        invalid_thread_ids = [tid for tid in top_thread_ids if tid not in thread_id_set]
+                        logger.info(
+                            f"thread_id 驗證：有效 thread_ids={valid_thread_ids}, "
+                            f"無效 thread_ids={invalid_thread_ids}, "
+                            f"threads 中的 thread_ids={list(thread_id_set)[:10]}..."
+                        )
                         logger.info(f"成功解析 JSON，回應包含 {len(valid_thread_ids)} 個有效 thread_ids")
                         return {
                             "top_thread_ids": valid_thread_ids,
@@ -255,8 +267,15 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                             match = re.search(r'"top_thread_ids":\s*\[(.*?)\]', response_content, re.DOTALL)
                             if match:
                                 ids_str = match.group(1)
-                                ids = [id.strip().strip('"') for id in ids_str.split(',') if id.strip()]
-                                valid_thread_ids = list(dict.fromkeys([tid for tid in ids if tid in [t["thread_id"] for t in threads]]))
+                                ids = [str(id.strip().strip('"')) for id in ids_str.split(',') if id.strip()]
+                                thread_id_set = {str(t["thread_id"]) for t in threads}
+                                valid_thread_ids = list(dict.fromkeys([tid for tid in ids if tid in thread_id_set]))
+                                invalid_thread_ids = [tid for tid in ids if tid not in thread_id_set]
+                                logger.info(
+                                    f"從不完整回應提取：有效 thread_ids={valid_thread_ids}, "
+                                    f"無效 thread_ids={invalid_thread_ids}, "
+                                    f"threads 中的 thread_ids={list(thread_id_set)[:10]}..."
+                                )
                                 if valid_thread_ids:
                                     logger.info(f"成功從不完整回應中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
                                     return {
@@ -277,7 +296,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                 key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4,
                 reverse=True
             )
-            valid_thread_ids = [t["thread_id"] for t in sorted_threads[:20]]
+            valid_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]]
             logger.info(f"API 調用失敗，回退到熱門度排序，返回 {len(valid_thread_ids)} 個 thread_ids")
             return {
                 "top_thread_ids": valid_thread_ids,
