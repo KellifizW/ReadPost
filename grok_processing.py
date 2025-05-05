@@ -126,7 +126,9 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     historical_theme = context_summary.get("theme", "一般")
     historical_keywords = context_summary.get("keywords", [])
     
-    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"])
+    # 檢查高信心的 list_titles 意圖
+    has_high_confidence_list_titles = any(i["intent"] == "list_titles" and i["confidence"] >= 0.9 for i in intents)
+    is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"]) and not has_high_confidence_list_titles
     
     if is_vague and historical_theme != "一般":
         intents = [{"intent": "summarize_posts", "confidence": 0.7, "reason": f"問題模糊，延續歷史主題：{historical_theme}"}]
@@ -138,7 +140,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
     theme_keywords = historical_keywords if is_vague else query_keywords
     
-    # 根據多意圖設置 post_limit 和 data_type  
+    # 設置 post_limit，確保 list_titles 為 15
     post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else (20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5)
     data_type = "both" if not all(i["intent"] in ["general_query", "introduce"] for i in intents) else "none"
     
