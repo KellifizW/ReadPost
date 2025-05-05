@@ -376,7 +376,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     if len(prompt) > CONFIG["max_prompt_length"]:
         logger.warning("提示長度超過限制，縮減數據")
         thread_data = thread_data[:2]
-        data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n篩選條件： trombined_ascii=False)}"
+        data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n篩選條件：{json.dumps(filters, ensure_ascii=False)}"
         prompt = (
             f"[System]\n{system}\n"
             f"[Context]\n{context}\n"
