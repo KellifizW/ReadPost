@@ -363,7 +363,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     # 統一記錄抓取總結日誌
     status_message = f"Completed fetching thread_id={thread_id}, pages={fetched_pages}, total_replies={len(replies)}"
     if len(replies) >= max_replies:
-        status  status_message += f", reached max {max_replies}"
+        status_message += f", reached max {max_replies}"
     elif len(replies) < max_replies:
         status_message += f", fewer than expected {max_replies}"
     logger.info(status_message)
