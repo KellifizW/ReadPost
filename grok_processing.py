@@ -6,7 +6,7 @@ import datetime
 import time
 import logging
 import streamlit as st
-import pytz
+importELimport pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
@@ -115,12 +115,19 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "theme_keywords": []
         }
     
+    logger.info(f"開始語義分析：查詢={user_query}")
     parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
     intents = parsed_query["intents"]
     query_keywords = parsed_query["keywords"]
     top_thread_ids = parsed_query["thread_ids"]
     reason = parsed_query["reason"]
     confidence = parsed_query["confidence"]
+    
+    if not intents:
+        logger.warning(f"意圖分析失敗：查詢={user_query}, 原因=無法識別有效意圖，回退到默認意圖 recommend_threads")
+        intents = [{"intent": "recommend_threads", "confidence": 0.5, "reason": "無法識別有效意圖，回退到默認意圖"}]
+        reason = "無法識別有效意圖，回退到默認意圖"
+        confidence = 0.5
     
     context_summary = await summarize_context(conversation_context)
     historical_theme = context_summary.get("theme", "一般")
@@ -247,9 +254,8 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                         valid_thread_ids = list(dict.fromkeys([tid for tid in top_thread_ids if tid in thread_id_set]))
                         invalid_thread_ids = [tid for tid in top_thread_ids if tid not in thread_id_set]
                         logger.info(
-                            f"thread_id 驗證：有效 thread_ids={valid_thread_ids}, "
-                            f"無效 thread_ids={invalid_thread_ids}, "
-                            f"threads 中的 thread_ids={list(thread_id_set)[:10]}..."
+                            f"thread_id 驗證：有效 thread_ids 數量={len(valid_thread_ids)}, "
+                            f"無效 thread_ids 數量={len(invalid_thread_ids)}"
                         )
                         logger.info(f"成功解析 JSON，回應包含 {len(valid_thread_ids)} 個有效 thread_ids")
                         return {
@@ -271,12 +277,11 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                                 valid_thread_ids = list(dict.fromkeys([tid for tid in ids if tid in thread_id_set]))
                                 invalid_thread_ids = [tid for tid in ids if tid not in thread_id_set]
                                 logger.info(
-                                    f"從不完整回應提取：有效 thread_ids={valid_thread_ids}, "
-                                    f"無效 thread_ids={invalid_thread_ids}, "
-                                    f"threads 中的 thread_ids={list(thread_id_set)[:10]}..."
+                                    f"從不完整回應提取：有效 thread_ids 數量={len(valid_thread_ids)}, "
+                                    f"無效 thread_ids 數量={len(invalid_thread_ids)}"
                                 )
                                 if valid_thread_ids:
-                                    logger.info(f"成功從不完整回應中提取 {len(valid_thread_ids)} 個 thread_ids：{valid_thread_ids}")
+                                    logger.info(f"成功從不完整回應中提取 {len(valid_thread_ids)} 個 thread_ids")
                                     return {
                                         "top_thread_ids": valid_thread_ids,
                                         "reason": "從不完整回應中提取的 thread_ids",
@@ -413,7 +418,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         referenced_thread_ids = []
         if any(intent == "follow_up" for intent in intents):
-            parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
             referenced_thread_ids = parsed_query["thread_ids"]
             if not referenced_thread_ids:
                 last_response = conversation_context[-1].get("content", "") if conversation_context else ""
@@ -770,7 +774,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             processed_thread_ids = set()
             
             candidate_threads = [{"thread_id": str(tid), "title": "", "no_of_reply": 0, "like_count": 0} for tid in top_thread_ids]
-            logger.info(f"特定帖子/追問：candidate_threads={[(t['thread_id'], t['title']) for t in candidate_threads]}")
             
             tasks = []
             for idx, thread_id in enumerate(top_thread_ids):
@@ -1047,8 +1050,6 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             item for item in filtered_items
                             if str(item["thread_id"]) in map(str, top_thread_ids)
                         ][:post_limit]
-        
-        logger.info(f"候選帖子：candidate_threads={[(t['thread_id'], t['title']) for t in candidate_threads]}")
         
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
