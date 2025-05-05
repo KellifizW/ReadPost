@@ -2,11 +2,10 @@
 LIHKG API 模組，負責從 LIHKG 論壇抓取帖子標題和回覆內容。
 提供速率限制管理、錯誤處理和日誌記錄功能。
 主要函數：
-- get_lihkg_topic_list：抓取指定分類的帖子標題列表。
+- get_lihkg_topic_list：抓取指定分類的帖子標題。
 - get_lihkg_thread_content：抓取指定帖子的回覆內容，支援多頁迭代。
 - get_category_name：返回分類名稱。
 - get_lihkg_thread_content_batch：批量抓取多個帖子的回覆內容。
-- verify_lihkg_thread_category：驗證指定帖子的分類並記錄詳細日誌。
 """
 
 import aiohttp
@@ -29,11 +28,11 @@ logger = configure_logger(__name__, "lihkg_api.log")
 # LIHKG API 基礎配置
 LIHKG_BASE_URL = "https://lihkg.com"
 LIHKG_DEVICE_ID = "5fa4ca23e72ee0965a983594476e8ad9208c808d"
-LIHKG_COOKIE = "PHPSESSID=33mda4rq2c68ka0q69j3qli704; __cfruid=6613e31ceda225cd19b78296f41fcdd792896165-1746435095; cf_clearance=lKvL5WE.wiQ3OPQ1vBByvADiC7YQyySKHwbpY.OIMDM-1746437382-1.2.1.1-yvhsMxUOu2oIxxQWYDQ8RLr6DSql1PiOJoewKLjnP4cUk1kpehYNcPdBMd5db78MFblUmscp9x3IZcZF6GLrq6iQogh7XT6_KrQv4mv_yRfDvUzHv8VTTtDB_3NJjSn6hkj5rZ68etejlTWzje51WQRHzaNNzUEzwSgyq5B1Orhc75wvzbibCJYtQm7kZwDbOyvT3ZI8EpVTckCdutk_F8tQ7iEIuXaclhuWrMa1h0wgJjXEeZGxvVHOfSAHiC837fxwz2m.uQ5vAe8nsaU8dY5W_8P1OCDpcHChWhWoK5JeYaXHq7Zsb8yfv9TceR7PaCU0XDP2KU_m_44b4uX.vGqZWa1qumQttbxUBciyQu4"
+LIHKG_COOKIE = "PHPSESSID=ckdp63v3gapcpo8jfngun6t3av; __cfruid=019429f"
 
 # 用戶代理列表
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
@@ -178,91 +177,32 @@ def get_category_name(cat_id):
     }
     return categories.get(str(cat_id), "未知分類")
 
-async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3, target_items=20):
+async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
     """
-    抓取指定分類的帖子標題列表，動態調整頁數以達到目標貼文數量。
-    Args:
-        cat_id: 分類 ID
-        start_page: 起始頁數
-        max_pages: 最大頁數（可動態增加）
-        target_items: 目標貼文數量
-    Returns:
-        Dict: 包含貼文列表、速率限制信息等
+    抓取指定分類的帖子標題列表。
     """
     items = []
     rate_limit_info = []
-    current_page = start_page
-    max_pages = max(max_pages, 10)  # 最多抓取 10 頁，避免過多請求
-    attempts = 0
-
-    while len(items) < target_items and current_page < start_page + max_pages and attempts < 2:
-        if cat_id == "2":  # 熱門台使用專用端點
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/hot?cat_id={cat_id}&page={current_page}&count=60&type=now"
+    
+    for page in range(start_page, start_page + max_pages):
+        if cat_id == "2":  # 熱門台
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/hot?cat_id={cat_id}&page={page}&count=60&type=now"
         else:
-            url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&page={current_page}&count=60&type=now"
+            url = f"{LIHKG_BASE_URL}/api_v2/thread/category?cat_id={cat_id}&page={page}&count=60&type=now"
         data, page_rate_limit_info, rate_limit_data = await api_client.get(url, "get_lihkg_topic_list")
         rate_limit_info.extend(page_rate_limit_info)
         
-        raw_items = []
         if data and data.get("response", {}).get("items"):
-            raw_items = [
-                item for item in data["response"]["items"]
-                if item.get("title") and item.get("no_of_reply", 0) > 0
-            ]
-            # 驗證貼文分類
-            filtered_items = []
-            for item in raw_items:
-                thread_id = str(item.get("thread_id"))
-                verification = await verify_lihkg_thread_category(thread_id, selected_cat_id=cat_id)
-                item_cat_id = verification.get("cat_id") if "cat_id" in verification else None
-                if item_cat_id == cat_id or (cat_id in ["1", "2"] and item_cat_id):
-                    filtered_items.append(item)
-                # 若需為熱門台收緊過濾，使用以下條件（取消註釋即可）：
-                # if cat_id == "2" and item_cat_id == cat_id:
-                #     filtered_items.append(item)
-                # elif cat_id != "2" and (item_cat_id == cat_id or (cat_id == "1" and item_cat_id)):
-                #     filtered_items.append(item)
-            
-            items.extend(filtered_items[:target_items - len(items)])
-            logger.info(
-                json.dumps({
-                    "event": "lihkg_topic_fetch",
-                    "cat_id": cat_id,
-                    "page": current_page,
-                    "raw_items": len(raw_items),
-                    "filtered_items": len(filtered_items),
-                    "item_cat_ids": [item.get("cat_id") for item in raw_items],
-                    "verified_cat_ids": [verification.get("cat_id") for item in filtered_items]
-                }, ensure_ascii=False)
-            )
-            attempts = 0  # 重置重試計數
+            filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
+            items.extend(filtered_items)
+            logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
-            logger.error(
-                json.dumps({
-                    "event": "lihkg_topic_fetch",
-                    "cat_id": cat_id,
-                    "page": current_page,
-                    "error": "No data fetched",
-                    "api_response": data.get("error_message", "Unknown") if data else "No response"
-                }, ensure_ascii=False)
-            )
-            attempts += 1  # 記錄連續失敗次數
+            logger.error(f"No data fetched for cat_id={cat_id}, page={page}")
         
-        current_page += 1
         await asyncio.sleep(1)
     
-    logger.info(
-        json.dumps({
-            "event": "lihkg_topic_fetch_summary",
-            "cat_id": cat_id,
-            "total_items": len(items),
-            "pages_fetched": current_page - start_page,
-            "target_items": target_items
-        }, ensure_ascii=False)
-    )
-    
     return {
-        "items": items[:target_items],
+        "items": items[:90],
         "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
@@ -347,7 +287,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         if data and data.get("response"):
             page_replies = data["response"].get("item_data", [])
             for reply in page_replies:
-                reply["like_count"] = int(reply.get("like_count", "0"))
+                reply["like_count"] = int(reply.get swelled_count", "0"))
                 reply["dislike_count"] = int(reply.get("dislike_count", "0"))
                 reply["reply_time"] = reply.get("reply_time", "0")
             remaining_slots = max_replies - len(replies)
@@ -445,169 +385,3 @@ async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=25
         "last_reset": aggregated_rate_limit_data["last_reset"],
         "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
     }
-
-async def verify_lihkg_thread_category(thread_id, selected_cat_id=None):
-    """
-    驗證指定帖子的分類，記錄詳細日誌以便後台分析。
-    Args:
-        thread_id: 帖子 ID
-        selected_cat_id: 用戶選擇的分類 ID（可選）
-    Returns:
-        Dict: 包含 thread_id 和找到的分類信息
-    """
-    # 初始化本地緩存
-    local_cache = getattr(verify_lihkg_thread_category, "local_cache", {})
-    verify_lihkg_thread_category.local_cache = local_cache
-
-    # 檢查緩存
-    cache_key = f"thread_{thread_id}_category"
-    try:
-        import streamlit as st
-        cache = st.session_state.thread_cache if hasattr(st, "session_state") else local_cache
-    except ImportError:
-        cache = local_cache
-        logger.debug("Streamlit not available, using local cache for verification")
-
-    if cache_key in cache:
-        cached_data = cache[cache_key]
-        if time.time() - cached_data["timestamp"] < 300:  # 緩存 5 分鐘
-            logger.info(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "cache_hit",
-                    "cache_key": cache_key,
-                    "result": cached_data["data"]
-                }, ensure_ascii=False)
-            )
-            return cached_data["data"]
-
-    logger.info(
-        json.dumps({
-            "event": "lihkg_category_verification",
-            "thread_id": thread_id,
-            "step": "start",
-            "selected_cat_id": selected_cat_id
-        }, ensure_ascii=False)
-    )
-
-    # 步驟 1：查詢帖子元數據
-    url = f"{LIHKG_BASE_URL}/api_v2/thread/{thread_id}/page/1?order=reply_time"
-    data, rate_limit_info, rate_limit_data = await api_client.get(url, "verify_thread_category")
-    
-    if data and data.get("response"):
-        response_data = data.get("response", {})
-        cat_id = response_data.get("cat_id") or response_data.get("thread", {}).get("cat_id")
-        if cat_id:
-            category_name = get_category_name(cat_id)
-            result = {"thread_id": thread_id, "cat_id": cat_id, "category_name": category_name}
-            cache[cache_key] = {"data": result, "timestamp": time.time()}
-            logger.info(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "metadata_check",
-                    "url": url,
-                    "cat_id": cat_id,
-                    "category_name": category_name,
-                    "result": result
-                }, ensure_ascii=False)
-            )
-            return result
-        else:
-            logger.warning(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "metadata_check",
-                    "url": url,
-                    "warning": "No cat_id found in metadata"
-                }, ensure_ascii=False)
-            )
-    else:
-        logger.error(
-            json.dumps({
-                "event": "lihkg_category_verification",
-                "thread_id": thread_id,
-                "step": "metadata_check",
-                "url": url,
-                "error": "No data fetched"
-            }, ensure_ascii=False)
-        )
-
-    # 步驟 2：檢查用戶選擇的分類（如果提供）
-    if selected_cat_id:
-        result = await get_lihkg_topic_list(cat_id=selected_cat_id, start_page=1, max_pages=1)
-        if any(str(item.get("thread_id")) == str(thread_id) for item in result.get("items", [])):
-            category_name = get_category_name(selected_cat_id)
-            result = {"thread_id": thread_id, "cat_id": selected_cat_id, "category_name": category_name}
-            cache[cache_key] = {"data": result, "timestamp": time.time()}
-            logger.info(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "selected_category_check",
-                    "cat_id": selected_cat_id,
-                    "category_name": category_name,
-                    "result": result
-                }, ensure_ascii=False)
-            )
-            return result
-        else:
-            logger.warning(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "selected_category_check",
-                    "cat_id": selected_cat_id,
-                    "warning": f"Thread {thread_id} not found in selected category"
-                }, ensure_ascii=False)
-            )
-
-    # 步驟 3：掃描其他分類
-    categories = {
-        "5": "時事台", "14": "上班台", "15": "財經台", "29": "成人台", "31": "創意台"
-    }
-    found_categories = []
-    for cat_id, cat_name in categories.items():
-        result = await get_lihkg_topic_list(cat_id=cat_id, start_page=1, max_pages=1)
-        if any(str(item.get("thread_id")) == str(thread_id) for item in result.get("items", [])):
-            found_categories.append({"cat_id": cat_id, "category_name": cat_name})
-            logger.info(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "category_scan",
-                    "cat_id": cat_id,
-                    "category_name": cat_name,
-                    "found": True
-                }, ensure_ascii=False)
-            )
-        else:
-            logger.debug(
-                json.dumps({
-                    "event": "lihkg_category_verification",
-                    "thread_id": thread_id,
-                    "step": "category_scan",
-                    "cat_id": cat_id,
-                    "category_name": cat_name,
-                    "found": False
-                }, ensure_ascii=False)
-            )
-
-    # 步驟 4：確定最終結果
-    if found_categories:
-        result = {"thread_id": thread_id, "categories": found_categories}
-    else:
-        result = {"thread_id": thread_id, "cat_id": "1", "category_name": "吹水台"}  # 默認為吹水台
-
-    cache[cache_key] = {"data": result, "timestamp": time.time()}
-    logger.info(
-        json.dumps({
-            "event": "lihkg_category_verification",
-            "thread_id": thread_id,
-            "step": "final_result",
-            "result": result
-        }, ensure_ascii=False)
-    )
-    return result
