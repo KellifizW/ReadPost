@@ -864,7 +864,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "reply_id": reply.get("reply_id"),
                                 "msg": clean_html(reply.get("msg", "[無內容]")),
                                 "like_count": reply.get("like_count", 0),
-                                "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
+                                "dislike_count": reply.get("dislike_count", 0),
                                 "reply_time": reply.get("reply_time", "0")
                             }
                             for reply in result.get("replies", [])
@@ -961,7 +961,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                     "reply_id": reply.get("reply_id"),
                                     "msg": clean_html(reply.get("msg", "[無內容]")),
                                     "like_count": reply.get("like_count", 0),
-                                    "dislike_count": reply.get("dislike_count", 0 # 修正缺少的右括號
+                                    "dislike_count": reply.get("dislike_count", 0),
                                     "reply_time": reply.get("reply_time", "0")
                                 }
                                 for reply in result.get("replies", [])
