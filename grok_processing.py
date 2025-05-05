@@ -589,7 +589,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                 if content:
                                     if "###" in content and ("Content Moderation" in content or "Blocked" in content):
-                                        logger.warning(f"檢測到限定: 3000
+                                        logger.warning(f"檢測到內容審核：{content}")
                                         raise ValueError("檢測到內容審核")
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
