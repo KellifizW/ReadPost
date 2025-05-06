@@ -585,7 +585,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(
         f"生成提示：函數=stream_grok3_response, 查詢={user_query}, "
         f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
-        f"thread_data 帖子數={len SED(filtered_thread_data)}, 總回覆數={total_replies_count}"
+        f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
     )
     
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -796,7 +796,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id_str,
                         cat_id=source_id,
-                        max_replies=max_replies
+                        max_replies=max_replies,
                         fetch_last_pages=fetch_last_pages,
                         specific_pages=[],
                         start_page=1
