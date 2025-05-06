@@ -115,28 +115,17 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "theme_keywords": []
         }
     
-    logger.info(f"開始語義分析：查詢={user_query}, source_type={source_type}")
-    try:
-        parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
-    except Exception as e:
-        logger.error(f"解析查詢失敗：{str(e)}，回退到默認值")
-        parsed_query = {
-            "intents": [],
-            "keywords": [],
-            "thread_ids": [],
-            "reason": f"解析失敗：{str(e)}",
-            "confidence": 0.5
-        }
-    
-    intents = parsed_query.get("intents", [])
-    query_keywords = parsed_query.get("keywords", [])
-    top_thread_ids = parsed_query.get("thread_ids", [])
-    reason = parsed_query.get("reason", "未提供原因")
-    confidence = parsed_query.get("confidence", 0.5)
+    logger.info(f"開始語義分析：查詢={user_query}")
+    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
+    intents = parsed_query["intents"]
+    query_keywords = parsed_query["keywords"]
+    top_thread_ids = parsed_query["thread_ids"]
+    reason = parsed_query["reason"]
+    confidence = parsed_query["confidence"]
     
     if not intents:
-        logger.warning(f"意圖分析失敗：查詢={user_query}, 原因=無法識別有效意圖，回退到默認意圖 summarize_posts")
-        intents = [{"intent": "summarize_posts", "confidence": 0.5, "reason": "無法識別有效意圖，回退到默認意圖"}]
+        logger.warning(f"意圖分析失敗：查詢={user_query}, 原因=無法識別有效意圖，回退到默認意圖 recommend_threads")
+        intents = [{"intent": "recommend_threads", "confidence": 0.5, "reason": "無法識別有效意圖，回退到默認意圖"}]
         reason = "無法識別有效意圖，回退到默認意圖"
         confidence = 0.5
     
@@ -164,8 +153,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         post_limit = len(top_thread_ids) or 2
         data_type = "replies"
     
-    processing = {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids}
-    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}, theme_keywords={theme_keywords}, processing={processing}")
+    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}")
     return {
         "direct_response": all(i["intent"] in ["general_query", "introduce"] for i in intents),
         "intents": intents,
@@ -175,7 +163,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "data_type": data_type,
         "post_limit": post_limit,
         "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": theme_keywords},
-        "processing": processing,
+        "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids},
         "candidate_thread_ids": top_thread_ids,
         "top_thread_ids": top_thread_ids,
         "needs_advanced_analysis": confidence < 0.7,
@@ -331,12 +319,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
 
     if not isinstance(processing, dict):
-        logger.error(f"無效的處理數據格式：預期 dict，得到 {type(processing)}，查詢={user_query}")
+        logger.error(f"無效的處理數據格式：預期 dict，得到 {type(processing)}")
         yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
         return
-    
     intents = processing.get('intents', ['summarize_posts'])
-    logger.info(f"stream_grok3_response 開始：查詢={user_query}, intents={intents}, processing={processing}")
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -345,6 +331,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤：缺少 API 密鑰"
         return
     
+    # 計算 parsed_query 以確保 follow_up 邏輯可用
+    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
+    logger.info(f"Parsed query in stream_grok3_response: intents={[i['intent'] for i in parsed_query['intents']]}, thread_ids={parsed_query['thread_ids']}")
+
     intent_word_ranges = {
         "list_titles": (140, 400),
         "summarize_posts": (700, 2800),
@@ -432,8 +422,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         referenced_thread_ids = []
         if any(intent == "follow_up" for intent in intents):
-            parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
-            referenced_thread_ids = parsed_query.get("thread_ids", [])
+            referenced_thread_ids = parsed_query["thread_ids"]
             if not referenced_thread_ids:
                 last_response = conversation_context[-1].get("content", "") if conversation_context else ""
                 matches = re.findall(r"\[帖子 ID: (\d+)\]", last_response)
@@ -444,7 +433,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         
         if not referenced_thread_ids and any(intent == "follow_up" for intent in intents):
             keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-            theme_keywords = keyword_result.get("keywords", []) + keyword_result.get("related_terms", [])
+            theme_keywords = keyword_result["keywords"]
             async with request_semaphore:
                 if source_type == "lihkg":
                     supplemental_result = await get_lihkg_topic_list(
@@ -769,35 +758,21 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         if not analysis:
             analysis = await analyze_and_screen(user_query, selected_source, source_id, source_type, conversation_context)
         
-        if not isinstance(analysis, dict):
-            logger.error(f"語義分析結果無效，預期 dict，得到 {type(analysis)}")
-            analysis = {
-                "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "分析失敗，使用默認值"}],
-                "processing": {"intents": ["summarize_posts"], "top_thread_ids": []},
-                "post_limit": 5,
-                "filters": {"min_replies": 10, "min_likes": 0, "sort": "popular", "keywords": []}
-            }
-        
         post_limit = min(analysis.get("post_limit", 5), 20)
         filters = analysis.get("filters", {})
         min_replies = filters.get("min_replies", 10)
-        processing = analysis.get("processing", {"intents": ["summarize_posts"], "top_thread_ids": []})
-        if not isinstance(processing, dict):
-            logger.error(f"processing 格式無效，預期 dict，得到 {type(processing)}，使用默認值")
-            processing = {"intents": ["summarize_posts"], "top_thread_ids": []}
+        top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
+        intents = analysis.get("intents", ["summarize_posts"])
         
-        top_thread_ids = list(set(processing.get("top_thread_ids", [])))
-        intents = processing.get("intents", ["summarize_posts"])
-        
-        logger.info(f"處理用戶問題：intents={intents}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}, processing={processing}")
+        logger.info(f"處理用戶問題：intents={[i['intent'] for i in intents]}, source_type={source_type}, source_id={source_id}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
         
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         
-        max_comments = 300 if source_type == "reddit" and any(i == "follow_up" for i in intents) else 100
-        max_replies = 300 if any(i == "follow_up" for i in intents) else 100
+        max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
+        max_replies = 300 if any(i["intent"] == "follow_up" for i in intents) else 100
         
-        if any(i in ["fetch_thread_by_id", "follow_up"] for i in intents) and top_thread_ids:
+        if any(i["intent"] in ["fetch_thread_by_id", "follow_up"] for i in intents) and top_thread_ids:
             thread_data = []
             rate_limit_info = []
             processed_thread_ids = set()
@@ -879,9 +854,9 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "timestamp": time.time()
                             }
             
-            if len(thread_data) < 5 and any(i == "follow_up" for i in intents):
+            if len(thread_data) < 5 and any(i["intent"] == "follow_up" for i in intents):
                 keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-                theme_keywords = keyword_result.get("keywords", []) + keyword_result.get("related_terms", [])
+                theme_keywords = keyword_result["keywords"]
                 
                 async with request_semaphore:
                     if source_type == "lihkg":
@@ -1054,7 +1029,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "timestamp": time.time()
                         }
             
-            if any(i == "fetch_dates" for i in intents):
+            if any(i["intent"] == "fetch_dates" for i in intents):
                 sorted_items = sorted(
                     filtered_items,
                     key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"),
@@ -1064,7 +1039,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             else:
                 if filtered_items:
                     prioritization = await prioritize_threads_with_grok(
-                        user_query, filtered_items, selected_source, source_id, source_type, intents
+                        user_query, filtered_items, selected_source, source_id, source_type, [i["intent"] for i in intents]
                     )
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     if not top_thread_ids:
