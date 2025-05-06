@@ -323,7 +323,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield f"錯誤：無效的處理數據格式（{type(processing)}）。請聯繫支持。"
         return
     
-    # 提取意圖，優先從 analysis 中獲取完整的意圖資訊
     intents_info = []
     if processing.get('analysis') and processing['analysis'].get('intents'):
         intents_info = processing['analysis']['intents']
@@ -431,6 +430,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         if not referenced_thread_ids and any(intent == "follow_up" for intent in intents):
             keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
             theme_keywords = keyword_result["keywords"]
+            sort = "new" if keyword_result.get("time_sensitive", False) else "best"
             async with request_semaphore:
                 if source_type == "lihkg":
                     supplemental_result = await get_lihkg_topic_list(
@@ -442,7 +442,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     supplemental_result = await get_reddit_topic_list(
                         subreddit=source_id,
                         start_page=1,
-                        max_pages=2
+                        max_pages=2,
+                        sort=sort
                     )
             supplemental_threads = supplemental_result.get("items", [])
             filtered_supplemental = [
@@ -566,11 +567,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         }
         total_replies_count = 0
     
-    # 選擇主要意圖（信心值最高者）
     primary_intent_info = max(intents_info, key=lambda x: x["confidence"]) if intents_info else {"intent": "summarize_posts", "confidence": 0.7}
     primary_intent = primary_intent_info["intent"]
     
-    # 生成單一提示，涵蓋所有意圖
     prompt = await build_dynamic_prompt(
         query=user_query,
         conversation_context=conversation_context,
@@ -783,6 +782,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         
         keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
+        sort = "new" if keyword_result.get("time_sensitive", False) else "best"
         
         max_comments = 300 if source_type == "reddit" and any(i["intent"] == "follow_up" for i in intents) else 100
         max_replies = 300 if any(i["intent"] in ["follow_up", "analyze_sentiment"] for i in intents) else 100
@@ -884,7 +884,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         supplemental_result = await get_reddit_topic_list(
                             subreddit=source_id,
                             start_page=1,
-                            max_pages=2
+                            max_pages=2,
+                            sort=sort
                         )
                 supplemental_threads = supplemental_result.get("items", [])
                 filtered_supplemental = [
@@ -1004,7 +1005,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         result = await get_reddit_topic_list(
                             subreddit=source_id,
                             start_page=page,
-                            max_pages=1
+                            max_pages=1,
+                            sort=sort
                         )
                 request_counter = result.get("request_counter", request_counter)
                 last_reset = result.get("last_reset", last_reset)
