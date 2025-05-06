@@ -115,10 +115,11 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "theme_keywords": []
         }
     
-    logger.info(f"開始語義分析：查詢={user_query}")
+    logger.info(f"開始語義分析：查詢={user_query}, source_type={source_type}")
     parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
     intents = parsed_query["intents"]
     query_keywords = parsed_query["keywords"]
+    related_terms = parsed_query.get("related_terms", [])  # 新增：獲取 related_terms
     top_thread_ids = parsed_query["thread_ids"]
     reason = parsed_query["reason"]
     confidence = parsed_query["confidence"]
@@ -144,7 +145,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         reason = "問題模糊，默認總結帖子"
     
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
-    theme_keywords = historical_keywords if is_vague else query_keywords
+    theme_keywords = historical_keywords if is_vague else (query_keywords + related_terms)  # 新增：包含 related_terms
     
     post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else (20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5)
     data_type = "both" if not all(i["intent"] in ["general_query", "introduce"] for i in intents) else "none"
@@ -153,7 +154,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         post_limit = len(top_thread_ids) or 2
         data_type = "replies"
     
-    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}")
+    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}, theme_keywords={theme_keywords}")
     return {
         "direct_response": all(i["intent"] in ["general_query", "introduce"] for i in intents),
         "intents": intents,
@@ -333,7 +334,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     # 計算 parsed_query 以確保 follow_up 邏輯可用
     parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
-    logger.info(f"Parsed query in stream_grok3_response: intents={[i['intent'] for i in parsed_query['intents']]}, thread_ids={parsed_query['thread_ids']}")
+    logger.info(f"Parsed query in stream_grok3_response: intents={[i['intent'] for i in parsed_query['intents']]}, thread_ids={parsed_query['thread_ids']}, related_terms={parsed_query.get('related_terms', [])}")
 
     intent_word_ranges = {
         "list_titles": (140, 400),
@@ -345,7 +346,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "search_keywords": (700, 2800),
         "recommend_threads": (700, 2800),
         "follow_up": (1000, 5000),
-        "fetch_thread_by_id": (700, 2800)
+        "fetch_thread_by_id": (700, 2800),
+        "time_sensitive_analysis": (500, 1000),  # 新增：支持新意圖
+        "contextual_analysis": (700, 1500)      # 新增：支持新意圖
     }
     
     total_min_tokens = 0
@@ -433,7 +436,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         
         if not referenced_thread_ids and any(intent == "follow_up" for intent in intents):
             keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-            theme_keywords = keyword_result["keywords"]
+            theme_keywords = keyword_result["keywords"] + keyword_result.get("related_terms", [])  # 新增：包含 related_terms
             async with request_semaphore:
                 if source_type == "lihkg":
                     supplemental_result = await get_lihkg_topic_list(
@@ -856,7 +859,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             
             if len(thread_data) < 5 and any(i["intent"] == "follow_up" for i in intents):
                 keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
-                theme_keywords = keyword_result["keywords"]
+                theme_keywords = keyword_result["keywords"] + keyword_result.get("related_terms", [])  # 新增：包含 related_terms
                 
                 async with request_semaphore:
                     if source_type == "lihkg":
