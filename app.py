@@ -161,7 +161,19 @@ async def main():
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        def update_progress(message, progress):
+        def update_progress(message, progress, source_type=None, details=None):
+            if source_type == "reddit":
+                if details and "current_comments" in details and "total_comments" in details:
+                    message = f"{message} ({details['current_comments']}/{details['total_comments']} 條評論)"
+                elif details and "wait_time" in details:
+                    message = f"{message} (等待速率限制 {details['wait_time']:.2f} 秒)"
+            elif source_type == "lihkg":
+                if details and "current_page" in details and "total_pages" in details:
+                    message = f"{message} (第 {details['current_page']}/{details['total_pages']} 頁)"
+                elif details and "current_thread" in details and "total_threads" in details:
+                    message = f"{message} (第 {details['current_thread']}/{details['total_threads']} 帖子)"
+                elif details and "wait_time" in details:
+                    message = f"{message} (等待速率限制 {details['wait_time']:.2f} 秒)"
             status_text.write(f"正在處理：{message}")
             progress_bar.progress(min(max(progress, 0.0), 1.0))
 
@@ -188,9 +200,9 @@ async def main():
                 if time.time() - cached_data["timestamp"] < 300:  # 緩存 5 分鐘
                     logger.info(f"使用 app 層緩存數據，來源：{source_id}")
                     result = cached_data["data"]
-                    update_progress("從緩存載入數據", 0.35)
+                    update_progress("從緩存載入數據", 0.35, source_type)
                 else:
-                    update_progress("正在抓取帖子數據", 0.25)
+                    update_progress("正在抓取數據", 0.25, source_type)
                     result = await process_user_question(
                         user_query=user_query,
                         selected_source=selected_cat,
@@ -198,15 +210,15 @@ async def main():
                         source_type=source_type,
                         analysis=analysis,
                         conversation_context=st.session_state.conversation_context,
-                        progress_callback=update_progress
+                        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
                     )
-                    update_progress("帖子數據處理完成", 0.55)
+                    update_progress("數據處理完成", 0.55, source_type)
                     st.session_state.thread_cache[cache_key] = {
                         "timestamp": time.time(),
                         "data": result
                     }
             else:
-                update_progress("正在抓取帖子數據", 0.25)
+                update_progress("正在抓取數據", 0.25, source_type)
                 result = await process_user_question(
                     user_query=user_query,
                     selected_source=selected_cat,
@@ -214,9 +226,9 @@ async def main():
                     source_type=source_type,
                     analysis=analysis,
                     conversation_context=st.session_state.conversation_context,
-                    progress_callback=update_progress
+                    progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
                 )
-                update_progress("帖子數據處理完成", 0.55)
+                update_progress("數據處理完成", 0.55, source_type)
                 st.session_state.thread_cache[cache_key] = {
                     "timestamp": time.time(),
                     "data": result
