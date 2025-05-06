@@ -25,11 +25,11 @@ CONFIG = {
         "follow_up": (1000, 2500),
         "fetch_thread_by_id": (500, 1000),
         "general_query": (500, 1000),
-        "list_titles": (200, 900),
+        "list_titles": (500, 1500),
         "find_themed": (700, 1500),
         "fetch_dates": (500, 1000),
         "search_keywords": (700, 1500),
-        "recommend_threads": (500, 1000),
+        "recommend_threads": (500, 1500),
         "time_sensitive_analysis": (500, 1000),
         "contextual_analysis": (700, 1500)
     }
