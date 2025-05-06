@@ -124,7 +124,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     confidence = parsed_query["confidence"]
     
     if not intents:
-        logger.warning(f"意圖分析失敗：查詢={user_query}, 原因=無法識別有效意圖，回退到默認意圖 recommend_threads")
+        logger.warning(f"意圖分析失敗，查詢={user_query}，原因=無法識別有效意圖，回退到默認意圖 recommend_threads")
         intents = [{"intent": "recommend_threads", "confidence": 0.5, "reason": "無法識別有效意圖，回退到默認意圖"}]
         reason = "無法識別有效意圖，回退到默認意圖"
         confidence = 0.5
@@ -324,6 +324,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         return
     intents = processing.get('intents', ['summarize_posts'])
     logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}")
+    logger.info(f"Filters: {json.dumps(filters, ensure_ascii=False)}")
+    logger.info(f"Metadata: {json.dumps(metadata, ensure_ascii=False, default=str)}")
+    logger.info(f"傳遞的 intents: {intents}")
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -595,7 +598,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
-        intent=intents[0],
+        intents=intents,
         selected_source=selected_source,
         grok3_api_key=GROK3_API_KEY
     )
@@ -632,7 +635,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
-            intent=intents[0],
+            intents=intents,
             selected_source=selected_source,
             grok3_api_key=GROK3_API_KEY
         )
@@ -643,8 +646,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
             f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
         )
-        target_tokens = total_min_tokens + (total_replies_count / 500) * (total_max_tokens - total_min_tokens) * 0.9
-        target_tokens = min(max(int(target_tokens), total_min_tokens), total_max_tokens)
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     messages = [
@@ -657,6 +658,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         *conversation_context,
         {"role": "user", "content": prompt}
     ]
+    max_tokens = min(total_max_tokens, GROK3_TOKEN_LIMIT - estimated_tokens)
     payload = {
         "model": "grok-3",
         "messages": messages,
