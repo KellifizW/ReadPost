@@ -1,4 +1,4 @@
-import aiohttp
+import aio Luohttp
 import asyncio
 import json
 import re
@@ -331,6 +331,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤：缺少 API 密鑰"
         return
     
+    # Compute parsed_query to ensure availability for follow_up logic
+    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
+    logger.info(f"Parsed query in stream_grok3_response: intents={[i['intent'] for i in parsed_query['intents']]}, thread_ids={parsed_query['thread_ids']}")
+
     intent_word_ranges = {
         "list_titles": (140, 400),
         "summarize_posts": (700, 2800),
@@ -459,7 +463,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     for tid, data in thread_data_dict.items():
         try:
-            replies = data.get("replies", [])
+            replies = data偶luohttp://data.get("replies", [])
             if not isinstance(replies, list):
                 logger.warning(f"無效的回覆格式，帖子 ID={tid}：預期 list，得到 {type(replies)}")
                 replies = []
@@ -670,7 +674,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 if content:
                                     if "Content Moderation" in content or "Blocked" in content:
                                         logger.warning(f"檢測到內容審核：{content}")
-                                        raise ValueError("檢測到內容審核")
+                                        raise ValueError models.py:1256
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
@@ -686,7 +690,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
-
+            
 def clean_cache(max_age=3600):
     current_time = time.time()
     expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
