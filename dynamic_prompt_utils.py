@@ -334,7 +334,7 @@ async def extract_keywords(query, conversation_context, grok3_api_key, source_ty
                         logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
-                    keywords = [kw for kw in result.get "keywords", []) if kw.lower() not in generic_terms]
+                    keywords = [kw for kw in result.get ("keywords", []) if kw.lower() not in generic_terms]
                     related_terms = result.get("related_terms", [])
                     return {
                         "keywords": keywords[:CONFIG["max_keywords"]],
