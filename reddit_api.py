@@ -111,8 +111,11 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
         
         logger.info(f"開始抓取子版 {subreddit}，排序：{sort}，當前請求次數 {request_counter}")
         
+        if sort not in ["best", "new"]:
+            raise ValueError(f"不支持的排序方式：{sort}，僅支援 'best' 或 'new'")
+        
         if sort == "best":
-            async for submission in subreddit_obj.top(sort="best", limit=total_limit):
+            async for submission in subreddit_obj.top(time_filter="day", limit=total_limit):
                 if submission.created_utc:
                     hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
                     readable_time = hk_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -137,8 +140,6 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
                         "like_count": submission.score
                     }
                     items.append(item)
-        else:
-            raise ValueError(f"不支持的排序方式：{sort}")
         
         logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
         
@@ -179,7 +180,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
     more_comments_ids = []
     comments = []
     
-    # 收集所有 MoreComments 的 children ID
     async for comment in submission.comments:
         if isinstance(comment, asyncpraw.models.MoreComments):
             more_comments_ids.extend(comment.children)
@@ -192,7 +192,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                 "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
             })
     
-    # 分批處理 children ID（每次最多 100 條）
     BATCH_SIZE = 100
     for i in range(0, len(more_comments_ids), BATCH_SIZE):
         if len(comments) >= max_comments:
@@ -201,7 +200,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
         if not batch_ids:
             continue
         
-        # 檢查速率限制
         if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE:
             wait_time = 60 - (time.time() - local_last_reset)
             if wait_time > 0:
@@ -210,7 +208,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                 request_counter = 0
                 local_last_reset = time.time()
         
-        # 調用 /api/morechildren
         try:
             more_comments = await reddit.comment.more_children(
                 link_id=f"t3_{submission.id}",
@@ -292,7 +289,6 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
         like_count = submission.score
         last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
         
-        # 收集評論，包括 MoreComments
         replies, request_counter, local_last_reset = await collect_more_comments(
             reddit, submission, max_comments, request_counter, local_last_reset
         )
@@ -403,7 +399,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             like_count = submission.score
             last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
             
-            # 收集評論，包括 MoreComments
             replies, request_counter, local_last_reset = await collect_more_comments(
                 reddit, submission, max_comments, request_counter, local_last_reset
             )
