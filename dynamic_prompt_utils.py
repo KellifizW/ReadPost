@@ -38,6 +38,19 @@ CONFIG = {
 async def parse_query(query, conversation_context, grok3_api_key, source_type="lihkg"):
     conversation_context = conversation_context or []
     
+    # 驗證輸入參數
+    if not isinstance(query, str):
+        logger.error(f"無效查詢類型：預期 str，得到 {type(query)}")
+        return {
+            "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "無效查詢類型"}],
+            "keywords": [],
+            "related_terms": [],
+            "time_range": "all",
+            "thread_ids": [],
+            "reason": "無效查詢類型",
+            "confidence": 0.5
+        }
+    
     # 提取關鍵詞和相關詞
     keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, source_type)
     keywords = keyword_result.get("keywords", [])
@@ -397,6 +410,15 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
         return None, None, None, f"提取錯誤：{str(e)}"
 
 async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
+    # 確保 selected_source 是字典
+    if isinstance(selected_source, str):
+        source_name = selected_source
+        source_type = "reddit" if "reddit" in source_name.lower() else "lihkg"
+        selected_source = {"source_name": source_name, "source_type": source_type}
+    elif not isinstance(selected_source, dict):
+        logger.warning(f"無效的 selected_source 類型：{type(selected_source)}，使用默認值")
+        selected_source = {"source_name": "未知", "source_type": "lihkg"}
+    
     parsed_query = await parse_query(query, conversation_context, grok3_api_key, selected_source.get("source_type", "lihkg"))
     intents = parsed_query["intents"]
     keywords = parsed_query["keywords"]
@@ -447,41 +469,41 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     for intent_info in intents[:2]:
         intent = intent_info["intent"]
         if intent == "summarize_posts":
-            instruction('&instruction_parts', f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，引用高點讚回覆，簡明扼要。")
-            instruction('&format_instructions', "使用連貫段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，總結其核心討論。")
+            instruction_parts.append(f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，引用高點讚回覆，簡明扼要。")
+            format_instructions.append("使用連貫段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，總結其核心討論。")
         elif intent == "analyze_sentiment":
-            instruction('&instruction_parts', f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例，融入總結，聚焦關鍵詞 {keywords}。")
-            instruction('&format_instructions', "使用段落格式，總結情緒分析結果，並以表格形式列出每個帖子的情緒比例，格式為 | 帖子 ID | 情緒 | 比例 |。")
+            instruction_parts.append(f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例，融入總結，聚焦關鍵詞 {keywords}。")
+            format_instructions.append("使用段落格式，總結情緒分析結果，並以表格形式列出每個帖子的情緒比例，格式為 | 帖子 ID | 情緒 | 比例 |。")
         elif intent == "follow_up":
-            instruction('&instruction_parts', f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords} 和相關詞 {related_terms}，引用高點讚或最新回覆，補充上下文。")
-            instruction('&format_instructions', "使用詳細段落格式，聚焦上下文連貫性，必要時分段以突出不同回覆的觀點。")
+            instruction_parts.append(f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords} 和相關詞 {related_terms}，引用高點讚或最新回覆，補充上下文。")
+            format_instructions.append("使用詳細段落格式，聚焦上下文連貫性，必要時分段以突出不同回覆的觀點。")
         elif intent == "fetch_thread_by_id":
-            instruction('&instruction_parts', f"根據提供的帖子 ID 總結內容，引用高點讚或最新回覆，突出核心討論。")
-            instruction('&format_instructions', "使用單一段落格式，詳細總結指定帖子的內容，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"根據提供的帖子 ID 總結內容，引用高點讚或最新回覆，突出核心討論。")
+            format_instructions.append("使用單一段落格式，詳細總結指定帖子的內容，引用 [帖子 ID: {thread_id}]。")
         elif intent == "general_query" and not is_vague:
-            instruction('&instruction_parts', f"提供與問題相關的簡化總結，基於元數據推測話題，保持簡潔。")
-            instruction('&format_instructions', "使用簡潔段落格式，直接回答問題，必要時引用相關帖子。")
+            instruction_parts.append(f"提供與問題相關的簡化總結，基於元數據推測話題，保持簡潔。")
+            format_instructions.append("使用簡潔段落格式，直接回答問題，必要時引用相關帖子。")
         elif intent == "list_titles":
-            instruction('&instruction_parts', f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，並簡述其相關性。")
-            instruction('&format_instructions', "使用有序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和簡短相關性說明。")
+            instruction_parts.append(f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，並簡述其相關性。")
+            format_instructions.append("使用有序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和簡短相關性說明。")
         elif intent == "find_themed":
-            instruction('&instruction_parts', f"尋找與關鍵詞 {keywords} 和相關詞 {related_terms} 相關的帖子，總結其內容，突出主題關聯。")
-            instruction('&format_instructions', "使用段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，強調主題相關性。")
+            instruction_parts.append(f"尋找與關鍵詞 {keywords} 和相關詞 {related_terms} 相關的帖子，總結其內容，突出主題關聯。")
+            format_instructions.append("使用段落格式，每個帖子以 [帖子 ID: {thread_id}] 開頭，強調主題相關性。")
         elif intent == "fetch_dates":
-            instruction('&instruction_parts', f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，融入總結。")
-            instruction('&format_instructions', "使用表格格式，列出帖子 ID、標題和日期，後附簡短總結段落，格式為 | 帖子 ID | 標題 | 日期 |。")
+            instruction_parts.append(f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，融入總結。")
+            format_instructions.append("使用表格格式，列出帖子 ID、標題和日期，後附簡短總結段落，格式為 | 帖子 ID | 標題 | 日期 |。")
         elif intent == "search_keywords":
-            instruction('&instruction_parts', f"搜索包含關鍵詞 {keywords} 和相關詞 {related_terms} 的帖子，總結其內容，強調關鍵詞匹配。")
-            instruction('&format_instructions', "使用段落格式，突出關鍵詞匹配，每個帖子以 [帖子 ID: {thread_id}] 開頭。")
+            instruction_parts.append(f"搜索包含關鍵詞 {keywords} 和相關詞 {related_terms} 的帖子，總結其內容，強調關鍵詞匹配。")
+            format_instructions.append("使用段落格式，突出關鍵詞匹配，每個帖子以 [帖子 ID: {thread_id}] 開頭。")
         elif intent == "recommend_threads":
-            instruction('&instruction_parts', f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦關鍵詞 {keywords} 和 {source_type} 熱門內容。")
-            instruction('&format_instructions', "使用無序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和推薦理由。")
+            instruction_parts.append(f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦關鍵詞 {keywords} 和 {source_type} 熱門內容。")
+            format_instructions.append("使用無序列表格式，每項包含 [帖子 ID: {thread_id}]、標題和推薦理由。")
         elif intent == "time_sensitive_analysis":
-            instruction('&instruction_parts', f"優先總結過去24小時的帖子，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，引用最新回覆，突出時間敏感討論。")
-            instruction('&format_instructions', "使用段落格式，標註回覆時間，優先引用 [帖子 ID: {thread_id}] 的最新討論。")
+            instruction_parts.append(f"優先總結過去24小時的帖子，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，引用最新回覆，突出時間敏感討論。")
+            format_instructions.append("使用段落格式，標註回覆時間，優先引用 [帖子 ID: {thread_id}] 的最新討論。")
         elif intent == "contextual_analysis":
-            instruction('&instruction_parts', f"綜合最多5個帖子的討論，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，總結主要觀點，動態識別主題（如正面、負面），引用高點讚、最新和多樣化回覆，分析情緒比例。")
-            instruction('&format_instructions', f"使用連貫段落，按主題分段（每個主題引用不同帖子），結尾附情緒分佈表格，格式為 | 主題 | 比例 | 代表性帖子 |。")
+            instruction_parts.append(f"綜合最多5個帖子的討論，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，總結主要觀點，動態識別主題（如正面、負面），引用高點讚、最新和多樣化回覆，分析情緒比例。")
+            format_instructions.append(f"使用連貫段落，按主題分段（每個主題引用不同帖子），結尾附情緒分佈表格，格式為 | 主題 | 比例 | 代表性帖子 |。")
 
     platform_instruction = (
         f"針對 {source_type} 平台，適當融入平台特定上下文（如 Reddit 的子版背景或 LIHKG 的討論區熱度）。"
@@ -515,6 +537,7 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             f"[Instructions]\n{combined_instruction}"
         )
     
+    logger.info(f"生成提示：查詢={query}, 提示長度={len(prompt)} 字符, intents={[i['intent'] for i in intents]}")
     return prompt
 
 def format_context(conversation_context):
