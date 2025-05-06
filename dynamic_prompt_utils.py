@@ -371,9 +371,9 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
         logger.debug(f"Thread extraction error: {str(e)}")
         return None, None, None, f"Error during thread extraction: {str(e)}"
 
-async def build_dynamic_prompt(parsed_query, threads_data, source_type="lihkg"):
+async def build_dynamic_prompt(parsed_query, threads_data, query, source_type="lihkg"):
     """
-    Build a dynamic prompt for Grok-3 based on parsed query and thread data.
+    Build a dynamic prompt for Grok-3 based on parsed query, thread data, and original query.
     Returns a structured prompt with clear response format instructions.
     """
     intents = parsed_query.get("intents", [])
@@ -381,7 +381,14 @@ async def build_dynamic_prompt(parsed_query, threads_data, source_type="lihkg"):
     related_terms = parsed_query.get("related_terms", [])
     time_range = parsed_query.get("time_range", "all")
     thread_ids = parsed_query.get("thread_ids", [])
-    primary_intent = intents[0]["intent"] if intents else "recommend_threads"
+    
+    # Handle None intent case
+    primary_intent = intents[0]["intent"] if intents else "summarize_posts"
+    if not intents:
+        logger.warning(f"No intents provided for query={query}, defaulting to summarize_posts")
+    
+    # Log input parameters
+    logger.info(f"Building dynamic prompt: query={query}, intent={primary_intent}, source_type={source_type}")
     
     # Determine word range for response
     word_range = CONFIG["default_word_ranges"].get(primary_intent, (500, 800))
@@ -389,6 +396,7 @@ async def build_dynamic_prompt(parsed_query, threads_data, source_type="lihkg"):
     # Base prompt structure
     prompt = f"""
 你是社交媒體分析助手，專注於 {source_type} 的討論區（Reddit 或 LIHKG）。
+用戶查詢：{query}
 根據以下解析的查詢和帖子數據，生成結構化回應，確保內容清晰、簡潔，且不重複。
 查詢意圖：{json.dumps(intents, ensure_ascii=False)}
 關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
@@ -428,6 +436,11 @@ async def build_dynamic_prompt(parsed_query, threads_data, source_type="lihkg"):
         prompt += """
 7. 聚焦於指定帖子 ID，深入分析回覆內容、用戶觀點和情緒。
 8. 提供至少 3 個關鍵回覆的引述（包含用戶名和時間戳）。
+"""
+    elif primary_intent == "summarize_posts":
+        prompt += """
+7. 總結帖子內容，突出主要討論主題和用戶觀點。
+8. 提供 2-3 個關鍵回覆的引述（若適用）。
 """
     
     # Ensure prompt length is within limits
