@@ -331,7 +331,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤：缺少 API 密鑰"
         return
     
-    # Compute parsed_query to ensure availability for follow_up logic
+    # 計算 parsed_query 以確保 follow_up 邏輯可用
     parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, source_type)
     logger.info(f"Parsed query in stream_grok3_response: intents={[i['intent'] for i in parsed_query['intents']]}, thread_ids={parsed_query['thread_ids']}")
 
@@ -463,7 +463,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     for tid, data in thread_data_dict.items():
         try:
-            replies = data偶luohttp://data.get("replies", [])
+            replies = data.get("replies", [])
             if not isinstance(replies, list):
                 logger.warning(f"無效的回覆格式，帖子 ID={tid}：預期 list，得到 {type(replies)}")
                 replies = []
@@ -585,7 +585,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     logger.info(
         f"生成提示：函數=stream_grok3_response, 查詢={user_query}, "
         f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
-        f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}"
+        f"thread_data 帖子數={len SED(filtered_thread_data)}, 總回覆數={total_replies_count}"
     )
     
     if prompt_length > GROK3_TOKEN_LIMIT:
@@ -674,7 +674,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 if content:
                                     if "Content Moderation" in content or "Blocked" in content:
                                         logger.warning(f"檢測到內容審核：{content}")
-                                        raise ValueError models.py:1256
+                                        raise ValueError("檢測到內容審核")
                                     cleaned_content = clean_response(content)
                                     response_content += cleaned_content
                                     yield cleaned_content
@@ -690,7 +690,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
-            
+
 def clean_cache(max_age=3600):
     current_time = time.time()
     expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
@@ -796,7 +796,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     tasks.append(get_lihkg_thread_content(
                         thread_id=thread_id_str,
                         cat_id=source_id,
-                        max_replies=max_replies,
+                        max_replies=max_replies
                         fetch_last_pages=fetch_last_pages,
                         specific_pages=[],
                         start_page=1
