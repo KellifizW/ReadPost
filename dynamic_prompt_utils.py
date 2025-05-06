@@ -25,7 +25,7 @@ CONFIG = {
         "follow_up": (1000, 2500),
         "fetch_thread_by_id": (500, 1000),
         "general_query": (500, 1000),
-        "list_titles": (200, 600),
+        "list_titles": (200, 900),
         "find_themed": (700, 1500),
         "fetch_dates": (500, 1000),
         "search_keywords": (700, 1500),
