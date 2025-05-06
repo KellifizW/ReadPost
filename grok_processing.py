@@ -10,7 +10,7 @@ import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
-from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords
+from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
@@ -342,25 +342,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield "錯誤：缺少 API 密鑰"
         return
     
-    intent_word_ranges = {
-        "list_titles": (140, 400),
-        "summarize_posts": (700, 2800),
-        "analyze_sentiment": (700, 2800),
-        "general_query": (700, 2800),
-        "find_themed": (700, 2800),
-        "fetch_dates": (700, 2800),
-        "search_keywords": (700, 2800),
-        "recommend_threads": (700, 2800),
-        "follow_up": (1000, 5000),
-        "fetch_thread_by_id": (700, 2800),
-        "time_sensitive_analysis": (500, 1000),
-        "contextual_analysis": (700, 1500)
-    }
-    
     total_min_tokens = 0
     total_max_tokens = 0
     for intent in intents:
-        word_min, word_max = intent_word_ranges.get(intent, (700, 2800))
+        word_min, word_max = CONFIG["default_word_ranges"].get(intent, (500, 1500))
         total_min_tokens += int(word_min / 0.8)
         total_max_tokens += int(word_max / 0.8)
     
