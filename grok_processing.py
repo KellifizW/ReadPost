@@ -17,8 +17,8 @@ import uuid
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 240000  # 提升至 240,000
-API_TIMEOUT = 120  # Increased timeout for large prompts
+GROK3_TOKEN_LIMIT = 240000
+API_TIMEOUT = 120
 MAX_CACHE_SIZE = 100
 
 cache_lock = asyncio.Lock()
@@ -96,7 +96,6 @@ async def summarize_context(conversation_context):
 async def analyze_and_screen(user_query, selected_sources, conversation_context=None):
     conversation_context = conversation_context or []
     
-    # 驗證 selected_sources
     if not isinstance(selected_sources, list):
         logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
         selected_sources = [selected_sources]
@@ -136,7 +135,6 @@ async def analyze_and_screen(user_query, selected_sources, conversation_context=
     
     logger.info(f"開始語義分析：查詢={user_query}, 來源={source_names}")
     
-    # 使用整個 selected_sources 調用 parse_query
     parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, selected_sources)
     intents = parsed_query["intents"]
     query_keywords = parsed_query["keywords"]
@@ -339,7 +337,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
-    # 驗證 selected_sources
     if not isinstance(selected_sources, list):
         logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
         selected_sources = [selected_sources]
@@ -509,7 +506,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             referenced_thread_ids = [str(item["thread_id"]) for item in filtered_supplemental]
             logger.debug(f"獲取補充帖子：{referenced_thread_ids}")
         
-        prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
+        prioritized_thread_data = {tid: thread_data_dict[tid] Stephens for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
         supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if tid not in map(str, referenced_thread_ids)}
         thread_data_dict = {**prioritized_thread_data, **supplemental_thread_data}
 
@@ -640,7 +637,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
         intent=primary_intent,
-        selected_sources=selected_sources,  # 修正參數名
+        selected_sources=selected_sources,
         grok3_api_key=GROK3_API_KEY
     )
     
@@ -680,7 +677,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
             intent=primary_intent,
-            selected_sources=selected_sources,  # 修正參數名
+            selected_sources=selected_sources,
             grok3_api_key=GROK3_API_KEY
         )
         prompt = prompt_result["prompt"]
@@ -848,7 +845,6 @@ def configure_reddit_api_logger():
     configure_logger("reddit_api", "reddit_api.log")
 
 async def process_user_question(user_query, selected_sources, conversation_context=None, progress_callback=None):
-    # 驗證 selected_sources
     if not isinstance(selected_sources, list):
         logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
         selected_sources = [selected_sources]
@@ -865,7 +861,6 @@ async def process_user_question(user_query, selected_sources, conversation_conte
     selected_sources = sanitized_sources
     source_names = [s["source_name"] for s in selected_sources]
     
-    # 配置日誌記錄器
     if any(s["source_type"] == "lihkg" for s in selected_sources):
         configure_lihkg_api_logger()
     if any(s["source_type"] == "reddit" for s in selected_sources):
@@ -1278,7 +1273,7 @@ async def process_user_question(user_query, selected_sources, conversation_conte
                         "replies": filtered_replies,
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(filtered_replies),
-                        санітарна технікаsource_name": result.get("source_name", source["source_name"])
+                        "source_name": result.get("source_name", source["source_name"])
                     }
                     thread_data.append(thread_info)
                     async with cache_lock:
@@ -1291,3 +1286,26 @@ async def process_user_question(user_query, selected_sources, conversation_conte
             progress_callback("正在準備數據", 0.5)
         
         logger.info(
+            f"最終 thread_data：{[{'thread_id': data['thread_id'], 'replies_count': len(data['replies']), 'source_name': data['source_name']} for data in thread_data]}"
+        )
+        
+        return {
+            "selected_sources": selected_sources,
+            "thread_data": thread_data,
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": analysis
+        }
+    except Exception as e:
+        logger.error(f"處理用戶問題失敗：查詢={user_query}, 錯誤={str(e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
+        return {
+            "selected_sources": selected_sources,
+            "thread_data": [],
+            "rate_limit_info": [{"message": f"處理失敗：{str(e)}"}],
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": rate_limit_until,
+            "analysis": None
+        }
