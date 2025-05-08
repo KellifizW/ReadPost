@@ -98,7 +98,6 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
     try:
         total_limit = 100
         subreddit_obj = await reddit.subreddit(subreddit)
-        subreddit_name = await get_subreddit_name(subreddit, reddit)
         request_counter += 1
         if request_counter >= RATE_LIMIT_REQUESTS_PER_MINUTE:
             wait_time = 60 - (time.time() - local_last_reset)
@@ -125,8 +124,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
                         "title": submission.title,
                         "no_of_reply": submission.num_comments,
                         "last_reply_time": readable_time,
-                        "like_count": submission.score,
-                        "source_name": subreddit_name
+                        "like_count": submission.score
                     }
                     items.append(item)
         elif sort == "new":
@@ -139,42 +137,43 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
                         "title": submission.title,
                         "no_of_reply": submission.num_comments,
                         "last_reply_time": readable_time,
-                        "like_count": submission.score,
-                        "source_name": subreddit_name
+                        "like_count": submission.score
                     }
                     items.append(item)
         
         logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
         
-        result = {
-            "items": items,
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": local_last_reset,
-            "rate_limit_until": 0,
-            "source_name": subreddit_name
-        }
-        
         topic_cache[cache_key] = {
             "timestamp": time.time(),
-            "data": result
+            "data": {
+                "items": items,
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": local_last_reset,
+                "rate_limit_until": 0
+            }
         }
     except Exception as e:
         logger.error(f"抓取貼文列表失敗：{str(e)}")
         rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
-        result = {
+        return {
             "items": items,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": local_last_reset,
-            "rate_limit_until": 0,
-            "source_name": await get_subreddit_name(subreddit, reddit)
+            "rate_limit_until": 0
         }
     finally:
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
     
-    return result
+    return {
+        "items": items,
+        "rate_limit_info": rate_limit_info,
+        "request_counter": request_counter,
+        "last_reset": local_last_reset,
+        "rate_limit_until": 0
+    }
 
 async def collect_more_comments(reddit, submission, max_comments, request_counter, local_last_reset):
     """收集 MoreComments 的 children ID，分批調用 /api/morechildren"""
@@ -253,7 +252,6 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
     replies = []
     rate_limit_info = []
     local_last_reset = last_reset
-    subreddit_name = await get_subreddit_name(subreddit, reddit)
     
     try:
         request_counter += 1
@@ -283,8 +281,7 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": local_last_reset,
-                "rate_limit_until": 0,
-                "source_name": subreddit_name
+                "rate_limit_until": 0
             }
         
         title = submission.title
@@ -298,28 +295,25 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
         
         logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
         
-        result = {
-            "title": title,
-            "total_replies": total_replies,
-            "last_reply_time": last_reply_time,
-            "like_count": like_count,
-            "replies": replies,
-            "fetched_pages": [1],
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": local_last_reset,
-            "rate_limit_until": 0,
-            "source_name": subreddit_name
-        }
-        
         thread_cache[cache_key] = {
             "timestamp": time.time(),
-            "data": result
+            "data": {
+                "title": title,
+                "total_replies": total_replies,
+                "last_reply_time": last_reply_time,
+                "like_count": like_count,
+                "replies": replies,
+                "fetched_pages": [1],
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": local_last_reset,
+                "rate_limit_until": 0
+            }
         }
     except Exception as e:
         logger.error(f"抓取貼文內容失敗：{str(e)}")
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
-        result = {
+        return {
             "title": "",
             "total_replies": 0,
             "last_reply_time": "1970-01-01 00:00:00",
@@ -329,14 +323,24 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, reddit
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": local_last_reset,
-            "rate_limit_until": 0,
-            "source_name": subreddit_name
+            "rate_limit_until": 0
         }
     finally:
         if reddit and not hasattr(reddit, 'is_shared'):
             await reddit.close()
     
-    return result
+    return {
+        "title": title,
+        "total_replies": total_replies,
+        "last_reply_time": last_reply_time,
+        "like_count": like_count,
+        "replies": replies,
+        "fetched_pages": [1],
+        "rate_limit_info": rate_limit_info,
+        "request_counter": request_counter,
+        "last_reset": local_last_reset,
+        "rate_limit_until": 0
+    }
 
 async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100):
     global request_counter, last_reset, thread_cache
@@ -346,7 +350,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     fetch_status = {}
     
     reddit = await init_reddit_client()
-    subreddit_name = await get_subreddit_name(subreddit, reddit)
     try:
         logger.info(f"開始抓取貼文：{post_ids}，當前請求次數：{request_counter}")
         
@@ -386,8 +389,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                     "rate_limit_info": rate_limit_info,
                     "request_counter": request_counter,
                     "last_reset": local_last_reset,
-                    "rate_limit_until": 0,
-                    "source_name": subreddit_name
+                    "rate_limit_until": 0
                 })
                 fetch_status[post_id] = {"status": "failed", "replies": 0}
                 continue
@@ -411,8 +413,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": local_last_reset,
-                "rate_limit_until": 0,
-                "source_name": subreddit_name
+                "rate_limit_until": 0
             }
             results.append(result)
             fetch_status[post_id] = {"status": "success", "replies": len(replies)}
@@ -438,8 +439,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
             "last_reset": local_last_reset,
-            "rate_limit_until": 0,
-            "source_name": subreddit_name
+            "rate_limit_until": 0
         })
         fetch_status[post_id] = {"status": "failed", "replies": 0}
     finally:
@@ -451,6 +451,5 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
         "rate_limit_info": rate_limit_info,
         "request_counter": request_counter,
         "last_reset": local_last_reset,
-        "rate_limit_until": 0,
-        "source_name": subreddit_name
+        "rate_limit_until": 0
     }

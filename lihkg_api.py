@@ -20,7 +20,7 @@ import pytz
 from logging_config import configure_logger
 
 # 香港時區
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_KONG")
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 配置日誌記錄器
 logger = configure_logger(__name__, "lihkg_api.log")
@@ -193,17 +193,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
         rate_limit_info.extend(page_rate_limit_info)
         
         if data and data.get("response", {}).get("items"):
-            filtered_items = [
-                {
-                    "thread_id": item.get("thread_id"),
-                    "title": item.get("title"),
-                    "no_of_reply": item.get("no_of_reply", 0),
-                    "last_reply_time": item.get("last_reply_time", "0"),
-                    "like_count": item.get("like_count", 0),
-                    "dislike_count": item.get("dislike_count", 0),
-                    "source_name": get_category_name(cat_id)
-                } for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0
-            ]
+            filtered_items = [item for item in data["response"]["items"] if item.get("title") and item.get("no_of_reply", 0) > 0]
             items.extend(filtered_items)
             logger.info(f"Fetched cat_id={cat_id}, page={page}, items={len(filtered_items)}")
         else:
@@ -216,8 +206,7 @@ async def get_lihkg_topic_list(cat_id, start_page=1, max_pages=3):
         "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
-        "rate_limit_until": rate_limit_data["rate_limit_until"],
-        "source_name": get_category_name(cat_id)
+        "rate_limit_until": rate_limit_data["rate_limit_until"]
     }
 
 async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
@@ -263,16 +252,11 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
     else:
         logger.error(f"No data fetched for thread_id={thread_id}, page=1")
         return {
-            "replies": [],
-            "title": None,
-            "total_replies": 0,
-            "total_pages": 0,
-            "fetched_pages": fetched_pages,
-            "rate_limit_info": rate_limit_info,
+            "replies": [], "title": None, "total_replies": 0, "total_pages": 0,
+            "fetched_pages": fetched_pages, "rate_limit_info": rate_limit_info,
             "request_counter": rate_limit_data["request_counter"],
             "last_reset": rate_limit_data["last_reset"],
-            "rate_limit_until": rate_limit_data["rate_limit_until"],
-            "source_name": get_category_name(cat_id) if cat_id else "LIHKG"
+            "rate_limit_until": rate_limit_data["rate_limit_until"]
         }
     
     # 確定後續頁面
@@ -333,8 +317,7 @@ async def get_lihkg_thread_content(thread_id, cat_id=None, max_replies=250, fetc
         "rate_limit_info": rate_limit_info,
         "request_counter": rate_limit_data["request_counter"],
         "last_reset": rate_limit_data["last_reset"],
-        "rate_limit_until": rate_limit_data["rate_limit_until"],
-        "source_name": get_category_name(cat_id) if cat_id else "LIHKG"
+        "rate_limit_until": rate_limit_data["rate_limit_until"]
     }
 
 async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=250, fetch_last_pages=0, specific_pages=None, start_page=1):
@@ -381,13 +364,11 @@ async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=25
                 "rate_limit_info": [{"message": f"Fetch error: {str(result)}"}],
                 "request_counter": 0,
                 "last_reset": time.time(),
-                "rate_limit_until": 0,
-                "source_name": get_category_name(cat_id) if cat_id else "LIHKG"
+                "rate_limit_until": 0
             })
             continue
         
         result["thread_id"] = thread_id
-        result["source_name"] = get_category_name(cat_id) if cat_id else "LIHKG"
         rate_limit_info.extend(result.get("rate_limit_info", []))
         results.append(result)
     
@@ -402,6 +383,5 @@ async def get_lihkg_thread_content_batch(thread_ids, cat_id=None, max_replies=25
         "rate_limit_info": rate_limit_info,
         "request_counter": aggregated_rate_limit_data["request_counter"],
         "last_reset": aggregated_rate_limit_data["last_reset"],
-        "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"],
-        "source_name": get_category_name(cat_id) if cat_id else "LIHKG"
+        "rate_limit_until": aggregated_rate_limit_data["rate_limit_until"]
     }
