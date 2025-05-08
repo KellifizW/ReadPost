@@ -183,34 +183,39 @@ async def main():
             st.session_state.chat_history.append({"question": user_query, "answer": ""})
             st.session_state.last_user_query = user_query
 
-            # 並行處理多個來源
+            # Construct selected_sources list
+            selected_sources_list = [
+                {
+                    "source_name": source_name,
+                    "source_type": source_type,
+                    "source_id": source_id
+                }
+                for source_name, source_type, source_id in zip(selected_cats, source_types, source_ids)
+            ]
+
+            # Parallel processing of multiple sources
             tasks = []
-            for idx, (source_name, source_type, source_id) in enumerate(zip(selected_cats, source_types, source_ids)):
-                update_progress(f"分析問題意圖 - {source_name}", 0.15 + idx * 0.05)
+            for idx, source in enumerate(selected_sources_list):
+                update_progress(f"分析問題意圖 - {source['source_name']}", 0.15 + idx * 0.05)
                 analysis = await analyze_and_screen(
                     user_query=user_query,
-                    source_name=source_name,
-                    source_id=source_id,
-                    source_type=source_type,
+                    selected_sources=[source],
                     conversation_context=st.session_state.conversation_context
                 )
-                cache_key = f"{source_id}_topics"
+                cache_key = f"{source['source_id']}_topics"
                 if cache_key in st.session_state.thread_cache and time.time() - st.session_state.thread_cache[cache_key]["timestamp"] < 300:
-                    logger.info(f"使用 app 層緩存數據，來源：{source_id}")
+                    logger.info(f"使用 app 層緩存數據，來源：{source['source_id']}")
                     result = st.session_state.thread_cache[cache_key]["data"]
-                    update_progress(f"從緩存載入數據 - {source_name}", 0.25 + idx * 0.05, source_type)
-                    tasks.append(asyncio.sleep(0, result))  # 模擬異步任務
+                    update_progress(f"從緩存載入數據 - {source['source_name']}", 0.25 + idx * 0.05, source['source_type'])
+                    tasks.append(asyncio.sleep(0, result))  # Simulate async task
                 else:
                     tasks.append(
                         process_user_question(
                             user_query=user_query,
-                            selected_source={"source_name": source_name, "source_type": source_type},
-                            source_id=source_id,
-                            source_type=source_type,
-                            analysis=analysis,
+                            selected_sources=[source],
                             conversation_context=st.session_state.conversation_context,
                             progress_callback=lambda msg, prog, details=None: update_progress(
-                                f"{msg} - {source_name}", 0.25 + prog * 0.30 / len(selected_cats), source_type, details
+                                f"{msg} - {source['source_name']}", 0.25 + prog * 0.30 / len(selected_cats), source['source_type'], details
                             )
                         )
                     )
@@ -257,13 +262,11 @@ async def main():
                     ],
                     thread_data={item["thread_id"]: item for item in thread_data},
                     processing=analysis.get("processing", "general"),
-                    selected_source={"source_name": ", ".join(selected_cats), "source_type": "mixed" if len(selected_cats) > 1 else source_types[0]},
+                    selected_sources=selected_sources_list,
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
                     reason=analysis.get("reason", ""),
-                    filters=analysis.get("filters", {}),
-                    source_id=",".join(source_ids),
-                    source_type="mixed" if len(selected_cats) > 1 else source_types[0]
+                    filters=analysis.get("filters", {})
                 ):
                     response += chunk
                     grok_container.markdown(response)
