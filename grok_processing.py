@@ -11,12 +11,13 @@ from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
 from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG
+import traceback
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK3_TOKEN_LIMIT = 120000
-API_TIMEOUT = 90
+API_TIMEOUT = 120  # Increased timeout for large prompts
 MAX_CACHE_SIZE = 100
 
 cache_lock = asyncio.Lock()
@@ -347,7 +348,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents_info = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "無有效意圖，默認總結"}]
     
     intents = [i['intent'] for i in intents_info]
-    # 改動：移除重複日誌，僅記錄一次 intents
     logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}, source: {selected_source}")
 
     try:
@@ -373,6 +373,11 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     max_tokens = min(target_tokens + 500, max_tokens_limit)
     max_replies_per_thread = 300 if any(intent == "follow_up" for intent in intents) else 100
     max_comments = 300 if source_type == "reddit" and any(intent == "follow_up" for intent in intents) else 100
+
+    # Dynamically adjust max_replies_per_thread based on prompt size
+    if prompt_length > GROK3_TOKEN_LIMIT * 0.8:
+        max_replies_per_thread = max_replies_per_thread // 2
+        logger.debug(f"Prompt length {prompt_length} exceeds 80% of limit, reducing max_replies_per_thread to {max_replies_per_thread}")
 
     if any(intent == "list_titles" for intent in intents):
         max_replies_per_thread = 10
@@ -613,8 +618,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         f"intents={intents}, 主要意圖={primary_intent}, source={selected_source}"
     )
     
-    if prompt_length > GROK3_TOKEN_LIMIT:
-        logger.warning(f"提示長度超過限制：初始長度={prompt_length} > {GROK3_TOKEN_LIMIT}，縮減數據")
+    # Aggressive prompt size reduction
+    reduction_attempts = 0
+    while prompt_length > GROK3_TOKEN_LIMIT * 0.9 and reduction_attempts < 3:
         max_replies_per_thread = max_replies_per_thread // 2
         total_replies_count = 0
         filtered_thread_data = {
@@ -644,14 +650,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4
         logger.info(
-            f"縮減後提示：函數=stream_grok3_response, 查詢={user_query}, "
+            f"縮減後提示（嘗試 {reduction_attempts + 1}）：函數=stream_grok3_response, 查詢={user_query}, "
             f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
             f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, "
             f"intents={intents}, 主要意圖={primary_intent}, source={selected_source}"
         )
-        target_tokens = total_min_tokens + (total_replies_count / 500) * (total_max_tokens - total_min_tokens) * 0.9
-        target_tokens = min(max(int(target_tokens), total_min_tokens), max_tokens_limit)
-    
+        reduction_attempts += 1
+
+    if prompt_length > GROK3_TOKEN_LIMIT:
+        logger.error(f"無法縮減提示至限制以下：最終長度={prompt_length} > {GROK3_TOKEN_LIMIT}")
+        yield f"錯誤：提示數據過大，無法生成回應。請縮減查詢範圍或聯繫支持。"
+        return
+
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROK3_API_KEY}"}
     response_content = ""
     prompt_tokens = 0
@@ -711,10 +721,47 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                                     completion_tokens = usage.get("completion_tokens", completion_tokens)
                             except json.JSONDecodeError:
-                                logger.warning(f"流式數據 JSON 解碼錯誤")
+                                logger.warning(f"流式數據 JSON 解碼錯誤：{line_str}")
                                 continue
+        except aiohttp.ClientConnectionError as e:
+            logger.error(f"回應生成失敗：網絡連接錯誤，意圖={intents}, 錯誤={str(e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
+            yield f"錯誤：網絡連接失敗（{str(e)}）。請檢查網絡或稍後重試。"
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"回應生成失敗：API 響應錯誤，意圖={intents}, 錯誤={str(e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
+            yield f"錯誤：API 響應錯誤（{str(e)}）。請稍後重試。"
+        except asyncio.TimeoutError as e:
+            logger.error(f"回應生成失敗：API 超時，意圖={intents}, 錯誤={str(e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
+            # Fallback to non-streaming API call
+            logger.info(f"嘗試非流式 API 調用作為回退，max_tokens={max_tokens // 2}")
+            payload["stream"] = False
+            payload["max_tokens"] = max_tokens // 2
+            try:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    status_code = response.status
+                    if status_code != 200:
+                        logger.error(f"非流式回退失敗：狀態碼={status_code}, 意圖={intents}, source={selected_source}")
+                        yield f"錯誤：生成回應失敗（狀態碼 {status_code}）。請稍後重試。"
+                        return
+                    data = await response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        cleaned_content = clean_response(content)
+                        response_content += cleaned_content
+                        yield cleaned_content
+                    usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                    completion_tokens = usage.get("completion_tokens", completion_tokens)
+                    logger.info(
+                        f"非流式回退成功：函數=stream_grok3_response, "
+                        f"查詢={user_query}, 意圖={intents}, 狀態碼={status_code}, "
+                        f"輸入 token={prompt_tokens}, 輸出 token={completion_tokens}, "
+                        f"回應長度={len(response_content)}, source={selected_source}"
+                    )
+            except Exception as fallback_e:
+                logger.error(f"非流式回退失敗：意圖={intents}, 錯誤={str(fallback_e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
+                yield f"錯誤：生成回應失敗（{str(fallback_e)}）。請稍後重試或聯繫支持。"
         except Exception as e:
-            logger.error(f"回應生成失敗：意圖={intents}, 錯誤={str(e)}, source={selected_source}")
+            logger.error(f"回應生成失敗：意圖={intents}, 錯誤={str(e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
@@ -734,26 +781,21 @@ def clean_cache(max_age=3600):
         logger.info(f"清理緩存，移除 {len(sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE])} 個過舊條目，當前緩存大小：{len(st.session_state.thread_cache)}")
 
 def unix_to_readable(timestamp, context="unknown"):
-    # 改動：改進時間戳處理，支持多種格式
     try:
-        # 嘗試將輸入轉換為整數（Unix 時間戳）
         if isinstance(timestamp, (int, float)):
             dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         elif isinstance(timestamp, str):
-            # 嘗試將字符串轉為整數（Unix 時間戳）
             try:
                 timestamp_int = int(timestamp)
                 dt = datetime.datetime.fromtimestamp(timestamp_int, tz=HONG_KONG_TZ)
                 return dt.strftime("%Y-%m-%d %H:%M:%S")
             except ValueError:
-                # 嘗試解析日期字符串
                 try:
                     dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
                     dt = HONG_KONG_TZ.localize(dt)
                     return dt.strftime("%Y-%m-%d %H:%M:%S")
                 except ValueError:
-                    # 嘗試其他可能的日期格式（如果需要）
                     raise ValueError(f"無法解析日期字符串：{timestamp}")
         else:
             raise TypeError(f"無效的時間戳類型：{type(timestamp)}")
@@ -1230,7 +1272,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         }
     
     except Exception as e:
-        logger.error(f"處理用戶問題失敗：查詢={user_query}, 錯誤={str(e)}, source={selected_source}")
+        logger.error(f"處理用戶問題失敗：查詢={user_query}, 錯誤={str(e)}, source={selected_source}, 堆棧={traceback.format_exc()}")
         return {
             "selected_source": selected_source,
             "thread_data": [],
