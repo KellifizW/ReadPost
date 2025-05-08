@@ -12,6 +12,7 @@ from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
 from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG
 import traceback
+import uuid
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
@@ -95,6 +96,23 @@ async def summarize_context(conversation_context):
 async def analyze_and_screen(user_query, selected_sources, conversation_context=None):
     conversation_context = conversation_context or []
     
+    # 驗證 selected_sources
+    if not isinstance(selected_sources, list):
+        logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
+        selected_sources = [selected_sources]
+    sanitized_sources = []
+    for source in selected_sources:
+        if not isinstance(source, dict) or "source_name" not in source or "source_type" not in source:
+            logger.warning(f"無效的 source 格式：{source}，補充默認值")
+            source = {
+                "source_name": source.get("source_name", "未知"),
+                "source_type": source.get("source_type", "lihkg"),
+                "source_id": source.get("source_id", "")
+            }
+        sanitized_sources.append(source)
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
+    
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
     except KeyError as e:
@@ -116,10 +134,10 @@ async def analyze_and_screen(user_query, selected_sources, conversation_context=
             "theme_keywords": []
         }
     
-    logger.info(f"開始語義分析：查詢={user_query}, 來源={[s['source_name'] for s in selected_sources]}")
-    # 對每個來源進行意圖分析，但使用第一個來源的類型作為主要類型
-    primary_source_type = selected_sources[0]["source_type"]
-    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, primary_source_type)
+    logger.info(f"開始語義分析：查詢={user_query}, 來源={source_names}")
+    
+    # 使用整個 selected_sources 調用 parse_query
+    parsed_query = await parse_query(user_query, conversation_context, GROK3_API_KEY, selected_sources)
     intents = parsed_query["intents"]
     query_keywords = parsed_query["keywords"]
     top_thread_ids = parsed_query["thread_ids"]
@@ -156,7 +174,7 @@ async def analyze_and_screen(user_query, selected_sources, conversation_context=
         post_limit = len(top_thread_ids) or 2
         data_type = "replies"
     
-    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}")
+    logger.info(f"語義分析結果：intents={[i['intent'] for i in intents]}, confidence={confidence}, reason={reason}, sources={source_names}")
     return {
         "direct_response": all(i["intent"] in ["general_query", "introduce"] for i in intents),
         "intents": intents,
@@ -321,21 +339,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     
-    # 確保 selected_sources 是列表
+    # 驗證 selected_sources
     if not isinstance(selected_sources, list):
+        logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
         selected_sources = [selected_sources]
-        logger.debug(f"將單一 selected_source 轉換為列表：{selected_sources}")
-    for i, source in enumerate(selected_sources):
+    sanitized_sources = []
+    for source in selected_sources:
         if not isinstance(source, dict) or "source_name" not in source or "source_type" not in source:
             logger.warning(f"無效的 source 格式：{source}，補充默認值")
-            selected_sources[i] = {
+            source = {
                 "source_name": source.get("source_name", "未知"),
                 "source_type": source.get("source_type", "lihkg"),
                 "source_id": source.get("source_id", "")
             }
+        sanitized_sources.append(source)
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
     
     if not thread_data:
-        error_msg = f"在 {[s['source_name'] for s in selected_sources]} 中未找到符合條件的帖子（篩選：{json.dumps(filters, ensure_ascii=False)}）。建議嘗試其他關鍵詞或討論區！"
+        error_msg = f"在 {source_names} 中未找到符合條件的帖子（篩選：{json.dumps(filters, ensure_ascii=False)}）。建議嘗試其他關鍵詞或討論區！"
         logger.warning(f"無匹配帖子：{error_msg}")
         yield error_msg
         return
@@ -355,7 +377,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents_info = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "無有效意圖，默認總結"}]
     
     intents = [i['intent'] for i in intents_info]
-    logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}, sources: {[s['source_name'] for s in selected_sources]}")
+    logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}, sources: {source_names}")
 
     try:
         GROK3_API_KEY = st.secrets["grok3key"]
@@ -455,7 +477,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             referenced_thread_ids = [tid for tid in top_thread_ids if str(tid) in thread_data_dict]
         
         if not referenced_thread_ids and any(intent == "follow_up" for intent in intents):
-            keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
+            keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY, selected_sources)
             theme_keywords = keyword_result["keywords"]
             sort = "new" if keyword_result.get("time_sensitive", False) else "best"
             logger.debug(f"追問無參考帖子，獲取補充帖子，排序：{sort}，關鍵詞：{theme_keywords}")
@@ -477,8 +499,8 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         )
                 supplemental_threads.extend(supplemental_result.get("items", []))
             if not supplemental_threads:
-                logger.warning(f"無法獲取補充帖子，來源：{[s['source_name'] for s in selected_sources]}，排序：{sort}")
-                yield f"錯誤：在 {[s['source_name'] for s in selected_sources]} 中未找到相關帖子。請嘗試其他關鍵詞！"
+                logger.warning(f"無法獲取補充帖子，來源：{source_names}")
+                yield f"錯誤：在 {source_names} 中未找到相關帖子。請嘗試其他關鍵詞！"
                 return
             filtered_supplemental = [
                 item for item in supplemental_threads
@@ -611,24 +633,25 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     primary_intent_info = max(intents_info, key=lambda x: x["confidence"]) if intents_info else {"intent": "summarize_posts", "confidence": 0.7}
     primary_intent = primary_intent_info["intent"]
     
-    prompt = await build_dynamic_prompt(
+    prompt_result = await build_dynamic_prompt(
         query=user_query,
         conversation_context=conversation_context,
         metadata=metadata,
         thread_data=list(filtered_thread_data.values()),
         filters=filters,
         intent=primary_intent,
-        selected_source=selected_sources,  # 傳遞多個來源
+        selected_sources=selected_sources,  # 修正參數名
         grok3_api_key=GROK3_API_KEY
     )
     
+    prompt = prompt_result["prompt"]
     prompt_length = len(prompt)
     estimated_tokens = prompt_length // 4
     logger.info(
         f"生成提示：函數=stream_grok3_response, 查詢={user_query}, "
         f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
         f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, "
-        f"intents={intents}, 主要意圖={primary_intent}, sources={[s['source_name'] for s in selected_sources]}"
+        f"intents={intents}, 主要意圖={primary_intent}, sources={source_names}"
     )
     
     reduction_attempts = 0
@@ -650,23 +673,24 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             } for tid, data in filtered_thread_data.items()
         }
         total_replies_count = sum(len(data["replies"]) for data in filtered_thread_data.values())
-        prompt = await build_dynamic_prompt(
+        prompt_result = await build_dynamic_prompt(
             query=user_query,
             conversation_context=conversation_context,
             metadata=metadata,
             thread_data=list(filtered_thread_data.values()),
             filters=filters,
             intent=primary_intent,
-            selected_source=selected_sources,
+            selected_sources=selected_sources,  # 修正參數名
             grok3_api_key=GROK3_API_KEY
         )
+        prompt = prompt_result["prompt"]
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4
         logger.info(
             f"縮減後提示（嘗試 {reduction_attempts + 1}）：函數=stream_grok3_response, 查詢={user_query}, "
             f"提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, "
             f"thread_data 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, "
-            f"intents={intents}, 主要意圖={primary_intent}, sources={[s['source_name'] for s in selected_sources]}"
+            f"intents={intents}, 主要意圖={primary_intent}, sources={source_names}"
         )
         reduction_attempts += 1
 
@@ -705,7 +729,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                 status_code = response.status
                 if status_code != 200:
-                    logger.error(f"回應生成失敗：狀態碼={status_code}, 意圖={intents}, sources={[s['source_name'] for s in selected_sources]}")
+                    logger.error(f"回應生成失敗：狀態碼={status_code}, 意圖={intents}, sources={source_names}")
                     yield f"錯誤：生成回應失敗（狀態碼 {status_code}）。請稍後重試。"
                     return
                 
@@ -717,7 +741,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 f"Grok3 API 調用：函數=stream_grok3_response, "
                                 f"查詢={user_query}, 意圖={intents}, 狀態碼={status_code}, "
                                 f"輸入 token={prompt_tokens}, 輸出 token={completion_tokens}, "
-                                f"回應長度={len(response_content)}, sources={[s['source_name'] for s in selected_sources]}"
+                                f"回應長度={len(response_content)}, sources={source_names}"
                             )
                             break
                         if line_str.startswith("data:"):
@@ -739,13 +763,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                                 logger.warning(f"流式數據 JSON 解碼錯誤：{line_str}")
                                 continue
         except aiohttp.ClientConnectionError as e:
-            logger.error(f"回應生成失敗：網絡連接錯誤，意圖={intents}, 錯誤={str(e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
+            logger.error(f"回應生成失敗：網絡連接錯誤，意圖={intents}, 錯誤={str(e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
             yield f"錯誤：網絡連接失敗（{str(e)}）。請檢查網絡或稍後重試。"
         except aiohttp.ClientResponseError as e:
-            logger.error(f"回應生成失敗：API 響應錯誤，意圖={intents}, 錯誤={str(e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
+            logger.error(f"回應生成失敗：API 響應錯誤，意圖={intents}, 錯誤={str(e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
             yield f"錯誤：API 響應錯誤（{str(e)}）。請稍後重試。"
         except asyncio.TimeoutError as e:
-            logger.error(f"回應生成失敗：API 超時，意圖={intents}, 錯誤={str(e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
+            logger.error(f"回應生成失敗：API 超時，意圖={intents}, 錯誤={str(e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
             logger.info(f"嘗試非流式 API 調用作為回退，max_tokens={max_tokens // 2}")
             payload["stream"] = False
             payload["max_tokens"] = max_tokens // 2
@@ -753,7 +777,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     status_code = response.status
                     if status_code != 200:
-                        logger.error(f"非流式回退失敗：狀態碼={status_code}, 意圖={intents}, sources={[s['source_name'] for s in selected_sources]}")
+                        logger.error(f"非流式回退失敗：狀態碼={status_code}, 意圖={intents}, sources={source_names}")
                         yield f"錯誤：生成回應失敗（狀態碼 {status_code}）。請稍後重試。"
                         return
                     data = await response.json()
@@ -769,13 +793,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         f"非流式回退成功：函數=stream_grok3_response, "
                         f"查詢={user_query}, 意圖={intents}, 狀態碼={status_code}, "
                         f"輸入 token={prompt_tokens}, 輸出 token={completion_tokens}, "
-                        f"回應長度={len(response_content)}, sources={[s['source_name'] for s in selected_sources]}"
+                        f"回應長度={len(response_content)}, sources={source_names}"
                     )
             except Exception as fallback_e:
-                logger.error(f"非流式回退失敗：意圖={intents}, 錯誤={str(fallback_e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
+                logger.error(f"非流式回退失敗：意圖={intents}, 錯誤={str(fallback_e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
                 yield f"錯誤：生成回應失敗（{str(fallback_e)}）。請稍後重試或聯繫支持。"
         except Exception as e:
-            logger.error(f"回應生成失敗：意圖={intents}, 錯誤={str(e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
+            logger.error(f"回應生成失敗：意圖={intents}, 錯誤={str(e)}, sources={source_names}, 堆棧={traceback.format_exc()}")
             yield f"錯誤：生成回應失敗（{str(e)}）。請稍後重試或聯繫支持。"
         finally:
             await session.close()
@@ -824,17 +848,22 @@ def configure_reddit_api_logger():
     configure_logger("reddit_api", "reddit_api.log")
 
 async def process_user_question(user_query, selected_sources, conversation_context=None, progress_callback=None):
-    # 確保 selected_sources 是列表
+    # 驗證 selected_sources
     if not isinstance(selected_sources, list):
+        logger.warning(f"selected_sources 不是列表，轉換為列表：{selected_sources}")
         selected_sources = [selected_sources]
-    for i, source in enumerate(selected_sources):
+    sanitized_sources = []
+    for source in selected_sources:
         if not isinstance(source, dict) or "source_name" not in source or "source_type" not in source or "source_id" not in source:
             logger.warning(f"無效的 source 格式：{source}，補充默認值")
-            selected_sources[i] = {
+            source = {
                 "source_name": source.get("source_name", "未知"),
                 "source_type": source.get("source_type", "lihkg"),
                 "source_id": source.get("source_id", "")
             }
+        sanitized_sources.append(source)
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
     
     # 配置日誌記錄器
     if any(s["source_type"] == "lihkg" for s in selected_sources):
@@ -867,9 +896,9 @@ async def process_user_question(user_query, selected_sources, conversation_conte
         top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
         intents = analysis.get("intents", [{"intent": "summarize_posts", "confidence": 0.7}])
         
-        logger.info(f"處理用戶問題：查詢={user_query}, intents={[i['intent'] for i in intents]}, sources={[s['source_name'] for s in selected_sources]}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
+        logger.info(f"處理用戶問題：查詢={user_query}, intents={[i['intent'] for i in intents]}, sources={source_names}, post_limit={post_limit}, top_thread_ids={top_thread_ids}")
         
-        keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
+        keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY, selected_sources)
         fetch_last_pages = 1 if keyword_result.get("time_sensitive", False) else 0
         sort = "new" if keyword_result.get("time_sensitive", False) else "best"
         logger.debug(f"選擇排序方式：{sort}，基於 time_sensitive={keyword_result.get('time_sensitive', False)}")
@@ -968,7 +997,7 @@ async def process_user_question(user_query, selected_sources, conversation_conte
                                 }
             
             if len(thread_data) < 5 and any(i["intent"] == "follow_up" for i in intents):
-                keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY)
+                keyword_result = await extract_keywords(user_query, conversation_context, GROK3_API_KEY, selected_sources)
                 theme_keywords = keyword_result["keywords"]
                 
                 supplemental_tasks = []
@@ -1249,7 +1278,7 @@ async def process_user_question(user_query, selected_sources, conversation_conte
                         "replies": filtered_replies,
                         "fetched_pages": result.get("fetched_pages", []),
                         "total_fetched_replies": len(filtered_replies),
-                        "source_name": result.get("source_name", source["source_name"])
+                        санітарна технікаsource_name": result.get("source_name", source["source_name"])
                     }
                     thread_data.append(thread_info)
                     async with cache_lock:
@@ -1262,27 +1291,3 @@ async def process_user_question(user_query, selected_sources, conversation_conte
             progress_callback("正在準備數據", 0.5)
         
         logger.info(
-            f"最終 thread_data：{[{'thread_id': data['thread_id'], 'replies_count': len(data['replies']), 'source_name': data['source_name']} for data in thread_data]}, sources={[s['source_name'] for s in selected_sources]}"
-        )
-        
-        return {
-            "selected_sources": selected_sources,
-            "thread_data": thread_data,
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": rate_limit_until,
-            "analysis": analysis
-        }
-    
-    except Exception as e:
-        logger.error(f"處理用戶問題失敗：查詢={user_query}, 錯誤={str(e)}, sources={[s['source_name'] for s in selected_sources]}, 堆棧={traceback.format_exc()}")
-        return {
-            "selected_sources": selected_sources,
-            "thread_data": [],
-            "rate_limit_info": [{"message": f"處理錯誤：{str(e)}"}],
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": rate_limit_until,
-            "analysis": analysis
-        }
