@@ -58,11 +58,11 @@ async def main():
         st.session_state.conversation_context = []
     if "context_timestamps" not in st.session_state:
         st.session_state.context_timestamps = []
-    if "last_selected_source" not in st.session_state:
-        st.session_state.last_selected_source = None
+    if "last_selected_sources" not in st.session_state:
+        st.session_state.last_selected_sources = None
     if "page_reload_logged" not in st.session_state:
         st.session_state.page_reload_logged = True
-        logger.info(f"Page reloaded, last_selected_source: {st.session_state.get('last_selected_source', 'None')}")
+        logger.info(f"Page reloaded, last_selected_sources: {st.session_state.get('last_selected_sources', 'None')}")
 
     source_map = {
         "LIHKG - 吹水台": {"source": "lihkg", "cat_id": "1"},
@@ -80,48 +80,48 @@ async def main():
     }
 
     def on_source_change():
-        selected_source = st.session_state.get("source_select", "未知來源")
-        logger.info(f"Source selectbox changed to {selected_source}")
+        selected_sources = st.session_state.get("source_select", ["LIHKG - 吹水台"])
+        logger.info(f"Source multiselect changed to {selected_sources}")
 
     col1, col2 = st.columns([3, 1])
     with col1:
         try:
-            selected_source = st.selectbox(
-                "選擇數據來源",
+            selected_sources = st.multiselect(
+                "選擇數據來源（最多兩個）",
                 options=list(source_map.keys()),
-                index=0,
+                default=["LIHKG - 吹水台"],
+                max_selections=2,
                 key="source_select",
                 on_change=on_source_change
             )
-            source_info = source_map.get(selected_source, {"source": "lihkg", "cat_id": "1"})
-            source_type = source_info.get("source", "lihkg")
-            if source_type == "lihkg":
-                source_id = source_info.get("cat_id", "1")
-                selected_cat = selected_source
-            else:
-                source_id = source_info.get("subreddit", "stocks")
-                selected_cat = selected_source
+            source_info_list = [source_map.get(src, {"source": "lihkg", "cat_id": "1"}) for src in selected_sources]
+            source_types = [info.get("source", "lihkg") for info in source_info_list]
+            source_ids = [
+                info.get("cat_id", "1") if info.get("source") == "lihkg" else info.get("subreddit", "stocks")
+                for info in source_info_list
+            ]
+            selected_cats = selected_sources
         except Exception as e:
             logger.error(f"數據來源選擇錯誤：{str(e)}")
-            selected_cat = "LIHKG - 吹水台"
-            source_type = "lihkg"
-            source_id = "1"
+            selected_cats = ["LIHKG - 吹水台"]
+            source_types = ["lihkg"]
+            source_ids = ["1"]
     with col2:
         render_new_conversation_button()
 
-    if st.session_state.last_selected_source != selected_source:
+    if st.session_state.last_selected_sources != selected_sources:
         if st.button("確認切換數據來源並清除歷史"):
             st.session_state.chat_history = []
             st.session_state.conversation_context = []
             st.session_state.context_timestamps = []
             st.session_state.thread_cache = {}
             st.session_state.last_user_query = None
-            logger.info(f"Source changed to {selected_source}, cleared conversation history")
-        st.session_state.last_selected_source = selected_source
+            logger.info(f"Source changed to {selected_sources}, cleared conversation history")
+        st.session_state.last_selected_sources = selected_sources
     else:
-        logger.info(f"Source unchanged: {selected_source}, preserving conversation history")
+        logger.info(f"Source unchanged: {selected_sources}, preserving conversation history")
 
-    st.write(f"當前數據來源：{selected_cat}")
+    st.write(f"當前數據來源：{', '.join(selected_cats)}")
 
     for idx, chat in enumerate(st.session_state.chat_history):
         with st.chat_message("user"):
@@ -142,7 +142,7 @@ async def main():
             st.session_state.chat_history.append({"question": user_query, "answer": error_message})
             return
 
-        logger.info(f"User query: {user_query}, source: {selected_source}, source_type: {source_type}, source_id: {source_id}")
+        logger.info(f"User query: {user_query}, sources: {selected_sources}")
         with st.chat_message("user"):
             st.markdown(user_query)
         st.session_state.awaiting_response = True
@@ -174,7 +174,7 @@ async def main():
                     message = f"{message} (第 {details['current_thread']}/{details['total_threads']} 帖子)"
                 elif details and "wait_time" in details:
                     message = f"{message} (等待速率限制 {details['wait_time']:.2f} 秒)"
-            status_text.write(f"正在處理：{message}")
+            status_text.text(f"正在處理：{message}")
             progress_bar.progress(min(max(progress, 0.0), 1.0))
 
         try:
@@ -183,56 +183,55 @@ async def main():
             st.session_state.chat_history.append({"question": user_query, "answer": ""})
             st.session_state.last_user_query = user_query
 
-            update_progress("分析問題意圖", 0.15)
-            analysis = await analyze_and_screen(
-                user_query=user_query,
-                source_name=selected_cat,
-                source_id=source_id,
-                source_type=source_type,
-                conversation_context=st.session_state.conversation_context
-            )
-            logger.info(f"Analysis completed: intent={analysis.get('intent')}")
-
-            # 檢查緩存，避免重複抓取
-            cache_key = f"{source_id}_topics"
-            if cache_key in st.session_state.thread_cache:
-                cached_data = st.session_state.thread_cache[cache_key]
-                if time.time() - cached_data["timestamp"] < 300:  # 緩存 5 分鐘
-                    logger.info(f"使用 app 層緩存數據，來源：{source_id}")
-                    result = cached_data["data"]
-                    update_progress("從緩存載入數據", 0.35, source_type)
-                else:
-                    update_progress("正在抓取數據", 0.25, source_type)
-                    result = await process_user_question(
-                        user_query=user_query,
-                        selected_source=selected_cat,
-                        source_id=source_id,
-                        source_type=source_type,
-                        analysis=analysis,
-                        conversation_context=st.session_state.conversation_context,
-                        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
-                    )
-                    update_progress("數據處理完成", 0.55, source_type)
-                    st.session_state.thread_cache[cache_key] = {
-                        "timestamp": time.time(),
-                        "data": result
-                    }
-            else:
-                update_progress("正在抓取數據", 0.25, source_type)
-                result = await process_user_question(
+            # 並行處理多個來源
+            tasks = []
+            for idx, (source_name, source_type, source_id) in enumerate(zip(selected_cats, source_types, source_ids)):
+                update_progress(f"分析問題意圖 - {source_name}", 0.15 + idx * 0.05)
+                analysis = await analyze_and_screen(
                     user_query=user_query,
-                    selected_source=selected_cat,
+                    source_name=source_name,
                     source_id=source_id,
                     source_type=source_type,
-                    analysis=analysis,
-                    conversation_context=st.session_state.conversation_context,
-                    progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
+                    conversation_context=st.session_state.conversation_context
                 )
-                update_progress("數據處理完成", 0.55, source_type)
+                cache_key = f"{source_id}_topics"
+                if cache_key in st.session_state.thread_cache and time.time() - st.session_state.thread_cache[cache_key]["timestamp"] < 300:
+                    logger.info(f"使用 app 層緩存數據，來源：{source_id}")
+                    result = st.session_state.thread_cache[cache_key]["data"]
+                    update_progress(f"從緩存載入數據 - {source_name}", 0.25 + idx * 0.05, source_type)
+                    tasks.append(asyncio.sleep(0, result))  # 模擬異步任務
+                else:
+                    tasks.append(
+                        process_user_question(
+                            user_query=user_query,
+                            selected_source={"source_name": source_name, "source_type": source_type},
+                            source_id=source_id,
+                            source_type=source_type,
+                            analysis=analysis,
+                            conversation_context=st.session_state.conversation_context,
+                            progress_callback=lambda msg, prog, details=None: update_progress(
+                                f"{msg} - {source_name}", 0.25 + prog * 0.30 / len(selected_cats), source_type, details
+                            )
+                        )
+                    )
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            thread_data = []
+            rate_limit_info = []
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"抓取失敗：{selected_cats[idx]}，錯誤：{str(result)}")
+                    rate_limit_info.append({"message": f"抓取失敗：{selected_cats[idx]}，錯誤：{str(result)}"})
+                    continue
+                thread_data.extend(result.get("thread_data", []))
+                rate_limit_info.extend(result.get("rate_limit_info", []))
+                cache_key = f"{source_ids[idx]}_topics"
                 st.session_state.thread_cache[cache_key] = {
                     "timestamp": time.time(),
                     "data": result
                 }
+
+            update_progress("數據處理完成", 0.55)
 
             response = ""
             with st.chat_message("assistant"):
@@ -242,19 +241,29 @@ async def main():
                 with col2:
                     copy_container = st.empty()
                 update_progress("正在生成回應", 0.85)
-                logger.info(f"Starting stream_grok3_response for query: {user_query}, intent: {analysis.get('intent')}")
+                logger.info(f"Starting stream_grok3_response for query: {user_query}")
                 async for chunk in stream_grok3_response(
                     user_query=user_query,
-                    metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0} for item in result.get("thread_data", [])],
-                    thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
+                    metadata=[
+                        {
+                            "thread_id": item["thread_id"],
+                            "title": item["title"],
+                            "no_of_reply": item.get("no_of_reply", 0),
+                            "last_reply_time": item.get("last_reply_time", "0"),
+                            "like_count": item.get("like_count", 0),
+                            "dislike_count": item.get("dislike_count", 0) if any(t == "lihkg" for t in source_types) else 0,
+                            "source_name": next(src for src, res in zip(selected_cats, results) if isinstance(res, dict) and item["thread_id"] in [t["thread_id"] for t in res.get("thread_data", [])])
+                        } for item in thread_data
+                    ],
+                    thread_data={item["thread_id"]: item for item in thread_data},
                     processing=analysis.get("processing", "general"),
-                    selected_source=selected_cat,
+                    selected_source={"source_name": ", ".join(selected_cats), "source_type": "mixed" if len(selected_cats) > 1 else source_types[0]},
                     conversation_context=st.session_state.conversation_context,
                     needs_advanced_analysis=analysis.get("needs_advanced_analysis", False),
                     reason=analysis.get("reason", ""),
                     filters=analysis.get("filters", {}),
-                    source_id=source_id,
-                    source_type=source_type
+                    source_id=",".join(source_ids),
+                    source_type="mixed" if len(selected_cats) > 1 else source_types[0]
                 ):
                     response += chunk
                     grok_container.markdown(response)
