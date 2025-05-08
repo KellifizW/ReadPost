@@ -506,7 +506,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             referenced_thread_ids = [str(item["thread_id"]) for item in filtered_supplemental]
             logger.debug(f"獲取補充帖子：{referenced_thread_ids}")
         
-        prioritized_thread_data = {tid: thread_data_dict[tid] Stephens for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
+        prioritized_thread_data = {tid: thread_data_dict[tid] for tid in map(str, referenced_thread_ids) if tid in thread_data_dict}
         supplemental_thread_data = {tid: data for tid, data in thread_data_dict.items() if tid not in map(str, referenced_thread_ids)}
         thread_data_dict = {**prioritized_thread_data, **supplemental_thread_data}
 
