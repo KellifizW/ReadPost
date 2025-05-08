@@ -347,6 +347,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents_info = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "無有效意圖，默認總結"}]
     
     intents = [i['intent'] for i in intents_info]
+    # 改動：移除重複日誌，僅記錄一次 intents
     logger.info(f"Starting stream_grok3_response for query: {user_query}, intents: {intents}, source: {selected_source}")
 
     try:
@@ -493,8 +494,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 cleaned_msg = clean_html(r["msg"])
                 if len(cleaned_msg.strip()) <= 7 or cleaned_msg in ["[圖片]", "[無內容]", "[表情符號]"]:
                     continue
-                # 改動：添加時間轉換
-                r["reply_time"] = unix_to_readable(r.get("reply_time", "0"))
+                r["reply_time"] = unix_to_readable(r.get("reply_time", "0"), context=f"reply in thread {tid}")
                 filtered_replies.append(r)
             
             sorted_replies = sorted(
@@ -508,8 +508,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "thread_id": data.get("thread_id", tid),
                 "title": data.get("title", ""),
                 "no_of_reply": data.get("no_of_reply", 0),
-                # 改動：添加時間轉換
-                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0")),
+                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": sorted_replies,
@@ -547,8 +546,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                             "msg": clean_html(reply.get("msg", "[無內容]")),
                             "like_count": reply.get("like_count", 0),
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
-                            # 改動：添加時間轉換
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"additional reply in thread {tid}")
                         }
                         for reply in content_result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -561,8 +559,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         "thread_id": data.get("thread_id", tid),
                         "title": data.get("title", ""),
                         "no_of_reply": total_replies,
-                        # 改動：添加時間轉換
-                        "last_reply_time": unix_to_readable(content_result.get("last_reply_time", data["last_reply_time"])),
+                        "last_reply_time": unix_to_readable(content_result.get("last_reply_time", data["last_reply_time"]), context=f"thread {tid}"),
                         "like_count": data.get("like_count", 0),
                         "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                         "replies": data.get("replies", []) + filtered_additional_replies,
@@ -583,8 +580,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "thread_id": data["thread_id"],
                 "title": data["title"],
                 "no_of_reply": data.get("no_of_reply", 0),
-                # 改動：添加時間轉換
-                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0")),
+                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": [],
@@ -626,8 +622,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                 "thread_id": data["thread_id"],
                 "title": data["title"],
                 "no_of_reply": data.get("no_of_reply", 0),
-                # 改動：添加時間轉換
-                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0")),
+                "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
                 "like_count": data.get("like_count", 0),
                 "dislike_count": data.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "replies": data["replies"][:max_replies_per_thread],
@@ -738,14 +733,32 @@ def clean_cache(max_age=3600):
             del st.session_state.thread_cache[key]
         logger.info(f"清理緩存，移除 {len(sorted_keys[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE])} 個過舊條目，當前緩存大小：{len(st.session_state.thread_cache)}")
 
-def unix_to_readable(timestamp):
+def unix_to_readable(timestamp, context="unknown"):
+    # 改動：改進時間戳處理，支持多種格式
     try:
-        timestamp = int(timestamp)
-        dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        # 嘗試將輸入轉換為整數（Unix 時間戳）
+        if isinstance(timestamp, (int, float)):
+            dt = datetime.datetime.fromtimestamp(timestamp, tz=HONG_KONG_TZ)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(timestamp, str):
+            # 嘗試將字符串轉為整數（Unix 時間戳）
+            try:
+                timestamp_int = int(timestamp)
+                dt = datetime.datetime.fromtimestamp(timestamp_int, tz=HONG_KONG_TZ)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                # 嘗試解析日期字符串
+                try:
+                    dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                    dt = HONG_KONG_TZ.localize(dt)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    # 嘗試其他可能的日期格式（如果需要）
+                    raise ValueError(f"無法解析日期字符串：{timestamp}")
+        else:
+            raise TypeError(f"無效的時間戳類型：{type(timestamp)}")
     except (ValueError, TypeError) as e:
-        # 改動：增強日誌
-        logger.warning(f"無法轉換時間戳：值={timestamp}, 類型={type(timestamp)}, 錯誤={str(e)}")
+        logger.warning(f"無法轉換時間戳：值={timestamp}, 類型={type(timestamp)}, 上下文={context}, 錯誤={str(e)}")
         return "1970-01-01 00:00:00"
 
 def configure_lihkg_api_logger():
@@ -882,8 +895,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "msg": clean_html(reply.get("msg", "[無內容]")),
                                 "like_count": reply.get("like_count", 0),
                                 "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
-                                # 改動：添加時間轉換
-                                "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                                "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"reply in thread {thread_id}")
                             }
                             for reply in result.get("replies", [])
                             if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -893,8 +905,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "thread_id": thread_id,
                             "title": result.get("title"),
                             "no_of_reply": total_replies,
-                            # 改動：添加時間轉換
-                            "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                            "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                             "like_count": result.get("like_count", 0),
                             "dislike_count": result.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "replies": filtered_replies,
@@ -993,8 +1004,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                     "msg": clean_html(reply.get("msg", "[無內容]")),
                                     "like_count": reply.get("like_count", 0),
                                     "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
-                                    # 改動：添加時間轉換
-                                    "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                                    "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}")
                                 }
                                 for reply in result.get("replies", [])
                                 if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -1004,8 +1014,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "thread_id": thread_id,
                                 "title": result.get("title"),
                                 "no_of_reply": total_replies,
-                                # 改動：添加時間轉換
-                                "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                                "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                                 "like_count": filtered_supplemental[idx].get("like_count", 0),
                                 "dislike_count": filtered_supplemental[idx].get("dislike_count", 0) if source_type == "lihkg" else 0,
                                 "replies": filtered_replies,
@@ -1087,8 +1096,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "thread_id": thread_id,
                             "title": item["title"],
                             "no_of_reply": item.get("no_of_reply", 0),
-                            # 改動：添加時間轉換
-                            "last_reply_time": unix_to_readable(item.get("last_reply_time", "0")),
+                            "last_reply_time": unix_to_readable(item.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                             "like_count": item.get("like_count", 0),
                             "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "replies": [],
@@ -1180,8 +1188,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "msg": clean_html(reply.get("msg", "[無內容]")),
                             "like_count": reply.get("like_count", 0),
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
-                            # 改動：添加時間轉換
-                            "reply_time": unix_to_readable(reply.get("reply_time", "0"))
+                            "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"reply in thread {thread_id}")
                         }
                         for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"]
@@ -1191,8 +1198,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         "thread_id": thread_id,
                         "title": result.get("title"),
                         "no_of_reply": total_replies,
-                        # 改動：添加時間轉換
-                        "last_reply_time": unix_to_readable(result.get("last_reply_time", "0")),
+                        "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                         "like_count": candidate_threads[idx].get("like_count", 0),
                         "dislike_count": candidate_threads[idx].get("dislike_count", 0) if source_type == "lihkg" else 0,
                         "replies": filtered_replies,
