@@ -11,11 +11,11 @@ logger = configure_logger(__name__, "dynamic_prompt_utils.log")
 
 # 配置參數
 CONFIG = {
-    "max_prompt_length": 120000,
+    "max_prompt_length": 240000,
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "default_intents": ["recommend_threads", "summarize_posts", "time_sensitive_analysis", "rank_topics"],
-    "error_prompt_template": "在 {selected_cat} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
+    "error_prompt_template": "在 {source_names} 中未找到符合條件的帖子（篩選：{filters}）。建議嘗試其他關鍵詞或討論區！",
     "min_keywords": 1,
     "max_keywords": 8,
     "intent_confidence_threshold": 0.75,
@@ -36,7 +36,7 @@ CONFIG = {
     }
 }
 
-async def parse_query(query, conversation_context, grok3_api_key, source_type="lihkg"):
+async def parse_query(query, conversation_context, grok3_api_key, selected_sources):
     conversation_context = conversation_context or []
     
     # 驗證輸入參數
@@ -52,8 +52,24 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
             "confidence": 0.5
         }
     
+    # 確保 selected_sources 是列表
+    if not isinstance(selected_sources, list):
+        selected_sources = [selected_sources]
+    sanitized_sources = []
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            logger.warning(f"無效的 source 格式：{source}，補充默認值")
+            source = {"source_name": "未知", "source_type": "lihkg", "source_id": ""}
+        sanitized_sources.append({
+            "source_name": source.get("source_name", "未知"),
+            "source_type": source.get("source_type", "lihkg"),
+            "source_id": source.get("source_id", "")
+        })
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
+    
     # 提取關鍵詞和相關詞
-    keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, source_type)
+    keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, selected_sources)
     keywords = keyword_result.get("keywords", [])
     related_terms = keyword_result.get("related_terms", [])
     time_sensitive = keyword_result.get("time_sensitive", False)
@@ -62,7 +78,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     id_match = re.search(r'(?:ID|帖子)\s*([a-zA-Z0-9]+)', query, re.IGNORECASE)
     if id_match:
         thread_id = id_match.group(1)
-        logger.info(f"檢測到特定帖子 ID 查詢：thread_id={thread_id}")
+        logger.info(f"檢測到特定帖子 ID 查詢：thread_id={thread_id}, sources={source_names}")
         return {
             "intents": [{"intent": "fetch_thread_by_id", "confidence": 0.95, "reason": f"檢測到明確帖子 ID {thread_id}"}],
             "keywords": keywords,
@@ -78,7 +94,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
         conversation_context, query, grok3_api_key
     )
     if thread_id:
-        logger.info(f"檢測到追問：thread_id={thread_id}, 原因={match_reason}")
+        logger.info(f"檢測到追問：thread_id={thread_id}, 原因={match_reason}, sources={source_names}")
         return {
             "intents": [{"intent": "follow_up", "confidence": 0.90, "reason": f"檢測到追問，匹配帖子 ID {thread_id}"}],
             "keywords": keywords,
@@ -93,7 +109,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     sentiment_triggers = ["情緒", "氣氛", "指數", "正負面", "sentiment", "mood"]
     is_sentiment_query = any(word in query for word in sentiment_triggers)
     if is_sentiment_query:
-        logger.info(f"檢測到情緒分析查詢：query={query}")
+        logger.info(f"檢測到情緒分析查詢：query={query}, sources={source_names}")
         intents = [
             {"intent": "analyze_sentiment", "confidence": 0.90, "reason": "檢測到情緒分析關鍵詞，需分析情緒比例"},
             {"intent": "summarize_posts", "confidence": 0.80, "reason": "情緒分析查詢，輔以總結"}
@@ -113,7 +129,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     time_triggers = ["今晚", "今日", "最近", "今個星期"]
     is_time_sensitive = time_sensitive or any(word in query for word in time_triggers)
     if is_time_sensitive:
-        logger.info(f"檢測到時間敏感查詢：query={query}")
+        logger.info(f"檢測到時間敏感查詢：query={query}, sources={source_names}")
         return {
             "intents": [
                 {"intent": "time_sensitive_analysis", "confidence": 0.85, "reason": "時間敏感查詢，需優先最新帖子"},
@@ -131,7 +147,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     trigger_words = ["列出", "標題", "清單", "所有標題"]
     detected_triggers = [word for word in trigger_words if word in query]
     if detected_triggers:
-        logger.info(f"檢測到 list_titles 觸發詞：{detected_triggers}")
+        logger.info(f"檢測到 list_titles 觸發詞：{detected_triggers}, sources={source_names}")
         return {
             "intents": [{"intent": "list_titles", "confidence": 0.95, "reason": f"檢測到 list_titles 觸發詞：{detected_triggers}"}],
             "keywords": keywords,
@@ -146,7 +162,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     ranking_triggers = ["熱門", "最多", "關注", "流行"]
     is_ranking_query = any(word in query for word in ranking_triggers)
     if is_ranking_query:
-        logger.info(f"檢測到排序查詢：query={query}")
+        logger.info(f"檢測到排序查詢：query={query}, sources={source_names}")
         intents = [
             {"intent": "rank_topics", "confidence": 0.85, "reason": "檢測到排序關鍵詞，需按關注度排序話題"},
             {"intent": "summarize_posts", "confidence": 0.80, "reason": "排序查詢，輔以總結"}
@@ -166,7 +182,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
     platform_triggers = ["Reddit", "LIHKG", "子版", "討論區"]
     is_platform_specific = any(word in query for word in platform_triggers)
     if is_platform_specific:
-        logger.info(f"檢測到平台特定查詢：query={query}")
+        logger.info(f"檢測到平台特定查詢：query={query}, sources={source_names}")
         return {
             "intents": [
                 {"intent": "contextual_analysis", "confidence": 0.85, "reason": "平台特定查詢，需語義和情緒分析"},
@@ -191,11 +207,13 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 關鍵詞：{json.dumps(keywords, ensure_ascii=False)}
 相關詞：{json.dumps(related_terms, ensure_ascii=False)}
-數據來源：{source_type}
+數據來源：{json.dumps(source_names, ensure_ascii=False)}
+來源類型：{json.dumps([s['source_type'] for s in selected_sources], ensure_ascii=False)}
 是否模糊查詢：{is_vague}
 是否包含多意圖指示詞：{has_multi_intent}
 特別注意：
 - 支持粵語及口語化表達（如「既」「係咩」）。
+- 若涉及多個討論區，需考慮不同來源的語義和情緒差異。
 意圖描述：
 {json.dumps({
     "list_titles": "列出帖子標題或清單（觸發詞：列出、標題、清單、所有標題）",
@@ -252,11 +270,11 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                     timeout=CONFIG["parse_timeout"]
                 ) as response:
                     if response.status != 200:
-                        logger.debug(f"意圖分析失敗：狀態碼={response.status}，嘗試次數={attempt + 1}")
+                        logger.debug(f"意圖分析失敗：狀態碼={response.status}, 嘗試次數={attempt + 1}, sources={source_names}")
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.debug(f"意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}")
+                        logger.debug(f"意圖分析失敗：缺少 choices，嘗試次數={attempt + 1}, sources={source_names}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
                     intents = result.get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "模糊查詢，默認總結帖子"}])
@@ -272,7 +290,7 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         intents = [max(intents, key=lambda x: x["confidence"])]
                     
                     time_range = "recent" if is_time_sensitive else "all"
-                    logger.info(f"意圖分析完成：intents={[i['intent'] for i in intents]}, reason={reason}, confidence={max(i['confidence'] for i in intents)}")
+                    logger.info(f"意圖分析完成：intents={[i['intent'] for i in intents]}, reason={reason}, confidence={max(i['confidence'] for i in intents)}, sources={source_names}")
                     return {
                         "intents": intents[:4],
                         "keywords": keywords,
@@ -283,13 +301,13 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
                         "confidence": max(intent["confidence"] for intent in intents) if intents else 0.7
                     }
         except Exception as e:
-            logger.debug(f"意圖分析錯誤：{str(e)}，嘗試次數={attempt + 1}")
+            logger.debug(f"意圖分析錯誤：{str(e)}, 嘗試次數={attempt + 1}, sources={source_names}")
             if attempt < CONFIG["max_parse_retries"] - 1:
                 await asyncio.sleep(2)
             continue
     
     # 回退到默認意圖
-    logger.warning(f"意圖分析失敗，回退到默認意圖：summarize_posts")
+    logger.warning(f"意圖分析失敗，回退到默認意圖：summarize_posts, sources={source_names}")
     return {
         "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "意圖分析失敗，默認總結帖子"}],
         "keywords": keywords,
@@ -300,9 +318,9 @@ async def parse_query(query, conversation_context, grok3_api_key, source_type="l
         "confidence": 0.5
     }
 
-async def extract_keywords(query, conversation_context, grok3_api_key, source_type="lihkg"):
+async def extract_keywords(query, conversation_context, grok3_api_key, selected_sources):
     """
-    提取查詢中的語義關鍵詞和相關詞，考慮 Reddit 和 LIHKG 上下文。
+    提取查詢中的語義關鍵詞和相關詞，考慮多個來源（Reddit 和 LIHKG）的上下文。
     """
     generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
     
@@ -311,15 +329,32 @@ async def extract_keywords(query, conversation_context, grok3_api_key, source_ty
         "reddit": ["YOLO", "DD", "subreddit"]
     }
     
+    # 確保 selected_sources 是列表
+    if not isinstance(selected_sources, list):
+        selected_sources = [selected_sources]
+    sanitized_sources = []
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            logger.warning(f"無效的 source 格式：{source}，補充默認值")
+            source = {"source_name": "未知", "source_type": "lihkg", "source_id": ""}
+        sanitized_sources.append({
+            "source_name": source.get("source_name", "未知"),
+            "source_type": source.get("source_type", "lihkg"),
+            "source_id": source.get("source_id", "")
+        })
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
+    
     prompt = f"""
 請從以下查詢提取 {CONFIG['min_keywords']}-{CONFIG['max_keywords']} 個核心關鍵詞（優先名詞或核心動詞，排除通用詞如 {generic_terms}）。
-同時生成最多8個語義相關詞（同義詞或討論區術語，如 {platform_terms[source_type]}）。
+同時生成最多8個語義相關詞（同義詞或討論區術語，如 {json.dumps(platform_terms, ensure_ascii=False)}）。
 若查詢包含時間性詞語（如「今晚」「今日」「最近」），設置 time_sensitive 為 true。
 若查詢模糊（如「有咩post 分享」），根據對話歷史推測語義意圖。
 若查詢包含粵語表達（如「最多」「既」），保留排序或疑問相關語義。
 查詢：{query}
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
-數據來源：{source_type}
+數據來源：{json.dumps(source_names, ensure_ascii=False)}
+來源類型：{json.dumps([s['source_type'] for s in selected_sources], ensure_ascii=False)}
 返回格式：
 {{
   "keywords": ["關鍵詞1", "關鍵詞2", ...],
@@ -335,7 +370,7 @@ async def extract_keywords(query, conversation_context, grok3_api_key, source_ty
     payload = {
         "model": "grok-3",
         "messages": [
-            {"role": "system", "content": f"你是語義分析助手，以繁體中文回答，專注於提取 {source_type} 討論區關鍵詞。"},
+            {"role": "system", "content": f"你是語義分析助手，以繁體中文回答，專注於提取多討論區（{', '.join(source_names)}）關鍵詞。"},
             *conversation_context,
             {"role": "user", "content": prompt}
         ],
@@ -353,11 +388,11 @@ async def extract_keywords(query, conversation_context, grok3_api_key, source_ty
                     timeout=CONFIG["parse_timeout"]
                 ) as response:
                     if response.status != 200:
-                        logger.debug(f"關鍵詞提取失敗：狀態碼={response.status}，嘗試次數={attempt + 1}")
+                        logger.debug(f"關鍵詞提取失敗：狀態碼={response.status}, 嘗試次數={attempt + 1}, sources={source_names}")
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}")
+                        logger.debug(f"關鍵詞提取失敗：缺少 choices，嘗試次數={attempt + 1}, sources={source_names}")
                         continue
                     result = json.loads(data["choices"][0]["message"]["content"])
                     keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
@@ -369,7 +404,7 @@ async def extract_keywords(query, conversation_context, grok3_api_key, source_ty
                         "time_sensitive": result.get("time_sensitive", False)
                     }
         except Exception as e:
-            logger.debug(f"關鍵詞提取錯誤：{str(e)}，嘗試次數={attempt + 1}")
+            logger.debug(f"關鍵詞提取錯誤：{str(e)}, 嘗試次數={attempt + 1}, sources={source_names}")
             if attempt < CONFIG["max_parse_retries"] - 1:
                 await asyncio.sleep(2)
             continue
@@ -388,7 +423,7 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None, "無對話歷史"
     
-    query_keyword_result = await extract_keywords(query, conversation_context, grok3_api_key)
+    query_keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, [{"source_name": "未知", "source_type": "lihkg"}])
     query_keywords = query_keyword_result["keywords"] + query_keyword_result["related_terms"]
     
     follow_up_phrases = ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"]
@@ -399,7 +434,7 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
-                title_keyword_result = await extract_keywords(title, conversation_context, grok3_api_key)
+                title_keyword_result = await extract_keywords(title, conversation_context, grok3_api_key, [{"source_name": "未知", "source_type": "lihkg"}])
                 title_keywords = title_keyword_result["keywords"] + title_keyword_result["related_terms"]
                 common_keywords = set(query_keywords).intersection(set(title_keywords))
                 content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
@@ -456,17 +491,24 @@ async def extract_relevant_thread(conversation_context, query, grok3_api_key):
         logger.debug(f"相關帖子提取錯誤：{str(e)}")
         return None, None, None, f"提取錯誤：{str(e)}"
 
-async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_source, grok3_api_key):
-    # 確保 selected_source 是字典
-    if isinstance(selected_source, str):
-        source_name = selected_source
-        source_type = "reddit" if "reddit" in source_name.lower() else "lihkg"
-        selected_source = {"source_name": source_name, "source_type": source_type}
-    elif not isinstance(selected_source, dict):
-        logger.warning(f"無效的 selected_source 類型：{type(selected_source)}，使用默認值")
-        selected_source = {"source_name": "未知", "source_type": "lihkg"}
+async def build_dynamic_prompt(query, conversation_context, metadata, thread_data, filters, intent, selected_sources, grok3_api_key):
+    # 確保 selected_sources 是列表
+    if not isinstance(selected_sources, list):
+        selected_sources = [selected_sources]
+    sanitized_sources = []
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            logger.warning(f"無效的 source 格式：{source}，補充默認值")
+            source = {"source_name": "未知", "source_type": "lihkg", "source_id": ""}
+        sanitized_sources.append({
+            "source_name": source.get("source_name", "未知"),
+            "source_type": source.get("source_type", "lihkg"),
+            "source_id": source.get("source_id", "")
+        })
+    selected_sources = sanitized_sources
+    source_names = [s["source_name"] for s in selected_sources]
     
-    parsed_query = await parse_query(query, conversation_context, grok3_api_key, selected_source.get("source_type", "lihkg"))
+    parsed_query = await parse_query(query, conversation_context, grok3_api_key, selected_sources)
     intents = parsed_query["intents"]
     keywords = parsed_query["keywords"]
     related_terms = parsed_query["related_terms"]
@@ -475,13 +517,15 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     system = (
         "你是社交媒體討論區（包括 LIHKG 和 Reddit）的數據助手，以繁體中文回答，"
         "語氣客觀輕鬆，專注於提供清晰且實用的資訊。引用帖子時使用 [帖子 ID: {thread_id}] 格式，"
-        "禁止使用 [post_id: ...] 格式。根據用戶意圖動態選擇回應格式（例如列表、段落、表格等），"
+        "並在適當情況下標註來源（例如 [LIHKG] 或 [Reddit]）。"
+        "當處理多個討論區時，需比較並總結不同來源的觀點，突出相似性和差異性。"
+        "根據用戶意圖動態選擇回應格式（例如列表、段落、表格等），"
         "確保結構清晰、內容連貫，且適合查詢的需求。"
     )
     
     context = (
         f"用戶問題：{query}\n"
-        f"討論區：{selected_source.get('source_name', '未知')}\n"
+        f"討論區：{json.dumps(source_names, ensure_ascii=False)}\n"
         f"對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}"
     )
     
@@ -512,75 +556,76 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
     # 動態生成指令並指定回應格式
     instruction_parts = []
     format_instructions = []
-    source_type = selected_source.get("source_type", "lihkg")
     
     # 根據意圖數量動態調整指令
     intent_count = len(intents)
     if intent_count > 1:
         instruction_parts.append(
             f"綜合以下{intent_count}個意圖，生成一個連貫回應，聚焦關鍵詞 {keywords} 和相關詞 {related_terms}，"
+            f"比較來自 {', '.join(source_names)} 的觀點，"
             f"避免簡單合併各意圖的獨立段落，確保內容流暢、觀點融合，按主題組織討論，引用高點讚或最新回覆。"
         )
         format_instructions.append(
             "使用連貫段落格式，按主題分段，每段融合多個意圖的分析，引用 [帖子 ID: {thread_id}]，"
-            "必要時使用表格或列表補充結構化信息（如情緒比例、排序結果）。"
+            "並標註來源（如 [LIHKG] 或 [Reddit]），必要時使用表格或列表補充結構化信息（如情緒比例、排序結果）。"
         )
     
     for intent_info in intents[:4]:
         intent = intent_info["intent"]
         if intent == "summarize_posts":
-            instruction_parts.append(f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，簡明扼要。")
-            format_instructions.append("融入段落，總結核心討論，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"總結最多5個帖子的討論內容，聚焦關鍵詞 {keywords}，比較不同討論區的觀點，簡明扼要。")
+            format_instructions.append("融入段落，總結核心討論，引用 [帖子 ID: {thread_id}]，標註來源。")
         elif intent == "analyze_sentiment":
-            instruction_parts.append(f"分析最多5個帖子的情緒（正面、中立、負面），提供情緒比例，融入總結。")
-            format_instructions.append("融入段落，總結情緒分析，必要時以表格列出 | 帖子 ID | 情緒 | 比例 |。")
+            instruction_parts.append(f"分析最多5個帖子的情緒（正面、中立、負面），提供各討論區的情緒比例，融入總結。")
+            format_instructions.append("融入段落，總結情緒分析，必要時以表格列出 | 討論區 | 帖子 ID | 情緒 | 比例 |。")
         elif intent == "follow_up":
-            instruction_parts.append(f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，補充上下文。")
-            format_instructions.append("融入段落，保持上下文連貫性，分段突出不同回覆觀點。")
+            instruction_parts.append(f"深入分析對話歷史中的帖子，聚焦問題關鍵詞 {keywords}，補充上下文，比較不同討論區的回應。")
+            format_instructions.append("融入段落，保持上下文連貫性，分段突出不同討論區的回覆觀點。")
         elif intent == "fetch_thread_by_id":
-            instruction_parts.append(f"根據提供的帖子 ID 總結內容，突出核心討論。")
-            format_instructions.append("融入段落，詳細總結指定帖子，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"根據提供的帖子 ID 總結內容，突出核心討論，比較不同討論區的回應。")
+            format_instructions.append("融入段落，詳細總結指定帖子，引用 [帖子 ID: {thread_id}]，標註來源。")
         elif intent == "general_query" and not is_vague:
-            instruction_parts.append(f"提供與問題相關的簡化總結，基於元數據推測話題，保持簡潔。")
-            format_instructions.append("融入段落，直接回答問題，必要時引用相關帖子。")
+            instruction_parts.append(f"提供與問題相關的簡化總結，基於元數據推測話題，比較不同討論區的觀點，保持簡潔。")
+            format_instructions.append("融入段落，直接回答問題，必要時引用相關帖子，標註來源。")
         elif intent == "list_titles":
-            instruction_parts.append(f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，簡述相關性。")
-            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題和相關性說明。")
+            instruction_parts.append(f"列出最多15個帖子標題，聚焦關鍵詞 {keywords}，按討論區分組，簡述相關性。")
+            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題、討論區和相關性說明。")
         elif intent == "find_themed":
-            instruction_parts.append(f"尋找與關鍵詞 {keywords} 和相關詞 {related_terms} 相關的帖子，突出主題關聯。")
-            format_instructions.append("融入段落，強調主題相關性，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"尋找與關鍵詞 {keywords} 和相關詞 {related_terms} 相關的帖子，突出主題關聯，比較不同討論區的觀點。")
+            format_instructions.append("融入段落，強調主題相關性，引用 [帖子 ID: {thread_id}]，標註來源。")
         elif intent == "fetch_dates":
-            instruction_parts.append(f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，融入總結。")
-            format_instructions.append("融入表格，列出 | 帖子 ID | 標題 | 日期 |，後附簡短總結。")
+            instruction_parts.append(f"提取最多5個帖子的發布或回覆日期，聚焦關鍵詞 {keywords}，按討論區分組，融入總結。")
+            format_instructions.append("融入表格，列出 | 討論區 | 帖子 ID | 標題 | 日期 |，後附簡短總結。")
         elif intent == "search_keywords":
-            instruction_parts.append(f"搜索包含關鍵詞 {keywords} 和相關詞 {related_terms} 的帖子，強調關鍵詞匹配。")
-            format_instructions.append("融入段落，突出關鍵詞匹配，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"搜索包含關鍵詞 {keywords} 和相關詞 {related_terms} 的帖子，強調關鍵詞匹配，比較不同討論區的觀點。")
+            format_instructions.append("融入段落，突出關鍵詞匹配，引用 [帖子 ID: {thread_id}]，標註來源。")
         elif intent == "recommend_threads":
-            instruction_parts.append(f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦關鍵詞 {keywords}。")
-            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題和推薦理由。")
+            instruction_parts.append(f"推薦2-5個熱門或相關帖子，基於回覆數和點讚數，聚焦關鍵詞 {keywords}，按討論區分組。")
+            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題、討論區和推薦理由。")
         elif intent == "time_sensitive_analysis":
-            instruction_parts.append(f"優先總結過去24小時的帖子，聚焦關鍵詞 {keywords}，突出時間敏感討論。")
-            format_instructions.append("融入段落，標註回覆時間，引用 [帖子 ID: {thread_id}]。")
+            instruction_parts.append(f"優先總結過去24小時的帖子，聚焦關鍵詞 {keywords}，突出時間敏感討論，比較不同討論區的觀點。")
+            format_instructions.append("融入段落，標註回覆時間，引用 [帖子 ID: {thread_id}]，標註來源。")
         elif intent == "contextual_analysis":
-            instruction_parts.append(f"綜合最多5個帖子的討論，總結主要觀點，動態識別主題，分析情緒比例。")
-            format_instructions.append("融入段落，按主題分段，結尾附情緒分佈表格 | 主題 | 比例 | 代表性帖子 |。")
+            instruction_parts.append(f"綜合最多5個帖子的討論，總結主要觀點，動態識別主題，分析各討論區的情緒比例。")
+            format_instructions.append("融入段落，按主題分段，結尾附情緒分佈表格 | 討論區 | 主題 | 比例 | 代表性帖子 |。")
         elif intent == "rank_topics":
-            instruction_parts.append(f"按關注度排序最多5個帖子或話題，根據回覆數和點讚數，簡述熱度原因。")
-            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題和熱度原因。")
+            instruction_parts.append(f"按關注度排序最多5個帖子或話題，根據回覆數和點讚數，比較不同討論區的熱度原因。")
+            format_instructions.append("融入列表，每項包含 [帖子 ID: {thread_id}]、標題、討論區和熱度原因。")
 
     platform_instruction = (
-        f"針對 {source_type} 平台，適當融入平台特定上下文（如 Reddit 的子版背景或 LIHKG 的討論區熱度）。"
+        f"針對 {', '.join([s['source_type'] for s in selected_sources])} 平台，適當融入平台特定上下文（例如 Reddit 的子版背景或 LIHKG 的討論區熱度），"
+        f"並比較 {', '.join(source_names)} 的討論差異。"
     )
     
     combined_instruction = (
         f"根據以下意圖綜合生成一個連貫的回應（字數：{word_min}-{word_max}字）：{'；'.join(instruction_parts)}"
         f"選擇最適合的回應格式：簡介（1句）+按主題分段（每個主題融合多個意圖的分析）+{'；'.join(format_instructions)}"
-        f"確保回應聚焦用戶問題，綜合所有意圖，內容不重複且流暢，引用帖子時標註 [帖子 ID: {{thread_id}}] {{標題}}。"
+        f"確保回應聚焦用戶問題，綜合所有意圖，內容不重複且流暢，引用帖子時標註 [帖子 ID: {{thread_id}}] {{標題}}，並註明來源（如 [LIHKG] 或 [Reddit]）。"
         f"優先考慮主要意圖（信心值最高者），其他意圖作為輔助，融合觀點避免機械性段落拼接。{platform_instruction}"
     )
     
     if time_range == "recent":
-        combined_instruction += f"僅考慮過去24小時的帖子和回覆。"
+        combined_instruction += f"僅*僅考慮過去24小時的帖子和回覆。"
     
     prompt = (
         f"[System]\n{system}\n"
@@ -589,10 +634,19 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
         f"[Instructions]\n{combined_instruction}"
     )
     
-    if len(prompt) > CONFIG["max_prompt_length"]:
-        logger.warning("提示長度超過限制，縮減數據")
-        thread_data = thread_data[:2]
-        data = f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n篩選條件：{json.dumps(filters, ensure_ascii=False)}"
+    if len(prompt) > CONFIG["max_prompt_length"] * 0.9:
+        logger.warning(f"提示長度 {len(prompt)} 接近限制 {CONFIG['max_prompt_length']}，縮減數據")
+        thread_data = [
+            {
+                **data,
+                "replies": data.get("replies", [])[:len(data.get("replies", [])) // 2]
+            } for data in thread_data[:3]
+        ]
+        data = (
+            f"帖子元數據：{json.dumps(metadata, ensure_ascii=False)}\n"
+            f"帖子內容：{json.dumps(thread_data, ensure_ascii=False)}\n"
+            f"篩選條件：{json.dumps(filters, ensure_ascii=False)}"
+        )
         prompt = (
             f"[System]\n{system}\n"
             f"[Context]\n{context}\n"
@@ -600,8 +654,11 @@ async def build_dynamic_prompt(query, conversation_context, metadata, thread_dat
             f"[Instructions]\n{combined_instruction}"
         )
     
-    logger.info(f"生成提示：查詢={query}, 提示長度={len(prompt)} 字符, intents={[i['intent'] for i in intents]}")
-    return prompt
+    logger.info(f"生成提示：查詢={query}, 提示長度={len(prompt)} 字符, intents={[i['intent'] for i in intents]}, sources={source_names}")
+    return {
+        "prompt": prompt,
+        "sources": [{"source_type": s["source_type"], "source_id": s["source_id"]} for s in selected_sources]
+    }
 
 def format_context(conversation_context):
     """
@@ -627,7 +684,8 @@ def extract_thread_metadata(metadata):
                 "title": item["title"],
                 "no_of_reply": item.get("no_of_reply", 0),
                 "like_count": item.get("like_count", 0),
-                "last_reply_time": item.get("last_reply_time", 0)
+                "last_reply_time": item.get("last_reply_time", 0),
+                "source_name": item.get("source_name", "未知")
             }
             for item in metadata
         ]
