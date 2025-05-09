@@ -37,13 +37,13 @@ async def call_grok3_api(payload, headers, retries=3, timeout=API_TIMEOUT, strea
                     if not data.get("choices"):
                         logger.debug(f"API call failed: no choices, attempt={attempt + 1}")
                         continue
-                    return data
-        except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
+                    return {"error": None, "data": data}
+        except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError, json.JSONDecodeError) as e:
             logger.debug(f"API call error: {str(e)}, attempt={attempt + 1}")
             if attempt < retries - 1:
                 await asyncio.sleep(2)
                 continue
-            return {"error": str(e), "data": None}
+            return {"error": f"API call failed: {str(e)}", "data": None}
     return {"error": "Max retries exceeded", "data": None}
 
 def clean_content(content, is_response=False):
@@ -155,8 +155,8 @@ async def summarize_context(conversation_context):
     payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.5}
     
     result = await call_grok3_api(payload, headers)
-    if result.get("error"):
-        logger.warning(f"Context summarization failed: {result['error']}")
+    if result.get("error") or not result.get("data"):
+        logger.warning(f"Context summarization failed: {result.get('error', 'No data returned')}")
         return {"theme": "一般", "keywords": []}
     
     try:
@@ -264,20 +264,40 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 500, "temperature": 0.7}
     
     result = await call_grok3_api(payload, headers)
-    if result.get("error"):
+    logger.debug(f"Prioritize threads API result: {result}")
+    
+    if result.get("error") or not result.get("data"):
         sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
-        return {"top_thread_ids": [str(t["thread_id"]) for t in sorted_threads[:20]], "reason": f"API call failed: {result['error']}", "intent_breakdown": []}
+        return {
+            "top_thread_ids": [str(t["thread_id"]) for t in sorted_threads[:20]],
+            "reason": f"API call failed: {result.get('error', 'No data returned')}",
+            "intent_breakdown": []
+        }
     
     try:
         response = json.loads(result["data"]["choices"][0]["message"]["content"])
         top_thread_ids = [str(tid) for tid in response.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]]
-        return {"top_thread_ids": top_thread_ids, "reason": response.get("reason", "No reason provided"), "intent_breakdown": response.get("intent_breakdown", [])}
-    except (json.JSONDecodeError, KeyError):
+        return {
+            "top_thread_ids": top_thread_ids,
+            "reason": response.get("reason", "No reason provided"),
+            "intent_breakdown": response.get("intent_breakdown", [])
+        }
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.warning(f"Failed to parse API response: {str(e)}")
         match = re.search(r'"top_thread_ids":\s*\[(.*?)\]', result["data"]["choices"][0]["message"]["content"], re.DOTALL)
         if match:
             ids = [str(id.strip().strip('"')) for id in match.group(1).split(',') if id.strip() and str(id.strip().strip('"')) in [str(t["thread_id"]) for t in threads]]
-            return {"top_thread_ids": ids, "reason": "Extracted from partial response", "intent_breakdown": []}
-        return {"top_thread_ids": [], "reason": "Failed to parse response", "intent_breakdown": []}
+            return {
+                "top_thread_ids": ids,
+                "reason": "Extracted from partial response",
+                "intent_breakdown": []
+            }
+        sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+        return {
+            "top_thread_ids": [str(t["thread_id"]) for t in sorted_threads[:20]],
+            "reason": f"Failed to parse response: {str(e)}",
+            "intent_breakdown": []
+        }
 
 async def filter_replies(replies, max_replies, source_type, thread_id):
     """Filter and sort thread replies."""
