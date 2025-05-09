@@ -47,15 +47,15 @@ class RedditClientManager:
     async def _init_reddit_client(self, client_idx):
         try:
             cred = st.secrets["reddit"]["credentials"][client_idx]
-            timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_connect=10)
             reddit = asyncpraw.Reddit(
                 client_id=cred["client_id"],
                 client_secret=cred["client_secret"],
                 username=st.secrets["reddit"]["username"],
                 password=st.secrets["reddit"]["password"],
                 user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}_{client_idx}",
-                timeout=timeout
+                timeout=30  # Integer timeout in seconds
             )
+            reddit.is_shared = True  # Mark as shared to prevent closing
             user = await reddit.user.me()
             logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
             return reddit
