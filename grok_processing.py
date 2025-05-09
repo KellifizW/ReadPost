@@ -253,14 +253,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     total_max_tokens = sum(CONFIG["default_word_ranges"].get(intent, (500, 1500))[1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
     length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
-    max_tokens = min(int(total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor) + 500, 8000)
-    max_replies_per_thread = 100
+    max_tokens = min(int(total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor) + 1000, 20000)  # 提高上限至 20,000
+    max_replies_per_thread = 150  # 增加每帖回覆數量
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
-        max_replies_per_thread = 300
+        max_replies_per_thread = 400
     elif any(intent == "analyze_sentiment" for intent in intents):
-        max_replies_per_thread = 200
+        max_replies_per_thread = 300
     elif any(intent == "list_titles" for intent in intents):
-        max_replies_per_thread = 10
+        max_replies_per_thread = 20
     thread_data_dict = {str(data["thread_id"]): data for data in thread_data} if isinstance(thread_data, list) else thread_data
     filtered_thread_data = {}
     total_replies_count = 0
@@ -284,15 +284,15 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "replies": sorted_replies,
             "total_fetched_replies": len(sorted_replies),
             "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
-            "no_of_reply": data.get("no_of_reply", 0),  # Ensure no_of_reply is preserved
+            "no_of_reply": data.get("no_of_reply", 0),
         }
     prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
     prompt_length = len(prompt)
     estimated_tokens = prompt_length // 4
     prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
     reduction_attempts = 0
-    while prompt_length > GROK3_TOKEN_LIMIT * 0.9 and reduction_attempts < 3:
-        max_replies_per_thread //= 2
+    while prompt_length > GROK3_TOKEN_LIMIT * 0.95 and reduction_attempts < 2:  # 放寬縮減條件
+        max_replies_per_thread = max_replies_per_thread // 2 or 10
         total_replies_count = 0
         for tid, data in filtered_thread_data.items():
             replies = data.get("replies", [])[:max_replies_per_thread]
@@ -489,7 +489,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     initial_threads = initial_threads[:150]
                     break
                 if progress_callback:
-                    progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0.2 * (page / 3))
+                    progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0.2 * (page / 3), {"current_page": page, "total_pages": 3})
         min_replies = 5 if keyword_result.get("time_sensitive", False) or any(i == "time_sensitive_analysis" for i in intents) else 10
         filtered_items = [item for item in initial_threads if item.get("no_of_reply", 0) >= min_replies]
         for item in initial_threads:
