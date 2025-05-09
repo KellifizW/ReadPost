@@ -35,7 +35,7 @@ class RedditClientManager:
     @asynccontextmanager
     async def get_client(self):
         client_idx = self.current_client_index % len(self.clients)
-        if self.clients[client_idx] is None or not await self._is_client_valid(self.clients[client_idx]):
+        if self.clients[client_idx] is None or not await self._is_client_valid(self clients[client_idx]):
             self.clients[client_idx] = await self._init_reddit_client(client_idx)
         try:
             self.request_counters[client_idx], self.last_resets[client_idx] = await self._handle_rate_limit(client_idx)
@@ -53,9 +53,9 @@ class RedditClientManager:
                 username=st.secrets["reddit"]["username"],
                 password=st.secrets["reddit"]["password"],
                 user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}_{client_idx}",
-                timeout=30  # Integer timeout in seconds
+                timeout=30
             )
-            reddit.is_shared = True  # Mark as shared to prevent closing
+            reddit.is_shared = True
             user = await reddit.user.me()
             logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
             return reddit
@@ -156,7 +156,8 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
                     "rate_limit_info": rate_limit_info,
                     "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
                     "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-                    "rate_limit_until": 0
+                    "rate_limit_until": 0,
+                    "total_posts": len(items)  # Track total posts
                 }
             }
         except Exception as e:
@@ -168,7 +169,8 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
             "rate_limit_info": rate_limit_info,
             "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
             "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-            "rate_limit_until": 0
+            "rate_limit_until": 0,
+            "total_posts": len(items)
         }
 
 async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset):
@@ -282,7 +284,8 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": last_reset,
-                "rate_limit_until": 0
+                "rate_limit_until": 0,
+                "replies_count": len(replies)  # Track replies count
             }
             
             client_manager.thread_cache[cache_key] = {
@@ -356,6 +359,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     rate_limit_info = []
     fetch_status = {}
     batch_size = 5
+    total_posts = 0
+    total_replies = 0
     
     async with client_manager.get_client() as reddit:
         try:
@@ -376,6 +381,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                             logger.info(f"使用緩存數據，貼文：{post_id}, 鍵：{cache_key}")
                             results.append(cached_data["data"])
                             fetch_status[post_id] = {"status": "cached", "replies": len(cached_data["data"]["replies"])}
+                            total_posts += 1
+                            total_replies += len(cached_data["data"]["replies"])
                             continue
                     tasks.append(fetch_single_thread(
                         post_id, subreddit, max_comments, reddit,
@@ -396,6 +403,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                             rate_limit_info.extend(result.get("rate_limit_info", []))
                             client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)] = req_count
                             client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)] = last_reset
+                            total_posts += 1
+                            total_replies += len(result.get("replies", []))
                         else:
                             logger.error(f"批次抓取貼文失敗：{str(result)}")
                             rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(result)}"})
@@ -413,8 +422,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                             })
                             fetch_status[post_id] = {"status": "failed", "replies": 0}
             
-            total_replies = sum(status["replies"] for status in fetch_status.values() if status["status"] in ["success", "cached"])
-            logger.info(f"批次抓取貼文完成：{fetch_status}，總回覆數：{total_replies}")
+            total_requests = sum(client_manager.request_counters)
+            logger.info(f"Reddit API 調用統計：抓取帖子數={total_posts}, 回覆數={total_replies}, 總請求次數={total_requests}")
         
         except Exception as e:
             logger.error(f"批次抓取貼文內容失敗：{str(e)}")
@@ -425,5 +434,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             "rate_limit_info": rate_limit_info,
             "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
             "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-            "rate_limit_until": 0
+            "rate_limit_until": 0,
+            "total_posts": total_posts,
+            "total_replies": total_replies
         }
