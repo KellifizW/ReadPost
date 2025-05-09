@@ -316,7 +316,7 @@ async def extract_relevant_thread(
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
-                title_keyword_result = await extract_keywords(title, conversation_context, g
+                title_keyword_result = await extract_keywords(title, conversation_context, grok3_api_key)
                 title_keywords = title_keyword_result["keywords"] + title_keyword_result["related_terms"]
                 common_keywords = set(query_keywords).intersection(set(title_keywords))
                 content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
