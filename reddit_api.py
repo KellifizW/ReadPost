@@ -105,7 +105,7 @@ async def format_submission(submission):
         "like_count": submission.score
     }
 
-async def get_reddit_topic
+async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best"):
 
 _list(subreddit, start_page=1, max_pages=1, sort="best"):
     cache_key = f"{subreddit}_{start_page}_{max_pages}_{sort}"
