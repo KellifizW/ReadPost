@@ -200,7 +200,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
     theme_keywords = historical_keywords if is_vague else query_keywords
     if not theme_keywords and "新" in user_query:
-        theme_keywords = ["新話題"]  # Fallback for time-sensitive queries
+        theme_keywords = ["新話題"]
         logger.debug(f"Added fallback keywords: {theme_keywords}")
     
     post_limit = 15 if any(i["intent"] == "list_titles" for i in intents) else 20 if any(i["intent"] in ["search_keywords", "find_themed"] for i in intents) else 5
@@ -393,7 +393,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
 async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     """Process user query and fetch relevant threads."""
     if source_type == "lihkg":
-        Fconfigure_lihkg_api_logger()
+        configure_lihkg_api_logger()
     else:
         configure_reddit_api_logger()
 
@@ -546,7 +546,11 @@ def clean_cache(max_age=3600):
         logger.info(f"Cleaned cache, removed {len(sorted_keys)} entries, current size: {len(st.session_state.thread_cache)}")
 
 def configure_lihkg_api_logger():
+    """Configure logger for LIHKG API."""
     configure_logger("lihkg_api", "lihkg_api.log")
+    logger.debug("LIHKG API logger configured")
 
 def configure_reddit_api_logger():
+    """Configure logger for Reddit API."""
     configure_logger("reddit_api", "reddit_api.log")
+    logger.debug("Reddit API logger configured")
