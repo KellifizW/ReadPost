@@ -253,7 +253,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     total_max_tokens = sum(CONFIG["default_word_ranges"].get(intent, (500, 1500))[1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
     length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
-    max_tokens = min(int(total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor) + 1000, 20000)  # 提高上限至 20,000
+    max_tokens = min(int(total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor) + 1000, 25000) 
     max_replies_per_thread = 150  # 增加每帖回覆數量
     if any(intent in ["follow_up", "fetch_thread_by_id"] for intent in intents):
         max_replies_per_thread = 400
