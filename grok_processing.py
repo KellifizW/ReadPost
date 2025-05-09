@@ -95,7 +95,7 @@ async def summarize_context(conversation_context):
                 return result
         except Exception as e:
             logger.warning(f"對話摘要錯誤：{str(e)}")
-            return {"theme": "一般", "keywords명을 []}
+            return {"theme": "一般", "keywords": []}
 
 async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
     conversation_context = conversation_context or []
