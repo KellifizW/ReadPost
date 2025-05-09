@@ -584,7 +584,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                         }
-                        for reply in result.get("replies", [])
+                        for reply in result.get("replies", []) 
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
                     thread_info = {
@@ -620,7 +620,7 @@ def clean_cache(max_age=3600):
     for key in expired_keys:
         del st.session_state.thread_cache[key]
     if len(st.session_state.thread_cache) > MAX_CACHE_SIZE:
-        sorted_keys = sorted(st.session_state.thread_cache.items(), key=lambda x x[1]["timestamp"])[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]
+        sorted_keys = sorted(st.session_state.thread_cache.items(), key=lambda x: x[1]["timestamp"])[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]
         for key, _ in sorted_keys:
             del st.session_state.thread_cache[key]
         logger.info(f"清理緩存，移除 {len(sorted_keys)} 個條目，當前大小：{len(st.session_state.thread_cache)}")
