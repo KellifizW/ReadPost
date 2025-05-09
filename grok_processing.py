@@ -25,26 +25,30 @@ request_semaphore = asyncio.Semaphore(5)
 async def call_grok3_api(payload, headers, retries=3, timeout=API_TIMEOUT, stream=False):
     """Unified API call handler with retries and error handling."""
     for attempt in range(retries):
-        try:
-            async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as session:
+            try:
                 async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=timeout) as response:
                     if response.status != 200:
                         logger.debug(f"API call failed: status={response.status}, attempt={attempt + 1}")
+                        if attempt < retries - 1:
+                            await asyncio.sleep(2)
                         continue
                     if stream:
                         return response
                     data = await response.json()
                     if not data.get("choices"):
                         logger.debug(f"API call failed: no choices, attempt={attempt + 1}")
+                        if attempt < retries - 1:
+                            await asyncio.sleep(2)
                         continue
+                    logger.debug(f"API call success: data={json.dumps(data, ensure_ascii=False)}")
                     return {"error": None, "data": data}
-        except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError, json.JSONDecodeError) as e:
-            logger.debug(f"API call error: {str(e)}, attempt={attempt + 1}")
-            if attempt < retries - 1:
-                await asyncio.sleep(2)
+            except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+                logger.debug(f"API call error: {str(e)}, attempt={attempt + 1}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
                 continue
-            return {"error": f"API call failed: {str(e)}", "data": None}
-    return {"error": "Max retries exceeded", "data": None}
+    return {"error": f"API call failed after {retries} attempts", "data": None}
 
 def clean_content(content, is_response=False):
     """Unified content cleaning for HTML and response formatting."""
@@ -369,11 +373,26 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     
     prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
     prompt_length = len(prompt)
+    estimated_tokens = prompt_length // 4
+    
+    if prompt_length > GROK3_TOKEN_LIMIT * 0.8:
+        max_replies_per_thread //= 2
+        total_replies_count = 0
+        for tid, data in filtered_thread_data.items():
+            replies = await filter_replies(data.get("replies", []), max_replies_per_thread, source_type, tid)
+            total_replies_count += len(replies)
+            filtered_thread_data[tid]["replies"] = replies
+            filtered_thread_data[tid]["total_fetched_replies"] = len(replies)
+        prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
+        prompt_length = len(prompt)
+        estimated_tokens = prompt_length // 4
     
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"Prompt length {prompt_length} exceeds limit {GROK3_TOKEN_LIMIT}")
         yield "Error: Prompt too large. Please reduce query scope."
         return
+    
+    logger.info(f"生成提示：查詢={user_query}, 提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, intents={intents}")
     
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     payload = {
@@ -388,27 +407,50 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         "stream": True
     }
     
-    response = await call_grok3_api(payload, headers, stream=True)
-    if isinstance(response, dict) and response.get("error"):
-        yield f"Error: API call failed ({response['error']})."
-        return
-    
-    response_content = ""
-    async for line in response.content:
-        if line and not line.isspace():
-            line_str = line.decode('utf-8').strip()
-            if line_str == "data: [DONE]":
-                break
-            if line_str.startswith("data:"):
-                try:
-                    chunk = json.loads(line_str[6:])
-                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    if content:
-                        content = clean_content(content, is_response=True)
-                        response_content += content
-                        yield content
-                except json.JSONDecodeError:
-                    continue
+    for attempt in range(3):
+        try:
+            response = await call_grok3_api(payload, headers, stream=True)
+            if isinstance(response, dict) and response.get("error"):
+                logger.error(f"Stream API call failed: {response['error']}, attempt={attempt + 1}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                continue
+            
+            response_content = ""
+            async for line in response.content:
+                if line and not line.isspace():
+                    line_str = line.decode('utf-8').strip()
+                    if line_str == "data: [DONE]":
+                        break
+                    if line_str.startswith("data:"):
+                        try:
+                            chunk = json.loads(line_str[6:])
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if content:
+                                content = clean_content(content, is_response=True)
+                                response_content += content
+                                yield content
+                        except json.JSONDecodeError:
+                            continue
+            logger.info(f"Stream API call success: response_length={len(response_content)}")
+            return
+        except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
+            logger.error(f"Stream API error: {str(e)}, attempt={attempt + 1}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+                continue
+            # Fallback to non-streaming
+            logger.info("Falling back to non-streaming API call")
+            payload["stream"] = False
+            payload["max_tokens"] //= 2
+            result = await call_grok3_api(payload, headers)
+            if result.get("error") or not result.get("data"):
+                yield f"Error: API call failed ({result.get('error', 'No data returned')})."
+                return
+            content = result["data"]["choices"][0]["message"]["content"]
+            yield clean_content(content, is_response=True)
+            return
+    yield "Error: Failed to generate response after retries. Please try again."
 
 async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     """Process user query and fetch relevant threads."""
