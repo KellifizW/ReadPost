@@ -1,5 +1,5 @@
 import asyncpraw
-import logging
+import logging10n import logging
 import asyncio
 from datetime import datetime
 import streamlit as st
@@ -7,6 +7,7 @@ import time
 import pytz
 from contextlib import asynccontextmanager
 from logging_config import configure_logger
+import aiohttp
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "reddit_api.log")
@@ -20,8 +21,8 @@ class RedditClientManager:
         self.current_client_index = 0
         self.topic_cache = {}
         self.thread_cache = {}
-        self.topic_cache_duration = 1800  # 30 minutes for topic lists
-        self.thread_cache_duration = 300  # 5 minutes for thread content
+        self.topic_cache_duration = 1800  # 30 minutes
+        self.thread_cache_duration = 300  # 5 minutes
         self.max_cache_size = 100
 
     @asynccontextmanager
@@ -34,17 +35,20 @@ class RedditClientManager:
             self.current_client_index += 1
             yield self.clients[client_idx]
         finally:
-            pass  # Client is reused, not closed
+            pass  # Client reused, not closed
 
     async def _init_reddit_client(self, client_idx):
         try:
             cred = st.secrets["reddit"]["credentials"][client_idx]
+            # Configure aiohttp timeout
+            timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_connect=10)
             reddit = asyncpraw.Reddit(
                 client_id=cred["client_id"],
                 client_secret=cred["client_secret"],
                 username=st.secrets["reddit"]["username"],
                 password=st.secrets["reddit"]["password"],
-                user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}_{client_idx}"
+                user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}_{client_idx}",
+                timeout=timeout
             )
             user = await reddit.user.me()
             logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
@@ -101,7 +105,9 @@ async def format_submission(submission):
         "like_count": submission.score
     }
 
-async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best"):
+async def get_reddit_topic
+
+_list(subreddit, start_page=1, max_pages=1, sort="best"):
     cache_key = f"{subreddit}_{start_page}_{max_pages}_{sort}"
     client_manager.clean_cache(client_manager.topic_cache, "topic")
     
@@ -157,50 +163,55 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
     more_comments_ids = []
     comments = []
     
-    async for comment in submission.comments:
-        if isinstance(comment, asyncpraw.models.MoreComments):
-            more_comments_ids.extend(comment.children)
-        elif hasattr(comment, 'body') and comment.body:
-            hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-            comments.append({
-                "reply_id": comment.id,
-                "msg": comment.body,
-                "like_count": comment.score,
-                "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
-            })
-    
-    BATCH_SIZE = 100
-    for i in range(0, len(more_comments_ids), BATCH_SIZE):
-        if len(comments) >= max_comments:
-            break
-        batch_ids = more_comments_ids[i:i + BATCH_SIZE]
-        if not batch_ids:
-            continue
+    try:
+        async for comment in submission.comments:
+            if isinstance(comment, asyncpraw.models.MoreComments):
+                more_comments_ids.extend(comment.children)
+            elif hasattr(comment, 'body') and comment.body:
+                hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
+                comments.append({
+                    "reply_id": comment.id,
+                    "msg": comment.body,
+                    "like_count": comment.score,
+                    "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
+                })
         
-        request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
-        
-        try:
-            more_comments = await reddit.comment.more_children(
-                link_id=f"t3_{submission.id}",
-                children=",".join(batch_ids),
-                sort="best"
-            )
-            for comment in more_comments:
-                if hasattr(comment, 'body') and comment.body:
-                    hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-                    comments.append({
-                        "reply_id": comment.id,
-                        "msg": comment.body,
-                        "like_count": comment.score,
-                        "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                    if len(comments) >= max_comments:
-                        break
-        except Exception as e:
-            logger.warning(f"/api/morechildren 請求失敗：{str(e)}")
-            continue
+        BATCH_SIZE = 100
+        for i in range(0, len(more_comments_ids), BATCH_SIZE):
+            if len(comments) >= max_comments:
+                break
+            batch_ids = more_comments_ids[i:i + BATCH_SIZE]
+            if not batch_ids:
+                continue
+            
+            request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
+            
+            try:
+                more_comments = await reddit.comment.more_children(
+                    link_id=f"t3_{submission.id}",
+                    children=",".join(batch_ids),
+                    sort="best"
+                )
+                for comment in more_comments:
+                    if hasattr(comment, 'body') and comment.body:
+                        hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
+                        comments.append({
+                            "reply_id": comment.id,
+                            "msg": comment.body,
+                            "like_count": comment.score,
+                            "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
+                        })
+                        if len(comments) >= max_comments:
+                            break
+            except (aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
+                logger.warning(f"/api/morechildren 請求失敗：{str(e)}")
+                continue
+            
+        return comments[:max_comments], request_counter, last_reset
     
-    return comments[:max_comments], request_counter, last_reset
+    except Exception as e:
+        logger.error(f"收集更多評論失敗：{str(e)}")
+        return comments[:max_comments], request_counter, last_reset
 
 async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset):
     cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
@@ -216,14 +227,62 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
     rate_limit_info = []
     
     try:
-        request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
+        async with asyncio.timeout(30):  # Set per-request timeout
+            request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
+            
+            logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
+            
+            submission = await reddit.submission(id=post_id)
+            if not submission:
+                logger.error(f"無法獲取貼文：{post_id}")
+                rate_limit_info.append({"message": f"無法獲取貼文 {post_id}"})
+                return {
+                    "title": "",
+                    "total_replies": 0,
+                    "last_reply_time": "1970-01-01 00:00:00",
+                    "like_count": 0,
+                    "replies": [],
+                    "fetched_pages": [],
+                    "rate_limit_info": rate_limit_info,
+                    "request_counter": request_counter,
+                    "last_reset": last_reset,
+                    "rate_limit_until": 0
+                }, request_counter, last_reset
+            
+            title = submission.title
+            total_replies = submission.num_comments
+            like_count = submission.score
+            last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            
+            replies, request_counter, last_reset = await collect_more_comments(
+                reddit, submission, max_comments, request_counter, last_reset
+            )
+            
+            logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
+            
+            result = {
+                "title": title,
+                "total_replies": total_replies,
+                "last_reply_time": last_reply_time,
+                "like_count": like_count,
+                "replies": replies,
+                "fetched_pages": [1],
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": 0
+            }
+            
+            client_manager.thread_cache[cache_key] = {
+                "timestamp": time.time(),
+                "data": result
+            }
+            
+            return result, request_counter, last_reset
         
-        logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
-        
-        submission = await reddit.submission(id=post_id)
-        if not submission:
-            logger.error(f"無法獲取貼文：{post_id}")
-            rate_limit_info.append({"message": f"無法獲取貼文 {post_id}"})
+        except (aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
+            logger.error(f"抓取貼文內容失敗：{str(e)}")
+            rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
             return {
                 "title": "",
                 "total_replies": 0,
@@ -236,37 +295,6 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
                 "last_reset": last_reset,
                 "rate_limit_until": 0
             }, request_counter, last_reset
-        
-        title = submission.title
-        total_replies = submission.num_comments
-        like_count = submission.score
-        last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        
-        replies, request_counter, last_reset = await collect_more_comments(
-            reddit, submission, max_comments, request_counter, last_reset
-        )
-        
-        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
-        
-        result = {
-            "title": title,
-            "total_replies": total_replies,
-            "last_reply_time": last_reply_time,
-            "like_count": like_count,
-            "replies": replies,
-            "fetched_pages": [1],
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": 0
-        }
-        
-        client_manager.thread_cache[cache_key] = {
-            "timestamp": time.time(),
-            "data": result
-        }
-        
-        return result, request_counter, last_reset
     
     except Exception as e:
         logger.error(f"抓取貼文內容失敗：{str(e)}")
@@ -297,6 +325,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     results = []
     rate_limit_info = []
     fetch_status = {}
+    batch_size = 5  # Reduced batch size to mitigate timeout issues
     
     async with client_manager.get_client() as reddit:
         try:
@@ -306,8 +335,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
             ids = [f"t3_{pid}" for pid in post_ids]
             submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
             
-            # Parallel fetching of thread content
-            batch_size = 10
+            # Parallel fetching with limited concurrency
             for i in range(0, len(post_ids), batch_size):
                 batch_ids = post_ids[i:i + batch_size]
                 tasks = []
@@ -329,8 +357,9 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 
                 if tasks:
                     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for result, req_count, last_reset in batch_results:
-                        if not isinstance(result, Exception):
+                    for result in batch_results:
+                        if isinstance(result, tuple):
+                            result, req_count, last_reset = result
                             results.append(result)
                             fetch_status[result.get("title", post_id)] = {
                                 "status": "success",
