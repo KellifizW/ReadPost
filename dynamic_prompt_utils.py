@@ -322,14 +322,14 @@ async def extract_relevant_thread(
                 content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
                 if common_keywords or content_contains_keywords:
                     return thread_id, title, message["content"], f"Keyword match: {common_keywords or query_keywords}"
-    
+
     prompt = f"""
 Compare query and conversation history to find the most relevant thread ID.
 Query: {query}
 Conversation History: {json.dumps(conversation_context, ensure_ascii=False)}
 Keywords: {json.dumps(query_keywords, ensure_ascii=False)}
 Output Format: {{"thread_id": "id", "title": "title", "reason": "reason"}}
-Return empty object {} if no match.
+Return empty object {{}} if no match.
 """
     payload = {
         "model": "grok-3",
@@ -375,7 +375,7 @@ async def build_dynamic_prompt(
 
     source_name = selected_source.get("source_name", "Unknown")
     source_type = selected_source.get("source_type", "lihkg")
-    
+
     system = (
         f"You are a data assistant for {source_name} ({source_type}), responding in Traditional Chinese "
         "with a clear, concise, and engaging tone. Cite threads using [帖子 ID: {{thread_id}}] format. "
@@ -400,7 +400,7 @@ async def build_dynamic_prompt(
 
     instruction_parts = []
     format_instructions = []
-    
+
     if intent == "summarize_posts":
         instruction_parts.append("Summarize up to 5 threads, focusing on key points and keywords.")
         format_instructions.append("Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].")
