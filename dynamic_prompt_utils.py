@@ -384,7 +384,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                 *conversation_context,
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 200,
+            "max_tokens": 300,  # Increased from 200 to avoid truncation
             "temperature": 0.5,
         }
         api_response = await call_grok3_api(payload, function_name="parse_query")
@@ -397,7 +397,19 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                 ]
                 reason = result.get("reason", "Semantic matching")
             except json.JSONDecodeError as e:
-                logger.error(f"Parse query response error: {str(e)}, response_content={response_content[:500]}...")
+                logger.error(f"Parse query response error: {str(e)}, response_content={response_content}")
+                # Attempt to fix truncated JSON
+                if response_content.strip().endswith("..."):
+                    try:
+                        fixed_content = response_content.rsplit(",", 1)[0] + "]}"
+                        result = json.loads(fixed_content)
+                        intents = [
+                            i for i in result.get("intents", []) if i["confidence"] >= CONFIG["intent_confidence_threshold"]
+                        ]
+                        reason = result.get("reason", "Semantic matching (fixed truncated JSON)")
+                        logger.info(f"Fixed truncated JSON in parse_query: {fixed_content[:100]}...")
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to fix truncated JSON")
                 # Fallback: Infer intent based on keywords
                 inferred_intent = "summarize_posts"
                 for intent, config in INTENT_CONFIG.items():
