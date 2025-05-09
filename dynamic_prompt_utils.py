@@ -5,10 +5,236 @@ import logging
 import re
 from logging_config import configure_logger
 import streamlit as st
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = configure_logger(__name__, "dynamic_prompt_utils.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
+
+# Centralized intent configuration
+INTENT_CONFIG = {
+    "summarize_posts": {
+        "triggers": {
+            "keywords": ["總結", "摘要", "概覽"],
+            "confidence": 0.7,
+            "reason": "Detected summarization query",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Summarize up to 5 threads, focusing on key points and keywords.",
+        "prompt_format": "Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+    "analyze_sentiment": {
+        "triggers": {
+            "keywords": ["情緒", "氣氛", "指數", "正負面", "sentiment", "mood"],
+            "confidence": 0.90,
+            "reason": "Detected sentiment analysis query",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Analyze sentiment of up to 5 threads (positive/neutral/negative).",
+        "prompt_format": "Paragraphs with sentiment summary, optional table: | ID | Sentiment | Ratio |.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "both",
+            "max_replies": 300,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+    "follow_up": {
+        "triggers": {
+            "keywords": ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"],
+            "confidence": 0.90,
+            "reason": "Detected follow-up query",
+        },
+        "word_range": (1000, 4000),
+        "prompt_instruction": "Deep dive into referenced threads, supplementing with context.",
+        "prompt_format": "Paragraphs with cohesive follow-up, segmented by viewpoints.",
+        "processing": {
+            "post_limit": 2,
+            "data_type": "replies",
+            "max_replies": 400,
+            "sort": "relevance",
+            "min_replies": 5,
+        },
+    },
+    "fetch_thread_by_id": {
+        "triggers": {
+            "regex": r"(?:ID|帖子)\s*([a-zA-Z0-9]+)",
+            "confidence": 0.95,
+            "reason": "Detected specific thread ID",
+        },
+        "word_range": (500, 2000),
+        "prompt_instruction": "Summarize specified thread, highlighting core discussions.",
+        "prompt_format": "Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 1,
+            "data_type": "replies",
+            "max_replies": 400,
+            "sort": "relevance",
+            "min_replies": 0,
+        },
+    },
+    "general_query": {
+        "triggers": {
+            "keywords": [],
+            "confidence": 0.5,
+            "reason": "Default general query",
+        },
+        "word_range": (500, 2000),
+        "prompt_instruction": "Provide concise summary based on metadata, keeping it brief.",
+        "prompt_format": "Paragraphs answering query, citing relevant threads if needed.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "none",
+            "max_replies": 100,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+    "list_titles": {
+        "triggers": {
+            "keywords": ["列出", "標題", "清單", "所有標題"],
+            "confidence": 0.95,
+            "reason": "Detected list titles query",
+        },
+        "word_range": (500, 3000),
+        "prompt_instruction": "List up to 15 thread titles, explaining relevance.",
+        "prompt_format": "List with [帖子 ID: {thread_id}], title, and relevance note.",
+        "processing": {
+            "post_limit": 15,
+            "data_type": "metadata",
+            "max_replies": 20,
+            "sort": "relevance",
+            "min_replies": 5,
+        },
+    },
+    "find_themed": {
+        "triggers": {
+            "keywords": ["主題", "類似", "相關"],
+            "confidence": 0.85,
+            "reason": "Detected themed query",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Find threads matching themes, highlighting thematic links.",
+        "prompt_format": "Paragraphs emphasizing themes, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 20,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "relevance",
+            "min_replies": 10,
+        },
+    },
+    "fetch_dates": {
+        "triggers": {
+            "keywords": ["日期", "時間", "最近更新"],
+            "confidence": 0.85,
+            "reason": "Detected date-focused query",
+        },
+        "word_range": (500, 2000),
+        "prompt_instruction": "Extract dates for up to 5 threads, integrating into summary.",
+        "prompt_format": "Table: | ID | Title | Date |, followed by brief summary.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "metadata",
+            "max_replies": 100,
+            "sort": "new",
+            "min_replies": 5,
+        },
+    },
+    "search_keywords": {
+        "triggers": {
+            "keywords": ["搜索", "查找", "關鍵詞"],
+            "confidence": 0.85,
+            "reason": "Detected keyword search query",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Search threads with matching keywords, emphasizing matches.",
+        "prompt_format": "Paragraphs highlighting keyword matches, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 20,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "relevance",
+            "min_replies": 10,
+        },
+    },
+    "recommend_threads": {
+        "triggers": {
+            "keywords": ["推薦", "建議", "熱門"],
+            "confidence": 0.85,
+            "reason": "Detected recommendation query",
+        },
+        "word_range": (500, 3000),
+        "prompt_instruction": "Recommend 2-5 threads based on replies/likes, justifying choices.",
+        "prompt_format": "List with [帖子 ID: {thread_id}], title, and recommendation reason.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "metadata",
+            "max_replies": 100,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+    "time_sensitive_analysis": {
+        "triggers": {
+            "keywords": ["今晚", "今日", "最近", "今個星期"],
+            "confidence": 0.85,
+            "reason": "Detected time-sensitive query",
+        },
+        "word_range": (500, 2000),
+        "prompt_instruction": "Summarize threads from last 24 hours, focusing on recent discussions.",
+        "prompt_format": "Paragraphs noting reply times, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "new",
+            "min_replies": 5,
+        },
+    },
+    "contextual_analysis": {
+        "triggers": {
+            "keywords": ["Reddit", "LIHKG", "子版", "討論區"],
+            "confidence": 0.85,
+            "reason": "Detected platform-specific query",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Summarize 5 threads, identifying themes and sentiment ratios.",
+        "prompt_format": "Paragraphs by theme, ending with table: | Theme | Ratio | Thread |.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+    "rank_topics": {
+        "triggers": {
+            "keywords": ["熱門", "最多", "關注", "流行"],
+            "confidence": 0.85,
+            "reason": "Detected ranking query",
+        },
+        "word_range": (500, 2000),
+        "prompt_instruction": "Rank up to 5 threads/topics by engagement, explaining reasons.",
+        "prompt_format": "List with [帖子 ID: {thread_id}], title, and engagement reason.",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "metadata",
+            "max_replies": 100,
+            "sort": "popular",
+            "min_replies": 10,
+        },
+    },
+}
+
 CONFIG = {
     "max_prompt_length": 120000,
     "max_parse_retries": 3,
@@ -16,21 +242,6 @@ CONFIG = {
     "min_keywords": 1,
     "max_keywords": 8,
     "intent_confidence_threshold": 0.75,
-    "default_word_ranges": {
-        "summarize_posts": (700, 3000),  # 增加上限
-        "analyze_sentiment": (700, 3000),
-        "follow_up": (1000, 4000),
-        "fetch_thread_by_id": (500, 2000),
-        "general_query": (500, 2000),
-        "list_titles": (500, 3000),
-        "find_themed": (700, 3000),
-        "fetch_dates": (500, 2000),
-        "search_keywords": (700, 3000),
-        "recommend_threads": (500, 3000),
-        "time_sensitive_analysis": (500, 2000),
-        "contextual_analysis": (700, 3000),
-        "rank_topics": (500, 2000),
-    },
 }
 
 async def call_grok3_api(
@@ -72,44 +283,6 @@ async def call_grok3_api(
     logger.warning(f"API call failed in {function_name} after {retries} attempts")
     return None
 
-intent_triggers = {
-    "fetch_thread_by_id": {
-        "regex": r"(?:ID|帖子)\s*([a-zA-Z0-9]+)",
-        "confidence": 0.95,
-        "reason": "Detected specific thread ID",
-    },
-    "follow_up": {
-        "keywords": ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"],
-        "confidence": 0.90,
-        "reason": "Detected follow-up query",
-    },
-    "analyze_sentiment": {
-        "keywords": ["情緒", "氣氛", "指數", "正負面", "sentiment", "mood"],
-        "confidence": 0.90,
-        "reason": "Detected sentiment analysis query",
-    },
-    "time_sensitive_analysis": {
-        "keywords": ["今晚", "今日", "最近", "今個星期"],
-        "confidence": 0.85,
-        "reason": "Detected time-sensitive query",
-    },
-    "list_titles": {
-        "keywords": ["列出", "標題", "清單", "所有標題"],
-        "confidence": 0.95,
-        "reason": "Detected list titles query",
-    },
-    "rank_topics": {
-        "keywords": ["熱門", "最多", "關注", "流行"],
-        "confidence": 0.85,
-        "reason": "Detected ranking query",
-    },
-    "contextual_analysis": {
-        "keywords": ["Reddit", "LIHKG", "子版", "討論區"],
-        "confidence": 0.85,
-        "reason": "Detected platform-specific query",
-    },
-}
-
 async def parse_query(
     query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg"
 ) -> Dict:
@@ -136,40 +309,27 @@ async def parse_query(
     thread_ids = []
     query_lower = query.lower()
 
-    for intent, config in intent_triggers.items():
-        if intent == "fetch_thread_by_id":
-            match = re.search(config["regex"], query, re.IGNORECASE)
+    for intent, config in INTENT_CONFIG.items():
+        triggers = config.get("triggers", {})
+        if "regex" in triggers:
+            match = re.search(triggers["regex"], query, re.IGNORECASE)
             if match:
                 thread_id = match.group(1)
                 intents.append(
                     {
                         "intent": intent,
-                        "confidence": config["confidence"],
-                        "reason": f"{config['reason']}: {thread_id}",
+                        "confidence": triggers["confidence"],
+                        "reason": f"{triggers['reason']}: {thread_id}",
                     }
                 )
                 thread_ids.append(thread_id)
                 break
-        elif intent == "follow_up":
-            thread_id, _, _, reason = await extract_relevant_thread(
-                conversation_context, query, grok3_api_key
-            )
-            if thread_id:
-                intents.append(
-                    {
-                        "intent": intent,
-                        "confidence": config["confidence"],
-                        "reason": f"{config['reason']}: {reason}",
-                    }
-                )
-                thread_ids.append(thread_id)
-                break
-        elif any(kw in query_lower for kw in config["keywords"]):
+        elif "keywords" in triggers and any(kw in query_lower for kw in triggers["keywords"]):
             intents.append(
                 {
                     "intent": intent,
-                    "confidence": config["confidence"],
-                    "reason": config["reason"],
+                    "confidence": triggers["confidence"],
+                    "reason": triggers["reason"],
                 }
             )
             if intent == "time_sensitive_analysis":
@@ -190,7 +350,7 @@ Related Terms: {json.dumps(related_terms, ensure_ascii=False)}
 Source: {source_type}
 Is Vague: {is_vague}
 Has Multi-Intent: {has_multi_intent}
-Supported Intents: {json.dumps(list(CONFIG["default_word_ranges"].keys()), ensure_ascii=False)}
+Supported Intents: {json.dumps(list(INTENT_CONFIG.keys()), ensure_ascii=False)}
 Output Format: {{"intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "reason"}}, ...], "reason": "overall reason"}}
 Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
 """
@@ -304,7 +464,7 @@ Output Format: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 c
 
 async def extract_relevant_thread(
     conversation_context: List[Dict], query: str, grok3_api_key: str
-) -> tuple[Optional[str], Optional[str], Optional[str], str]:
+) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """Extract relevant thread ID from conversation history."""
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None, "No conversation history"
@@ -392,54 +552,15 @@ async def build_dynamic_prompt(
         f"Filters: {json.dumps(filters, ensure_ascii=False)}"
     )
 
-    word_min, word_max = CONFIG["default_word_ranges"].get(intent, (500, 3000))
+    intent_config = INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])
+    word_min, word_max = intent_config["word_range"]
     prompt_length = len(context) + len(data) + len(system) + 500
-    length_factor = min(prompt_length / (CONFIG["max_prompt_length"] * 0.8), 1.0)  # 放寬因子
+    length_factor = min(prompt_length / (CONFIG["max_prompt_length"] * 0.8), 1.0)
     word_min = int(word_min + (word_max - word_min) * length_factor * 0.7)
     word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))
 
-    instruction_parts = []
-    format_instructions = []
-
-    if intent == "summarize_posts":
-        instruction_parts.append("Summarize up to 5 threads, focusing on key points and keywords.")
-        format_instructions.append("Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].")
-    elif intent == "analyze_sentiment":
-        instruction_parts.append("Analyze sentiment of up to 5 threads (positive/neutral/negative).")
-        format_instructions.append("Paragraphs with sentiment summary, optional table: | ID | Sentiment | Ratio |.")
-    elif intent == "follow_up":
-        instruction_parts.append("Deep dive into referenced threads, supplementing with context.")
-        format_instructions.append("Paragraphs with cohesive follow-up, segmented by viewpoints.")
-    elif intent == "fetch_thread_by_id":
-        instruction_parts.append("Summarize specified thread, highlighting core discussions.")
-        format_instructions.append("Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].")
-    elif intent == "general_query":
-        instruction_parts.append("Provide concise summary based on metadata, keeping it brief.")
-        format_instructions.append("Paragraphs answering query, citing relevant threads if needed.")
-    elif intent == "list_titles":
-        instruction_parts.append("List up to 15 thread titles, explaining relevance.")
-        format_instructions.append("List with [帖子 ID: {thread_id}], title, and relevance note.")
-    elif intent == "find_themed":
-        instruction_parts.append("Find threads matching themes, highlighting thematic links.")
-        format_instructions.append("Paragraphs emphasizing themes, citing [帖子 ID: {thread_id}].")
-    elif intent == "fetch_dates":
-        instruction_parts.append("Extract dates for up to 5 threads, integrating into summary.")
-        format_instructions.append("Table: | ID | Title | Date |, followed by brief summary.")
-    elif intent == "search_keywords":
-        instruction_parts.append("Search threads with matching keywords, emphasizing matches.")
-        format_instructions.append("Paragraphs highlighting keyword matches, citing [帖子 ID: {thread_id}].")
-    elif intent == "recommend_threads":
-        instruction_parts.append("Recommend 2-5 threads based on replies/likes, justifying choices.")
-        format_instructions.append("List with [帖子 ID: {thread_id}], title, and recommendation reason.")
-    elif intent == "time_sensitive_analysis":
-        instruction_parts.append("Summarize threads from last 24 hours, focusing on recent discussions.")
-        format_instructions.append("Paragraphs noting reply times, citing [帖子 ID: {thread_id}].")
-    elif intent == "contextual_analysis":
-        instruction_parts.append("Summarize 5 threads, identifying themes and sentiment ratios.")
-        format_instructions.append("Paragraphs by theme, ending with table: | Theme | Ratio | Thread |.")
-    elif intent == "rank_topics":
-        instruction_parts.append("Rank up to 5 threads/topics by engagement, explaining reasons.")
-        format_instructions.append("List with [帖子 ID: {thread_id}], title, and engagement reason.")
+    instruction_parts = [intent_config["prompt_instruction"]]
+    format_instructions = [intent_config["prompt_format"]]
 
     platform_instruction = (
         f"For {source_type}, incorporate platform-specific context (e.g., Reddit subreddits, LIHKG trends)."
@@ -476,3 +597,7 @@ def extract_thread_metadata(metadata: List[Dict]) -> List[Dict]:
     except Exception as e:
         logger.error(f"Extract metadata error: {str(e)}")
         return []
+
+def get_intent_processing_params(intent: str) -> Dict:
+    """Retrieve processing parameters for a given intent."""
+    return INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"]).get("processing", {})
