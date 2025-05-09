@@ -233,6 +233,23 @@ INTENT_CONFIG = {
             "min_replies": 10,
         },
     },
+    "search_odd_posts": {
+        "triggers": {
+            "keywords": ["離奇", "怪事", "奇聞", "詭異", "不可思議", "怪談", "荒誕"],
+            "confidence": 0.85,
+            "reason": "Detected query for odd or unusual posts",
+        },
+        "word_range": (700, 3000),
+        "prompt_instruction": "Summarize up to 5 threads with odd or unusual content, highlighting peculiar aspects.",
+        "prompt_format": "Paragraphs summarizing odd discussions, citing [帖子 ID: {thread_id}].",
+        "processing": {
+            "post_limit": 5,
+            "data_type": "both",
+            "max_replies": 150,
+            "sort": "relevance",
+            "min_replies": 10,
+        },
+    },
 }
 
 CONFIG = {
@@ -265,10 +282,14 @@ async def call_grok3_api(
                         logger.warning(
                             f"API call failed in {function_name}: status={response.status}, attempt={attempt + 1}"
                         )
+                        if attempt < retries - 1:
+                            await asyncio.sleep(2)
                         continue
                     data = await response.json()
                     if not data.get("choices"):
                         logger.warning(f"API call failed in {function_name}: no choices, attempt={attempt + 1}")
+                        if attempt < retries - 1:
+                            await asyncio.sleep(2)
                         continue
                     logger.info(
                         f"API call in {function_name}: status={response.status}, "
@@ -309,6 +330,7 @@ async def parse_query(
     thread_ids = []
     query_lower = query.lower()
 
+    # Step 1: Check for intent triggers (keywords or regex)
     for intent, config in INTENT_CONFIG.items():
         triggers = config.get("triggers", {})
         if "regex" in triggers:
@@ -324,7 +346,7 @@ async def parse_query(
                 )
                 thread_ids.append(thread_id)
                 break
-        elif "keywords" in triggers and any(kw in query_lower for kw in triggers["keywords"]):
+        elif "keywords" in triggers and any(kw.lower() in query_lower for kw in triggers["keywords"]):
             intents.append(
                 {
                     "intent": intent,
@@ -340,6 +362,7 @@ async def parse_query(
     )
     has_multi_intent = any(ind in query_lower for ind in ["並且", "同時", "總結並", "列出並", "分析並"])
 
+    # Step 2: Use API for semantic analysis if no clear intent or vague query
     if not intents or (is_vague and not has_multi_intent):
         prompt = f"""
 Analyze the query to classify up to 4 intents, considering conversation history and keywords.
@@ -366,18 +389,39 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
         }
         api_response = await call_grok3_api(payload, function_name="parse_query")
         if api_response:
+            response_content = api_response["choices"][0]["message"]["content"]
             try:
-                result = json.loads(api_response["choices"][0]["message"]["content"])
+                result = json.loads(response_content)
                 intents = [
                     i for i in result.get("intents", []) if i["confidence"] >= CONFIG["intent_confidence_threshold"]
                 ]
                 reason = result.get("reason", "Semantic matching")
-            except Exception as e:
-                logger.error(f"Parse query response error: {str(e)}")
-                intents = []
-                reason = f"Response parsing error: {str(e)}"
+            except json.JSONDecodeError as e:
+                logger.error(f"Parse query response error: {str(e)}, response_content={response_content[:500]}...")
+                # Fallback: Infer intent based on keywords
+                inferred_intent = "summarize_posts"
+                for intent, config in INTENT_CONFIG.items():
+                    triggers = config.get("triggers", {})
+                    if "keywords" in triggers and any(kw.lower() in query_lower for kw in triggers["keywords"]):
+                        inferred_intent = intent
+                        break
+                intents = [
+                    {
+                        "intent": inferred_intent,
+                        "confidence": 0.6,
+                        "reason": f"JSON parsing failed, inferred from keywords: {keywords}",
+                    }
+                ]
+                reason = f"JSON parsing error: {str(e)}"
         else:
             reason = "API call failed"
+            intents = [
+                {
+                    "intent": "summarize_posts",
+                    "confidence": 0.7,
+                    "reason": "API call failed, default to summarization",
+                }
+            ]
 
     if not intents:
         intents = [
