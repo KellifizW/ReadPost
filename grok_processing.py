@@ -284,6 +284,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "replies": sorted_replies,
             "total_fetched_replies": len(sorted_replies),
             "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
+            "no_of_reply": data.get("no_of_reply", 0),  # Ensure no_of_reply is preserved
         }
     prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
     prompt_length = len(prompt)
@@ -429,7 +430,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             processed_thread_ids.add(thread_id_str)
             async with cache_lock:
                 if thread_id_str in st.session_state.thread_cache and st.session_state.thread_cache[thread_id_str]["data"].get("replies"):
-                    thread_data.append(st.session_state.thread_cache[thread_id_str]["data"])
+                    cached_data = st.session_state.thread_cache[thread_id_str]["data"]
+                    thread_data.append(cached_data)
                     continue
             async with request_semaphore:
                 if source_type == "lihkg":
@@ -452,10 +454,13 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
+                    total_replies = result.get("total_replies", 0)
+                    if total_replies == 0 and "no_of_reply" in result:
+                        total_replies = result.get("no_of_reply", 0)
                     thread_info = {
                         "thread_id": thread_id_str,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", 0),
+                        "no_of_reply": total_replies,
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id_str}"),
                         "like_count": result.get("like_count", 0),
                         "dislike_count": result.get("dislike_count", 0) if source_type == "lihkg" else 0,
@@ -521,7 +526,8 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             processed_thread_ids.add(thread_id)
             async with cache_lock:
                 if thread_id in st.session_state.thread_cache and st.session_state.thread_cache[thread_id]["data"].get("replies"):
-                    thread_data.append(st.session_state.thread_cache[thread_id]["data"])
+                    cached_data = st.session_state.thread_cache[thread_id]["data"]
+                    thread_data.append(cached_data)
                     continue
             async with request_semaphore:
                 if source_type == "lihkg":
@@ -544,10 +550,13 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
+                    total_replies = result.get("total_replies", item.get("no_of_reply", 0))
+                    if total_replies == 0:
+                        total_replies = item.get("no_of_reply", 0)
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", item.get("no_of_reply", 0)),
+                        "no_of_reply": total_replies,
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                         "like_count": item.get("like_count", 0),
                         "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0,
@@ -584,13 +593,16 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                         }
-                        for reply in result.get("replies", []) 
+                        for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
+                    total_replies = result.get("total_replies", item.get("no_of_reply", 0))
+                    if total_replies == 0:
+                        total_replies = item.get("no_of_reply", 0)
                     thread_info = {
                         "thread_id": thread_id,
                         "title": result.get("title"),
-                        "no_of_reply": result.get("total_replies", item.get("no_of_reply", 0)),
+                        "no_of_reply": total_replies,
                         "last_reply_time": unix_to_readable(result.get("last_reply_time", "0"), context=f"thread {thread_id}"),
                         "like_count": item.get("like_count", 0),
                         "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0,
