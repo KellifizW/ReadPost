@@ -17,19 +17,19 @@ CONFIG = {
     "max_keywords": 8,
     "intent_confidence_threshold": 0.75,
     "default_word_ranges": {
-        "summarize_posts": (700, 1500),
-        "analyze_sentiment": (700, 1500),
-        "follow_up": (1000, 2500),
-        "fetch_thread_by_id": (500, 1000),
-        "general_query": (500, 1000),
-        "list_titles": (500, 1500),
-        "find_themed": (700, 1500),
-        "fetch_dates": (500, 1000),
-        "search_keywords": (700, 1500),
-        "recommend_threads": (500, 1500),
-        "time_sensitive_analysis": (500, 1000),
-        "contextual_analysis": (700, 1500),
-        "rank_topics": (500, 1000),
+        "summarize_posts": (700, 3000),  # 增加上限
+        "analyze_sentiment": (700, 3000),
+        "follow_up": (1000, 4000),
+        "fetch_thread_by_id": (500, 2000),
+        "general_query": (500, 2000),
+        "list_titles": (500, 3000),
+        "find_themed": (700, 3000),
+        "fetch_dates": (500, 2000),
+        "search_keywords": (700, 3000),
+        "recommend_threads": (500, 3000),
+        "time_sensitive_analysis": (500, 2000),
+        "contextual_analysis": (700, 3000),
+        "rank_topics": (500, 2000),
     },
 }
 
@@ -392,11 +392,11 @@ async def build_dynamic_prompt(
         f"Filters: {json.dumps(filters, ensure_ascii=False)}"
     )
 
-    word_min, word_max = CONFIG["default_word_ranges"].get(intent, (500, 1500))
+    word_min, word_max = CONFIG["default_word_ranges"].get(intent, (500, 3000))
     prompt_length = len(context) + len(data) + len(system) + 500
-    length_factor = min(prompt_length / CONFIG["max_prompt_length"], 1.0)
-    word_min = int(word_min + (word_max - word_min) * length_factor * 0.5)
-    word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.5))
+    length_factor = min(prompt_length / (CONFIG["max_prompt_length"] * 0.8), 1.0)  # 放寬因子
+    word_min = int(word_min + (word_max - word_min) * length_factor * 0.7)
+    word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))
 
     instruction_parts = []
     format_instructions = []
