@@ -35,7 +35,7 @@ class RedditClientManager:
     @asynccontextmanager
     async def get_client(self):
         client_idx = self.current_client_index % len(self.clients)
-        if self.clients[client_idx] is None or not await self._is_client_valid(self clients[client_idx]):
+        if self.clients[client_idx] is None:
             self.clients[client_idx] = await self._init_reddit_client(client_idx)
         try:
             self.request_counters[client_idx], self.last_resets[client_idx] = await self._handle_rate_limit(client_idx)
@@ -77,14 +77,6 @@ class RedditClientManager:
                 logger.info(f"客戶端 {client_idx} 速率限制計數器重置")
         self.request_counters[client_idx] += 1
         return self.request_counters[client_idx], self.last_resets[client_idx]
-
-    async def _is_client_valid(self, reddit):
-        try:
-            await reddit.user.me()
-            return True
-        except Exception:
-            logger.warning(f"客戶端無效，重新初始化")
-            return False
 
     def clean_cache(self, cache, cache_type="topic"):
         duration = self.topic_cache_duration if cache_type == "topic" else self.thread_cache_duration
@@ -157,7 +149,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
                     "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
                     "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
                     "rate_limit_until": 0,
-                    "total_posts": len(items)  # Track total posts
+                    "total_posts": len(items)
                 }
             }
         except Exception as e:
@@ -285,7 +277,7 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
                 "request_counter": request_counter,
                 "last_reset": last_reset,
                 "rate_limit_until": 0,
-                "replies_count": len(replies)  # Track replies count
+                "replies_count": len(replies)
             }
             
             client_manager.thread_cache[cache_key] = {
