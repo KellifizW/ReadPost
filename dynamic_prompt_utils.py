@@ -19,13 +19,12 @@ INTENT_CONFIG = {
             "reason": "Detected summarization query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to 15 threads, focusing on key points and keywords.",
+        "prompt_instruction": "Summarize up to 5 threads, focusing on key points and keywords.",
         "prompt_format": "Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 15),  # Dynamic range
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -37,13 +36,12 @@ INTENT_CONFIG = {
             "reason": "Detected sentiment analysis query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Analyze sentiment of up to 15 threads (positive/neutral/negative).",
+        "prompt_instruction": "Analyze sentiment of up to 5 threads (positive/neutral/negative).",
         "prompt_format": "Paragraphs with sentiment summary, optional table: | ID | Sentiment | Ratio |.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 300,
-            "dynamic_replies": True,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -58,10 +56,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Deep dive into referenced threads, supplementing with context.",
         "prompt_format": "Paragraphs with cohesive follow-up, segmented by viewpoints.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 2,
             "data_type": "replies",
             "max_replies": 400,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 5,
         },
@@ -76,10 +73,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Summarize specified thread, highlighting core discussions.",
         "prompt_format": "Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 1),
+            "post_limit": 1,
             "data_type": "replies",
             "max_replies": 400,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 0,
         },
@@ -94,10 +90,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Provide concise summary based on metadata, keeping it brief.",
         "prompt_format": "Paragraphs answering query, citing relevant threads if needed.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
-            "dynamic_replies": True,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -112,10 +107,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "List up to 15 thread titles, explaining relevance.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and relevance note.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 15,
             "data_type": "metadata",
             "max_replies": 20,
-            "dynamic_replies": False,
             "sort": "relevance",
             "min_replies": 5,
         },
@@ -130,10 +124,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Find threads matching themes, highlighting thematic links.",
         "prompt_format": "Paragraphs emphasizing themes, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 10,
         },
@@ -145,13 +138,12 @@ INTENT_CONFIG = {
             "reason": "Detected date-focused query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Extract dates for up to 15 threads, integrating into summary.",
+        "prompt_instruction": "Extract dates for up to 5 threads, integrating into summary.",
         "prompt_format": "Table: | ID | Title | Date |, followed by brief summary.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "dynamic_replies": False,
             "sort": "new",
             "min_replies": 5,
         },
@@ -166,10 +158,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Search threads with matching keywords, emphasizing matches.",
         "prompt_format": "Paragraphs highlighting keyword matches, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 10,
         },
@@ -181,13 +172,12 @@ INTENT_CONFIG = {
             "reason": "Detected recommendation query",
         },
         "word_range": (500, 3000),
-        "prompt_instruction": "Recommend up to 15 threads based on replies/likes, justifying choices.",
+        "prompt_instruction": "Recommend 2-5 threads based on replies/likes, justifying choices.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and recommendation reason.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "dynamic_replies": False,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -202,10 +192,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Summarize threads from last 24 hours, focusing on recent discussions.",
         "prompt_format": "Paragraphs noting reply times, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "new",
             "min_replies": 5,
         },
@@ -217,13 +206,12 @@ INTENT_CONFIG = {
             "reason": "Detected platform-specific query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to 15 threads, identifying themes and sentiment ratios.",
+        "prompt_instruction": "Summarize 5 threads, identifying themes and sentiment ratios.",
         "prompt_format": "Paragraphs by theme, ending with table: | Theme | Ratio | Thread |.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -235,13 +223,12 @@ INTENT_CONFIG = {
             "reason": "Detected ranking query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Rank up to 15 threads/topics by engagement, explaining reasons.",
+        "prompt_instruction": "Rank up to 5 threads/topics by engagement, explaining reasons.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and engagement reason.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "dynamic_replies": False,
             "sort": "hot",
             "min_replies": 10,
         },
@@ -253,13 +240,12 @@ INTENT_CONFIG = {
             "reason": "Detected query for odd or unusual posts",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to 15 threads with odd or unusual content, highlighting peculiar aspects.",
+        "prompt_instruction": "Summarize up to 5 threads with odd or unusual content, highlighting peculiar aspects.",
         "prompt_format": "Paragraphs summarizing odd discussions, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 10,
         },
@@ -275,10 +261,9 @@ INTENT_CONFIG = {
         "prompt_instruction": "Answer as Grok, providing insights or advice for the hypothetical scenario or query, incorporating platform discussions if relevant.",
         "prompt_format": "Paragraphs with Grok's perspective, optionally citing [帖子 ID: {thread_id}] for context.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
-            "dynamic_replies": True,
             "sort": "relevance",
             "min_replies": 5,
         },
@@ -293,18 +278,17 @@ INTENT_CONFIG = {
         "prompt_instruction": "Identify and analyze risk factors (e.g., policy changes, market volatility, negative news) in financial discussions, assessing their potential impact on the specified investment.",
         "prompt_format": "Table: | Risk Factor | Description | Potential Impact | Thread Reference |, followed by a summary paragraph.",
         "processing": {
-            "post_limit": (1, 15),
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "dynamic_replies": True,
-            "sort": "controversial" if "reddit" in st.session_state.get("source_type", "lihkg").lower() else "hot",
+            "sort": "controversial" if "reddit" in source_type.lower() else "hot",
             "min_replies": 10,
         },
     },
 }
 
 CONFIG = {
-    "max_prompt_length": 150000,
+    "max_prompt_length": 150000,  # 提升上限至 150,000
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "min_keywords": 1,
@@ -387,16 +371,7 @@ async def parse_query(
         if "regex" in triggers:
             match = re.search(triggers["regex"], query, re.IGNORECASE)
             if match:
-                if intent == "hypothetical_advice":
-                    thread_ids.append(match.group(1)) if intent == "fetch_thread_by_id" else None
-                    intents.append(
-                        {
-                            "intent": intent,
-                            "confidence": triggers["confidence"],
-                            "reason": f"{triggers['reason']}: {match.group(0)}",
-                        }
-                    )
-                elif intent == "fetch_thread_by_id":
+                if intent == "fetch_thread_by_id":
                     thread_id = match.group(1)
                     intents.append(
                         {
@@ -406,6 +381,14 @@ async def parse_query(
                         }
                     )
                     thread_ids.append(thread_id)
+                elif intent == "hypothetical_advice":
+                    intents.append(
+                        {
+                            "intent": intent,
+                            "confidence": triggers["confidence"],
+                            "reason": triggers["reason"],
+                        }
+                    )
         elif "keywords" in triggers and any(kw.lower() in query_lower for kw in triggers["keywords"]):
             intents.append(
                 {
@@ -416,17 +399,6 @@ async def parse_query(
             )
             if intent == "time_sensitive_analysis":
                 time_sensitive = True
-            # Check for risk_warning as auxiliary intent for financial queries
-            if intent in ["summarize_posts", "analyze_sentiment", "find_themed"] and any(
-                kw.lower() in query_lower for kw in INTENT_CONFIG["risk_warning"]["triggers"]["keywords"]
-            ):
-                intents.append(
-                    {
-                        "intent": "risk_warning",
-                        "confidence": 0.85,
-                        "reason": "Financial query detected, triggering risk analysis",
-                    }
-                )
 
     is_vague = len(keywords) < 2 and not any(
         kw in query_lower for kw in ["分析", "總結", "討論", "主題", "時事", "推薦", "熱門", "最多", "關注"]
@@ -688,12 +660,6 @@ async def build_dynamic_prompt(
 
     instruction_parts = [intent_config["prompt_instruction"]]
     format_instructions = [intent_config["prompt_format"]]
-
-    # Add specific instructions for hypothetical_advice and risk_warning
-    if intent == "hypothetical_advice":
-        instruction_parts.append("Answer in first-person as Grok, simulating the specified role or scenario if provided.")
-    elif intent == "risk_warning":
-        instruction_parts.append("Ensure the response includes a structured table of risk factors and a summary paragraph.")
 
     platform_instruction = (
         f"For {source_type}, incorporate platform-specific context (e.g., Reddit subreddits, LIHKG trends)."
