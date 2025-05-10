@@ -15,7 +15,7 @@ from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keyw
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 120000
+GROK3_TOKEN_LIMIT = 150000  # 提升至 150,000，與 dynamic_prompt_utils.py 一致
 API_TIMEOUT = 120
 MAX_CACHE_SIZE = 100
 
@@ -153,7 +153,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "filters": {
             "min_replies": intent_params.get("min_replies", 10),
             "min_likes": 0,
-            "sort": intent_params.get("sort", "popular"),
+            "sort": intent_params.get("sort", "hot"),  # 修正為 hot
             "keywords": theme_keywords,
         },
         "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids, "analysis": parsed_query},
@@ -285,6 +285,18 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     prompt_length = len(prompt)
     estimated_tokens = prompt_length // 4
     prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
+    # 記錄提示長度統計
+    if "prompt_stats" not in st.session_state:
+        st.session_state.prompt_stats = {"lengths": [], "max_length": 0, "min_length": float("inf"), "count": 0}
+    st.session_state.prompt_stats["lengths"].append(prompt_length)
+    st.session_state.prompt_stats["max_length"] = max(st.session_state.prompt_stats["max_length"], prompt_length)
+    st.session_state.prompt_stats["min_length"] = min(st.session_state.prompt_stats["min_length"], prompt_length)
+    st.session_state.prompt_stats["count"] += 1
+    avg_length = sum(st.session_state.prompt_stats["lengths"]) / st.session_state.prompt_stats["count"] if st.session_state.prompt_stats["count"] > 0 else 0
+    logger.info(
+        f"提示長度統計：當前={prompt_length}, 平均={avg_length:.2f}, 最大={st.session_state.prompt_stats['max_length']}, "
+        f"最小={st.session_state.prompt_stats['min_length']}, 總次數={st.session_state.prompt_stats['count']}"
+    )
     reduction_attempts = 0
     while prompt_length > GROK3_TOKEN_LIMIT * 0.95 and reduction_attempts < 2:
         max_replies_per_thread = max_replies_per_thread // 2 or 10
@@ -298,7 +310,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4
         prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
-        logger.info(f"提示縮減：嘗試={reduction_attempts + 1}, 新長度={prompt_length}, 原因=超過 token 限制 {GROK3_TOKEN_LIMIT}")
+        logger.info(f"提示縮減：嘗試={reduction_attempts + 1}, 新長度={prompt_length}, 保留帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}")
         reduction_attempts += 1
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"提示長度 {prompt_length} 超過限制 {GROK3_TOKEN_LIMIT}，無法進一步縮減")
@@ -413,7 +425,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     post_limit = min(analysis.get("post_limit", intent_params.get("post_limit", 5)), 20)
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
     keyword_result = await extract_keywords(user_query, conversation_context, api_key)
-    sort = intent_params.get("sort", "popular")
+    sort = intent_params.get("sort", "hot")
     max_replies = intent_params.get("max_replies", 100)
     max_comments = intent_params.get("max_replies", 100) if source_type == "reddit" else 100
     thread_data = []
@@ -589,7 +601,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                         }
-                        for reply in result.get("replies", [])
+                        for reply in result.get("replies", []) 
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
                     total_replies = result.get("total_replies", item.get("no_of_reply", 0))
