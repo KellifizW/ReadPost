@@ -156,6 +156,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         sort = "controversial"
     elif source_type == "reddit":
         sort = "best"
+    logger.info(f"analyze_and_screen 結果：intents={[i['intent'] for i in intents]}, reason={reason}, post_limit={post_limit}")
     return {
         "direct_response": primary_intent in ["general_query", "introduce", "hypothetical_advice"],
         "intents": intents,
