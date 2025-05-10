@@ -350,7 +350,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     results = []
     rate_limit_info = []
     fetch_status = {}
-    batch_size = 5
+    batch_size = 50
     total_posts = 0
     total_replies = 0
     
