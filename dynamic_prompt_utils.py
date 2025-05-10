@@ -25,7 +25,7 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -42,7 +42,7 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 300,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -91,9 +91,9 @@ INTENT_CONFIG = {
         "prompt_format": "Paragraphs answering query, citing relevant threads if needed.",
         "processing": {
             "post_limit": 5,
-            "data_type": "none",
+            "data_type": "both",
             "max_replies": 100,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -178,7 +178,7 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -212,7 +212,7 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -229,7 +229,7 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "sort": "popular",
+            "sort": "hot",
             "min_replies": 10,
         },
     },
@@ -253,7 +253,7 @@ INTENT_CONFIG = {
 }
 
 CONFIG = {
-    "max_prompt_length": 120000,
+    "max_prompt_length": 150000,  # 提升上限至 150,000
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "min_keywords": 1,
@@ -384,7 +384,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                 *conversation_context,
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 300,  # Increased from 200 to avoid truncation
+            "max_tokens": 300,
             "temperature": 0.5,
         }
         api_response = await call_grok3_api(payload, function_name="parse_query")
@@ -629,12 +629,25 @@ async def build_dynamic_prompt(
 
     prompt = f"[System]\n{system}\n[Context]\n{context}\n[Data]\n{data}\n[Instructions]\n{combined_instruction}"
     if len(prompt) > CONFIG["max_prompt_length"]:
-        logger.warning("Prompt length exceeds limit, truncating thread data")
-        thread_data = thread_data[:2]
-        data = f"Metadata: {json.dumps(metadata, ensure_ascii=False)}\nFilters: {json.dumps(filters, ensure_ascii=False)}"
+        logger.warning(f"提示長度超過限制 {CONFIG['max_prompt_length']}，截斷帖子數據")
+        # 優先保留標題和部分回覆
+        thread_data = [
+            {
+                **data,
+                "replies": data.get("replies", [])[:10],  # 每篇帖子保留最多 10 條回覆
+                "total_fetched_replies": min(len(data.get("replies", [])), 10)
+            }
+            for data in thread_data[:3]  # 保留最多 3 篇帖子
+        ]
+        data = (
+            f"Metadata: {json.dumps(metadata, ensure_ascii=False)}\n"
+            f"Thread Data: {json.dumps(thread_data, ensure_ascii=False)}\n"
+            f"Filters: {json.dumps(filters, ensure_ascii=False)}"
+        )
         prompt = f"[System]\n{system}\n[Context]\n{context}\n[Data]\n{data}\n[Instructions]\n{combined_instruction}"
+        logger.info(f"截斷後提示長度：{len(prompt)} 字符，保留帖子數={len(thread_data)}")
 
-    logger.info(f"Built prompt: query={query}, length={len(prompt)} chars, intent={intent}")
+    logger.info(f"構建提示：查詢={query}, 長度={len(prompt)} 字符, 意圖={intent}")
     return prompt
 
 def extract_thread_metadata(metadata: List[Dict]) -> List[Dict]:
@@ -651,7 +664,7 @@ def extract_thread_metadata(metadata: List[Dict]) -> List[Dict]:
             for item in metadata
         ]
     except Exception as e:
-        logger.error(f"Extract metadata error: {str(e)}")
+        logger.error(f"提取元數據錯誤：{str(e)}")
         return []
 
 def get_intent_processing_params(intent: str) -> Dict:
