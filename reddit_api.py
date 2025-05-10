@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from logging_config import configure_logger
 import aiohttp
 
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_KONG")
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "reddit_api.log")
 
 class RedditClientManager:
@@ -227,6 +227,22 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
         return comments[:max_comments], request_counter, last_reset
 
 async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset, sort="confidence"):
+    if not post_id or not post_id.strip() or post_id.lower() == "id":
+        logger.error(f"無效的貼文 ID：{post_id}")
+        rate_limit_info = [{"message": f"無效的貼文 ID：{post_id}"}]
+        return {
+            "title": "",
+            "total_replies": 0,
+            "last_reply_time": "1970-01-01 00:00:00",
+            "like_count": 0,
+            "replies": [],
+            "fetched_pages": [],
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": 0
+        }, request_counter, last_reset
+
     cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}_{sort}"
     client_manager.clean_cache(client_manager.thread_cache, "thread")
     
@@ -240,60 +256,59 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
     rate_limit_info = []
     
     try:
-        async with asyncio.timeout(30):
-            request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
-            
-            logger.info(f"開始抓取貼文：[{post_id}]，排序：{sort}，當前請求次數：{request_counter}")
-            
-            submission = await reddit.submission(id=post_id)
-            if not submission:
-                logger.error(f"無法獲取貼文：{post_id}")
-                rate_limit_info.append({"message": f"無法獲取貼文 {post_id}"})
-                return {
-                    "title": "",
-                    "total_replies": 0,
-                    "last_reply_time": "1970-01-01 00:00:00",
-                    "like_count": 0,
-                    "replies": [],
-                    "fetched_pages": [],
-                    "rate_limit_info": rate_limit_info,
-                    "request_counter": request_counter,
-                    "last_reset": last_reset,
-                    "rate_limit_until": 0
-                }, request_counter, last_reset
-            
-            title = submission.title
-            total_replies = submission.num_comments
-            like_count = submission.score
-            last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
-            
-            replies, request_counter, last_reset = await collect_more_comments(
-                reddit, submission, max_comments, request_counter, last_reset, sort=sort
-            )
-            
-            logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
-            
-            result = {
-                "title": title,
-                "total_replies": total_replies,
-                "last_reply_time": last_reply_time,
-                "like_count": like_count,
-                "replies": replies,
-                "fetched_pages": [1],
+        request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
+        
+        logger.info(f"開始抓取貼文：[{post_id}]，排序：{sort}，當前請求次數：{request_counter}")
+        
+        submission = await reddit.submission(id=post_id)
+        if not submission:
+            logger.error(f"無法獲取貼文：{post_id}")
+            rate_limit_info.append({"message": f"無法獲取貼文 {post_id}"})
+            return {
+                "title": "",
+                "total_replies": 0,
+                "last_reply_time": "1970-01-01 00:00:00",
+                "like_count": 0,
+                "replies": [],
+                "fetched_pages": [],
                 "rate_limit_info": rate_limit_info,
                 "request_counter": request_counter,
                 "last_reset": last_reset,
-                "rate_limit_until": 0,
-                "replies_count": len(replies)
-            }
-            
-            client_manager.thread_cache[cache_key] = {
-                "timestamp": time.time(),
-                "data": result
-            }
-            
-            return result, request_counter, last_reset
+                "rate_limit_until": 0
+            }, request_counter, last_reset
         
+        title = submission.title
+        total_replies = submission.num_comments
+        like_count = submission.score
+        last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        
+        replies, request_counter, last_reset = await collect_more_comments(
+            reddit, submission, max_comments, request_counter, last_reset, sort=sort
+        )
+        
+        logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
+        
+        result = {
+            "title": title,
+            "total_replies": total_replies,
+            "last_reply_time": last_reply_time,
+            "like_count": like_count,
+            "replies": replies,
+            "fetched_pages": [1],
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": 0,
+            "replies_count": len(replies)
+        }
+        
+        client_manager.thread_cache[cache_key] = {
+            "timestamp": time.time(),
+            "data": result
+        }
+        
+        return result, request_counter, last_reset
+    
     except aiohttp.ClientResponseError as e:
         if e.status == 429:
             logger.error(f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}")
@@ -366,11 +381,24 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
         try:
             logger.info(f"開始批次抓取貼文：{post_ids}，排序：{sort}")
             
-            ids = [f"t3_{pid}" for pid in post_ids]
+            ids = [f"t3_{pid}" for pid in post_ids if pid and pid.strip() and pid.lower() != "id"]
+            if not ids:
+                logger.error(f"無有效的貼文 ID：{post_ids}")
+                rate_limit_info.append({"message": "無有效的貼文 ID"})
+                return {
+                    "results": [],
+                    "rate_limit_info": rate_limit_info,
+                    "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
+                    "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
+                    "rate_limit_until": 0,
+                    "total_posts": 0,
+                    "total_replies": 0
+                }
+            
             submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
             
             for i in range(0, len(post_ids), batch_size):
-                batch_ids = post_ids[i:i + batch_size]
+                batch_ids = [pid for pid in post_ids[i:i + batch_size] if pid and pid.strip() and pid.lower() != "id"]
                 tasks = []
                 for post_id in batch_ids:
                     cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}_{sort}"
