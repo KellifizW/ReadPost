@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from logging_config import configure_logger
 import aiohttp
 
-HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
+HONG_KONG_TZ = pytz.timezone("Asia/Hong_KONG")
 logger = configure_logger(__name__, "reddit_api.log")
 
 class RedditClientManager:
@@ -111,7 +111,7 @@ async def format_submission(submission):
         "like_count": submission.score
     }
 
-async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"):
+async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="confidence"):
     cache_key = f"{subreddit}_{start_page}_{max_pages}_{sort}"
     client_manager.clean_cache(client_manager.topic_cache, "topic")
     
@@ -129,7 +129,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"
         try:
             subreddit_obj = await reddit.subreddit(subreddit)
             sort_methods = {
-                "hot": lambda: subreddit_obj.hot(limit=total_limit),
+                "confidence": lambda: subreddit_obj.hot(limit=total_limit),  # confidence is equivalent to hot in asyncpraw
                 "new": lambda: subreddit_obj.new(limit=total_limit),
                 "top": lambda: subreddit_obj.top(time_filter="day", limit=total_limit),
                 "controversial": lambda: subreddit_obj.controversial(time_filter="day", limit=total_limit),
@@ -137,8 +137,8 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"
             }
             
             if sort not in sort_methods:
-                logger.warning(f"不支持的排序方式：{sort}，使用默認排序：hot")
-                sort = "hot"
+                logger.warning(f"不支持的排序方式：{sort}，使用默認排序：confidence")
+                sort = "confidence"
             
             logger.info(f"開始抓取子版 {subreddit}，排序：{sort}，當前請求次數 {client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)]}")
             
@@ -172,7 +172,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"
             "total_posts": len(items)
         }
 
-async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset):
+async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset, sort="confidence"):
     more_comments_ids = []
     comments = []
     
@@ -203,7 +203,7 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                 more_comments = await reddit.comment.more_children(
                     link_id=f"t3_{submission.id}",
                     children=",".join(batch_ids),
-                    sort="best"
+                    sort=sort
                 )
                 for comment in more_comments:
                     if hasattr(comment, 'body') and comment.body:
@@ -226,8 +226,8 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
         logger.error(f"收集更多評論失敗：{str(e)}")
         return comments[:max_comments], request_counter, last_reset
 
-async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset):
-    cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
+async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset, sort="confidence"):
+    cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}_{sort}"
     client_manager.clean_cache(client_manager.thread_cache, "thread")
     
     if cache_key in client_manager.thread_cache:
@@ -243,7 +243,7 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
         async with asyncio.timeout(30):
             request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
             
-            logger.info(f"開始抓取貼文：[{post_id}]，當前請求次數：{request_counter}")
+            logger.info(f"開始抓取貼文：[{post_id}]，排序：{sort}，當前請求次數：{request_counter}")
             
             submission = await reddit.submission(id=post_id)
             if not submission:
@@ -268,7 +268,7 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
             last_reply_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ).strftime("%Y-%m-%d %H:%M:%S")
             
             replies, request_counter, last_reset = await collect_more_comments(
-                reddit, submission, max_comments, request_counter, last_reset
+                reddit, submission, max_comments, request_counter, last_reset, sort=sort
             )
             
             logger.info(f"抓取貼文完成：{{{post_id}: {len(replies)}}}，總回覆數：{len(replies)}")
@@ -344,16 +344,17 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
             "rate_limit_until": 0
         }, request_counter, last_reset
 
-async def get_reddit_thread_content(post_id, subreddit, max_comments=100):
+async def get_reddit_thread_content(post_id, subreddit, max_comments=100, sort="confidence"):
     async with client_manager.get_client() as reddit:
         result, request_counter, last_reset = await fetch_single_thread(
             post_id, subreddit, max_comments, reddit, 
             client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
-            client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)]
+            client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
+            sort=sort
         )
         return result
 
-async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100):
+async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100, sort="confidence"):
     results = []
     rate_limit_info = []
     fetch_status = {}
@@ -363,7 +364,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     
     async with client_manager.get_client() as reddit:
         try:
-            logger.info(f"開始批次抓取貼文：{post_ids}")
+            logger.info(f"開始批次抓取貼文：{post_ids}，排序：{sort}")
             
             ids = [f"t3_{pid}" for pid in post_ids]
             submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
@@ -372,7 +373,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                 batch_ids = post_ids[i:i + batch_size]
                 tasks = []
                 for post_id in batch_ids:
-                    cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}"
+                    cache_key = f"{post_id}_subreddit_{subreddit}_{max_comments}_{sort}"
                     client_manager.clean_cache(client_manager.thread_cache, "thread")
                     if cache_key in client_manager.thread_cache:
                         cached_data = client_manager.thread_cache[cache_key]
@@ -386,7 +387,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
                     tasks.append(fetch_single_thread(
                         post_id, subreddit, max_comments, reddit,
                         client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
-                        client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)]
+                        client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
+                        sort=sort
                     ))
                 
                 if tasks:
