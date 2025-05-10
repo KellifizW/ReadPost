@@ -153,7 +153,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "filters": {
             "min_replies": intent_params.get("min_replies", 10),
             "min_likes": 0,
-            "sort": intent_params.get("sort", "hot"),  # 修正為 hot
+            "sort": intent_params.get("sort", "confidence" if source_type == "reddit" else "hot"), 
             "keywords": theme_keywords,
         },
         "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids, "analysis": parsed_query},
@@ -425,7 +425,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     post_limit = min(analysis.get("post_limit", intent_params.get("post_limit", 5)), 20)
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
     keyword_result = await extract_keywords(user_query, conversation_context, api_key)
-    sort = intent_params.get("sort", "hot")
+    sort = intent_params.get("sort", "confidence" if source_type == "reddit" else "hot")
     max_replies = intent_params.get("max_replies", 100)
     max_comments = intent_params.get("max_replies", 100) if source_type == "reddit" else 100
     thread_data = []
