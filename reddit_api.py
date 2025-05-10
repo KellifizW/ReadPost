@@ -136,7 +136,6 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"
                 "rising": lambda: subreddit_obj.rising(limit=total_limit)
             }
             
-            # Default to 'hot' if sort is invalid
             if sort not in sort_methods:
                 logger.warning(f"不支持的排序方式：{sort}，使用默認排序：hot")
                 sort = "hot"
