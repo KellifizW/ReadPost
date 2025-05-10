@@ -111,7 +111,7 @@ async def format_submission(submission):
         "like_count": submission.score
     }
 
-async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best"):
+async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="hot"):
     cache_key = f"{subreddit}_{start_page}_{max_pages}_{sort}"
     client_manager.clean_cache(client_manager.topic_cache, "topic")
     
@@ -128,10 +128,18 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="best
         
         try:
             subreddit_obj = await reddit.subreddit(subreddit)
-            sort_methods = {"best": lambda: subreddit_obj.top(time_filter="day", limit=total_limit),
-                          "new": lambda: subreddit_obj.new(limit=total_limit)}
+            sort_methods = {
+                "hot": lambda: subreddit_obj.hot(limit=total_limit),
+                "new": lambda: subreddit_obj.new(limit=total_limit),
+                "top": lambda: subreddit_obj.top(time_filter="day", limit=total_limit),
+                "controversial": lambda: subreddit_obj.controversial(time_filter="day", limit=total_limit),
+                "rising": lambda: subreddit_obj.rising(limit=total_limit)
+            }
+            
+            # Default to 'hot' if sort is invalid
             if sort not in sort_methods:
-                raise ValueError(f"不支持的排序方式：{sort}")
+                logger.warning(f"不支持的排序方式：{sort}，使用默認排序：hot")
+                sort = "hot"
             
             logger.info(f"開始抓取子版 {subreddit}，排序：{sort}，當前請求次數 {client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)]}")
             
@@ -350,7 +358,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100)
     results = []
     rate_limit_info = []
     fetch_status = {}
-    batch_size = 50
+    batch_size = 5
     total_posts = 0
     total_replies = 0
     
