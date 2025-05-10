@@ -253,7 +253,7 @@ INTENT_CONFIG = {
     "hypothetical_advice": {
         "triggers": {
             "keywords": ["你點睇", "你認為", "你會點", "你會如何", "如果你是", "假設你是", "你的看法", "你建議"],
-            "regex": r"(你|Grok)\s*(點睇|認為|會點|會如何|是.*會|看法|建議)",
+            "regex": r"(你|Grok)\s*(點睇|認為|會\s*\w+|如何|是\s*.*\s*會|看法|建議)",
             "confidence": 0.90,
             "reason": "Detected hypothetical or advice-seeking query targeting Grok's perspective",
         },
@@ -281,15 +281,15 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "hot",  # Default sort, overridden for Reddit in get_intent_processing_params
-            "sort_override": {"reddit": "controversial"},  # Reddit uses controversial sort
+            "sort": "hot",
+            "sort_override": {"reddit": "controversial"},
             "min_replies": 10,
         },
     },
 }
 
 CONFIG = {
-    "max_prompt_length": 150000,  # 提升上限至 150,000
+    "max_prompt_length": 150000,
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "min_keywords": 1,
@@ -365,6 +365,7 @@ async def parse_query(
     intents = []
     thread_ids = []
     query_lower = query.lower()
+    reason = "Initial intent detection"
 
     # Step 1: Check for intent triggers (keywords or regex)
     for intent, config in INTENT_CONFIG.items():
@@ -382,7 +383,7 @@ async def parse_query(
                         }
                     )
                     thread_ids.append(thread_id)
-                elif intent == "hypothetical_advice":
+                else:
                     intents.append(
                         {
                             "intent": intent,
@@ -390,6 +391,7 @@ async def parse_query(
                             "reason": triggers["reason"],
                         }
                     )
+                    logger.info(f"Intent triggered by regex: {intent}, match: {match.group(0)}")
         elif "keywords" in triggers and any(kw.lower() in query_lower for kw in triggers["keywords"]):
             intents.append(
                 {
@@ -398,6 +400,7 @@ async def parse_query(
                     "reason": triggers["reason"],
                 }
             )
+            logger.info(f"Intent triggered by keywords: {intent}, keywords: {triggers['keywords']}")
             if intent == "time_sensitive_analysis":
                 time_sensitive = True
 
@@ -408,6 +411,7 @@ async def parse_query(
 
     # Step 2: Use API for semantic analysis if no clear intent or vague query
     if not intents or (is_vague and not has_multi_intent):
+        logger.info("No clear intent or vague query, performing semantic analysis")
         prompt = f"""
 Analyze the query to classify up to 4 intents, considering conversation history and keywords.
 Query: {query}
@@ -440,9 +444,10 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                     i for i in result.get("intents", []) if i["confidence"] >= CONFIG["intent_confidence_threshold"]
                 ]
                 reason = result.get("reason", "Semantic matching")
+                logger.info(f"Semantic analysis result: intents={[i['intent'] for i in intents]}, reason={reason}")
             except json.JSONDecodeError as e:
                 logger.error(f"Parse query response error: {str(e)}, response_content={response_content}")
-                # Attempt to fix truncated JSON
+                reason = f"JSON parsing error: {str(e)}"
                 if response_content.strip().endswith("..."):
                     try:
                         fixed_content = response_content.rsplit(",", 1)[0] + "]}"
@@ -454,7 +459,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                         logger.info(f"Fixed truncated JSON in parse_query: {fixed_content[:100]}...")
                     except json.JSONDecodeError:
                         logger.warning("Failed to fix truncated JSON")
-                # Fallback: Infer intent based on keywords
+                        reason = f"Failed to fix truncated JSON: {str(e)}"
                 inferred_intent = "summarize_posts"
                 for intent, config in INTENT_CONFIG.items():
                     triggers = config.get("triggers", {})
@@ -468,7 +473,6 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
                         "reason": f"JSON parsing failed, inferred from keywords: {keywords}",
                     }
                 ]
-                reason = f"JSON parsing error: {str(e)}"
         else:
             reason = "API call failed"
             intents = [
@@ -480,11 +484,12 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
             ]
 
     if not intents:
+        reason = "No specific intent detected, default to summarization"
         intents = [
             {
                 "intent": "summarize_posts",
                 "confidence": 0.7,
-                "reason": "No specific intent detected, default to summarization",
+                "reason": reason,
             }
         ]
 
@@ -494,7 +499,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
     time_range = "recent" if time_sensitive else "all"
     logger.info(
         f"Parsed query: intents={[i['intent'] for i in intents]}, keywords={keywords}, "
-        f"thread_ids={thread_ids}, time_range={time_range}"
+        f"thread_ids={thread_ids}, time_range={time_range}, reason={reason}"
     )
     return {
         "intents": intents[:4],
@@ -502,7 +507,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
         "related_terms": related_terms,
         "time_range": time_range,
         "thread_ids": thread_ids,
-        "reason": reason if intents else "Default summarization",
+        "reason": reason,
         "confidence": max(i["confidence"] for i in intents),
     }
 
@@ -674,14 +679,13 @@ async def build_dynamic_prompt(
     prompt = f"[System]\n{system}\n[Context]\n{context}\n[Data]\n{data}\n[Instructions]\n{combined_instruction}"
     if len(prompt) > CONFIG["max_prompt_length"]:
         logger.warning(f"提示長度超過限制 {CONFIG['max_prompt_length']}，截斷帖子數據")
-        # 優先保留標題和部分回覆
         thread_data = [
             {
                 **data,
-                "replies": data.get("replies", [])[:10],  # 每篇帖子保留最多 10 條回覆
+                "replies": data.get("replies", [])[:10],
                 "total_fetched_replies": min(len(data.get("replies", [])), 10)
             }
-            for data in thread_data[:3]  # 保留最多 3 篇帖子
+            for data in thread_data[:3]
         ]
         data = (
             f"Metadata: {json.dumps(metadata, ensure_ascii=False)}\n"
