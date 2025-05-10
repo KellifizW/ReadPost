@@ -65,7 +65,7 @@ INTENT_CONFIG = {
     },
     "fetch_thread_by_id": {
         "triggers": {
-            "regex": r"(?:ID|帖子)\s*([a-zA-Z0-9]+)",
+            "regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)",  # Updated regex to handle "帖子 ID: 1kiu8i8"
             "confidence": 0.95,
             "reason": "Detected specific thread ID",
         },
@@ -383,6 +383,7 @@ async def parse_query(
                         }
                     )
                     thread_ids.append(thread_id)
+                    logger.info(f"Intent triggered by regex: {intent}, thread_id: {thread_id}, match: {match.group(0)}")
                 else:
                     intents.append(
                         {
