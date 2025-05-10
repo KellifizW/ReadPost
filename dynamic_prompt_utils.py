@@ -281,7 +281,8 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "controversial" if "reddit" in source_type.lower() else "hot",
+            "sort": "hot",  # Default sort, overridden for Reddit in get_intent_processing_params
+            "sort_override": {"reddit": "controversial"},  # Reddit uses controversial sort
             "min_replies": 10,
         },
     },
@@ -710,6 +711,10 @@ def extract_thread_metadata(metadata: List[Dict]) -> List[Dict]:
         logger.error(f"提取元數據錯誤：{str(e)}")
         return []
 
-def get_intent_processing_params(intent: str) -> Dict:
-    """Retrieve processing parameters for a given intent."""
-    return INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"]).get("processing", {})
+def get_intent_processing_params(intent: str, source_type: str = "lihkg") -> Dict:
+    """Retrieve processing parameters for a given intent, adjusting sort based on source_type."""
+    params = INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
+    sort_override = params.get("sort_override", {})
+    if sort_override and source_type.lower() in sort_override:
+        params["sort"] = sort_override[source_type.lower()]
+    return params
