@@ -5,3 +5,5 @@ pytz
 tzlocal
 asyncpraw
 pydantic
+Jinja2
+tenacity
