@@ -228,6 +228,53 @@ async def call_grok3_api(
             )
             return data
 
+async def extract_keywords(
+    query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg"
+) -> Dict:
+    """Extract semantic keywords and related terms from query."""
+    conversation_context = conversation_context or []
+    generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
+    platform_terms = {
+        "lihkg": ["吹水", "高登", "連登"],
+        "reddit": ["YOLO", "DD", "subreddit"],
+    }
+    prompt = f"""
+Extract {CONFIG['min_keywords']}-{CONFIG['max_keywords']} core keywords (prioritize nouns/verbs, exclude generic terms: {generic_terms}).
+Generate up to 8 related terms (synonyms or platform terms: {platform_terms[source_type]}).
+Set time_sensitive to true if query contains time-sensitive words (e.g., 今晚, 今日, 最近).
+Query: {query}
+Conversation History: {json.dumps(conversation_context, ensure_ascii=False)}
+Source: {source_type}
+Output Format: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 chars)", "time_sensitive": true/false}}
+"""
+    payload = {
+        "model": "grok-3",
+        "messages": [
+            {"role": "system", "content": f"Semantic analysis assistant for {source_type} keywords."},
+            *conversation_context,
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.3,
+    }
+    default_output = {
+        "keywords": [],
+        "related_terms": [],
+        "reason": "API call failed",
+        "time_sensitive": False,
+    }
+    api_response = await call_grok3_api(payload, function_name="extract_keywords")
+    result = await parse_api_response(api_response, default_output, "extract_keywords")
+    
+    keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
+    log_event("info", f"Extracted keywords: {keywords}", "extract_keywords")
+    return {
+        "keywords": keywords[:CONFIG["max_keywords"]],
+        "related_terms": result.get("related_terms", [])[:8],
+        "reason": result.get("reason", "No reason provided")[:70],
+        "time_sensitive": result.get("time_sensitive", False),
+    }
+
 async def parse_query(
     query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg"
 ) -> Dict:
@@ -245,23 +292,27 @@ async def parse_query(
             "confidence": 0.5,
         }
 
-    # Combine keyword extraction and intent detection
-    generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
-    platform_terms = {"lihkg": ["吹水", "高登", "連登"], "reddit": ["YOLO", "DD", "subreddit"]}
+    # Extract keywords using the restored function
+    keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, source_type)
+    keywords = keyword_result.get("keywords", [])
+    related_terms = keyword_result.get("related_terms", [])
+    time_sensitive = keyword_result.get("time_sensitive", False)
+
     prompt = f"""
-Extract {CONFIG['min_keywords']}-{CONFIG['max_keywords']} keywords (exclude: {generic_terms}).
-Generate up to 8 related terms (synonyms or platform terms: {platform_terms[source_type]}).
-Classify up to 4 intents from: {list(INTENT_CONFIG.keys())}.
+Analyze the query to classify up to 4 intents, considering conversation history and keywords.
 Query: {query}
 Conversation History: {json.dumps(conversation_context, ensure_ascii=False)}
+Keywords: {json.dumps(keywords, ensure_ascii=False)}
+Related Terms: {json.dumps(related_terms, ensure_ascii=False)}
 Source: {source_type}
-Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/false, "intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "reason"}}, ...], "reason": "logic"}}
+Supported Intents: {json.dumps(list(INTENT_CONFIG.keys()), ensure_ascii=False)}
+Output Format: {{"intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "reason"}}, ...], "reason": "overall reason"}}
 Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
 """
     payload = {
         "model": "grok-3",
         "messages": [
-            {"role": "system", "content": f"Semantic analysis assistant for {source_type}."},
+            {"role": "system", "content": "You are a semantic analysis assistant, responding in Traditional Chinese."},
             *conversation_context,
             {"role": "user", "content": prompt},
         ],
@@ -269,9 +320,6 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
         "temperature": 0.5,
     }
     default_output = {
-        "keywords": [],
-        "related_terms": [],
-        "time_sensitive": False,
         "intents": [{"intent": "summarize_posts", "confidence": 0.7, "reason": "API call failed"}],
         "reason": "API call failed"
     }
@@ -291,7 +339,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
             intents.append({"intent": intent, "confidence": triggers["confidence"], "reason": f"Keyword match: {triggers['keywords']}"})
 
     intents = intents or result["intents"]
-    is_vague = len(result["keywords"]) < 2 and not any(
+    is_vague = len(keywords) < 2 and not any(
         kw in query_lower for kw in ["分析", "總結", "討論", "主題", "時事", "推薦", "熱門", "最多", "關注"]
     )
     has_multi_intent = any(ind in query_lower for ind in ["並且", "同時", "總結並", "列出並", "分析並"])
@@ -303,14 +351,14 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
 
     log_event(
         "info", "Parsed query", "parse_query",
-        intents=[i["intent"] for i in intents], keywords=result["keywords"],
-        thread_ids=thread_ids, time_range="recent" if result["time_sensitive"] else "all"
+        intents=[i["intent"] for i in intents], keywords=keywords,
+        thread_ids=thread_ids, time_range="recent" if time_sensitive else "all"
     )
     return {
         "intents": intents[:4],
-        "keywords": result.get("keywords", [])[:CONFIG["max_keywords"]],
-        "related_terms": result.get("related_terms", [])[:8],
-        "time_range": "recent" if result.get("time_sensitive", False) else "all",
+        "keywords": keywords[:CONFIG["max_keywords"]],
+        "related_terms": related_terms[:8],
+        "time_range": "recent" if time_sensitive else "all",
         "thread_ids": thread_ids,
         "reason": result.get("reason", "Semantic matching"),
         "confidence": max(i["confidence"] for i in intents),
@@ -323,15 +371,15 @@ async def extract_relevant_thread(
     if not conversation_context or len(conversation_context) < 2:
         return None, None, None, "No conversation history"
 
-    # Use parse_query for keywords to avoid redundant API calls
-    query_result = await parse_query(query, conversation_context, grok3_api_key)
+    # Use extract_keywords instead of parse_query to avoid redundant API calls
+    query_result = await extract_keywords(query, conversation_context, grok3_api_key)
     query_keywords = query_result["keywords"] + query_result["related_terms"]
 
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
-                title_result = await parse_query(title, conversation_context, grok3_api_key)
+                title_result = await extract_keywords(title, conversation_context, grok3_api_key)
                 title_keywords = title_result["keywords"] + title_result["related_terms"]
                 common_keywords = set(query_keywords).intersection(set(title_keywords))
                 content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
