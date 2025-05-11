@@ -10,7 +10,7 @@ import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
-from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG, INTENT_CONFIG, get_intent_processing_params
+from dynamic_prompt_utils import build_dynamic_prompt, parse_query, CONFIG, INTENT_CONFIG, get_intent_processing_params
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
@@ -424,7 +424,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     intent_params = get_intent_processing_params(primary_intent)
     post_limit = min(analysis.get("post_limit", intent_params.get("post_limit", 5)), 20)
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
-    keyword_result = await extract_keywords(user_query, conversation_context, api_key)
+    query_result = await parse_query(user_query, conversation_context, api_key, source_type)
     sort = intent_params.get("sort", "confidence" if source_type == "reddit" else "hot")
     max_replies = intent_params.get("max_replies", 100)
     max_comments = intent_params.get("max_replies", 100) if source_type == "reddit" else 100
@@ -444,7 +444,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     continue
             async with request_semaphore:
                 if source_type == "lihkg":
-                    result = await get_lihkg_thread_content(thread_id=thread_id_str, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                    result = await get_lihkg_thread_content(thread_id=thread_id_str, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if query_result.get("time_sensitive", False) else 0)
                 else:
                     result = await get_reddit_thread_content(post_id=thread_id_str, subreddit=source_id, max_comments=max_comments)
                 request_counter = result.get("request_counter", request_counter)
@@ -539,7 +539,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                     continue
             async with request_semaphore:
                 if source_type == "lihkg":
-                    result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                    result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if query_result.get("time_sensitive", False) else 0)
                 else:
                     result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                 request_counter = result.get("request_counter", request_counter)
@@ -577,7 +577,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
     if len(thread_data) < intent_params.get("post_limit", 5) and primary_intent == "follow_up":
         supplemental_result = await (get_lihkg_topic_list(cat_id=source_id, start_page=1, max_pages=2) if source_type == "lihkg" else get_reddit_topic_list(subreddit=source_id, start_page=1, max_pages=2, sort=sort))
-        supplemental_threads = [item for item in supplemental_result.get("items", []) if str(item["thread_id"]) not in top_thread_ids and any(kw.lower() in item["title"].lower() for kw in keyword_result.get("keywords", ["新話題"]))][:intent_params.get("post_limit", 5) - len(thread_data)]
+        supplemental_threads = [item for item in supplemental_result.get("items", []) if str(item["thread_id"]) not in top_thread_ids and any(kw.lower() in item["title"].lower() for kw in query_result.get("keywords", ["新話題"]))][:intent_params.get("post_limit", 5) - len(thread_data)]
         for item in supplemental_threads:
             thread_id = str(item["thread_id"])
             if thread_id in processed_thread_ids:
@@ -585,7 +585,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             processed_thread_ids.add(thread_id)
             async with request_semaphore:
                 if source_type == "lihkg":
-                    result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                    result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if query_result.get("time_sensitive", False) else 0)
                 else:
                     result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                 request_counter = result.get("request_counter", request_counter)
