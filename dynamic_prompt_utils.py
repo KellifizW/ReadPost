@@ -41,27 +41,30 @@ class IntentConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)  # Allow arbitrary types like regex
 
-# Default intent configuration
+# Default intent configuration without triggers
 DEFAULT_INTENT = IntentConfig(
     word_range=(700, 3000),
     prompt_instruction="Summarize up to 5 threads, focusing on key points and keywords.",
     prompt_format="Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].",
     processing=ProcessingConfig(),
-    triggers={"keywords": [], "confidence": 0.5}
+    triggers={"keywords": [], "confidence": 0.5}  # Placeholder, will be overridden
 )
 
 # Intent configuration using Pydantic
 INTENT_CONFIG = {
     "summarize_posts": IntentConfig(
-        **DEFAULT_INTENT.dict(),
+        word_range=DEFAULT_INTENT.word_range,
+        prompt_instruction=DEFAULT_INTENT.prompt_instruction,
+        prompt_format=DEFAULT_INTENT.prompt_format,
+        processing=DEFAULT_INTENT.processing,
         triggers={"keywords": ["總結", "摘要", "概覽"], "confidence": 0.7},
     ),
     "analyze_sentiment": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["情緒", "氣氛", "指數", "正負面", "sentiment", "mood"], "confidence": 0.90},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Analyze sentiment of up to 5 threads (positive/neutral/negative).",
         prompt_format="Paragraphs with sentiment summary, optional table: | ID | Sentiment | Ratio |.",
         processing=ProcessingConfig(max_replies=300),
+        triggers={"keywords": ["情緒", "氣氛", "指數", "正負面", "sentiment", "mood"], "confidence": 0.90},
     ),
     "follow_up": IntentConfig(
         triggers={"keywords": ["詳情", "更多", "進一步", "點解", "為什麼", "原因", "講多D", "再講", "繼續", "仲有咩"], "confidence": 0.90},
@@ -78,11 +81,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(post_limit=1, data_type="replies", max_replies=400, min_replies=0),
     ),
     "general_query": IntentConfig(
-        **DEFAULT_INTENT.dict(),
         word_range=(500, 2000),
         prompt_instruction="Provide concise summary based on metadata, keeping it brief.",
         prompt_format="Paragraphs answering query, citing relevant threads if needed.",
         processing=ProcessingConfig(max_replies=100),
+        triggers={"keywords": [], "confidence": 0.5},
     ),
     "list_titles": IntentConfig(
         triggers={"keywords": ["列出", "標題", "清單", "所有標題"], "confidence": 0.95},
@@ -92,10 +95,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(post_limit=15, data_type="metadata", max_replies=20, min_replies=5),
     ),
     "find_themed": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["主題", "類似", "相關"], "confidence": 0.85},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Find threads matching themes, highlighting thematic links.",
+        prompt_format=DEFAULT_INTENT.prompt_format,
         processing=ProcessingConfig(post_limit=20),
+        triggers={"keywords": ["主題", "類似", "相關"], "confidence": 0.85},
     ),
     "fetch_dates": IntentConfig(
         triggers={"keywords": ["日期", "時間", "最近更新"], "confidence": 0.85},
@@ -105,10 +109,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(data_type="metadata", max_replies=100, sort="new", min_replies=5),
     ),
     "search_keywords": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["搜索", "查找", "關鍵詞"], "confidence": 0.85},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Search threads with matching keywords, emphasizing matches.",
+        prompt_format=DEFAULT_INTENT.prompt_format,
         processing=ProcessingConfig(post_limit=20),
+        triggers={"keywords": ["搜索", "查找", "關鍵詞"], "confidence": 0.85},
     ),
     "recommend_threads": IntentConfig(
         triggers={"keywords": ["推薦", "建議", "熱門"], "confidence": 0.85},
@@ -125,10 +130,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(sort="new", min_replies=5),
     ),
     "contextual_analysis": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["Reddit", "LIHKG", "子版", "討論區"], "confidence": 0.85},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Summarize 5 threads, identifying themes and sentiment ratios.",
         prompt_format="Paragraphs by theme, ending with table: | Theme | Ratio | Thread |.",
+        processing=DEFAULT_INTENT.processing,
+        triggers={"keywords": ["Reddit", "LIHKG", "子版", "討論區"], "confidence": 0.85},
     ),
     "rank_topics": IntentConfig(
         triggers={"keywords": ["熱門", "最多", "關注", "流行"], "confidence": 0.85},
@@ -138,9 +144,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(data_type="metadata", max_replies=100),
     ),
     "search_odd_posts": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["離奇", "怪事", "奇聞", "詭異", "不可思議", "怪談", "荒誕"], "confidence": 0.85},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Summarize up to 5 threads with odd or unusual content, highlighting peculiar aspects.",
+        prompt_format=DEFAULT_INTENT.prompt_format,
+        processing=DEFAULT_INTENT.processing,
+        triggers={"keywords": ["離奇", "怪事", "奇聞", "詭異", "不可思議", "怪談", "荒誕"], "confidence": 0.85},
     ),
     "hypothetical_advice": IntentConfig(
         triggers={
@@ -154,11 +162,11 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(max_replies=100, min_replies=5),
     ),
     "risk_warning": IntentConfig(
-        **DEFAULT_INTENT.dict(),
-        triggers={"keywords": ["投資", "股票", "基金", "債券", "樓市", "房地產", "加密貨幣", "比特幣", "風險", "市場"], "confidence": 0.85},
+        word_range=DEFAULT_INTENT.word_range,
         prompt_instruction="Identify and analyze risk factors (e.g., policy changes, market volatility, negative news) in financial discussions, assessing their potential impact on the specified investment.",
         prompt_format="Table: | Risk Factor | Description | Potential Impact | Thread Reference |, followed by a summary paragraph.",
         processing=ProcessingConfig(sort="hot", sort_override={"reddit": "controversial"}),
+        triggers={"keywords": ["投資", "股票", "基金", "債券", "樓市", "房地產", "加密貨幣", "比特幣", "風險", "市場"], "confidence": 0.85},
     ),
 }
 
