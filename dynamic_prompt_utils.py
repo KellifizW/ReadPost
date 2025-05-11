@@ -177,16 +177,20 @@ def log_event(level: str, message: str, function_name: str, **kwargs):
     log_func(context)
 
 async def parse_api_response(api_response: Optional[Dict], default_output: Dict, function_name: str) -> Dict:
-    if not api_response:
-        log_event("warning", "API call failed", function_name)
+    if not api_response or not isinstance(api_response, dict):
+        log_event("warning", f"Invalid API response: {api_response}", function_name)
+        return default_output
+    if not api_response.get("choices") or not isinstance(api_response["choices"], list) or not api_response["choices"]:
+        log_event("warning", f"No valid choices in API response: {api_response}", function_name)
         return default_output
     try:
-        return json.loads(api_response["choices"][0]["message"]["content"])
-    except json.JSONDecodeError as e:
-        log_event("error", f"JSON parse error: {str(e)}", function_name)
-        if api_response["choices"][0]["message"]["content"].endswith("..."):
+        content = api_response["choices"][0]["message"]["content"]
+        return json.loads(content)
+    except (KeyError, json.JSONDecodeError) as e:
+        log_event("error", f"JSON parse error: {str(e)}, response: {api_response}", function_name)
+        if isinstance(content, str) and content.endswith("..."):
             try:
-                fixed_content = api_response["choices"][0]["message"]["content"].rsplit(",", 1)[0] + "]}"
+                fixed_content = content.rsplit(",", 1)[0] + "]}"
                 return json.loads(fixed_content)
             except json.JSONDecodeError:
                 log_event("warning", "Failed to fix truncated JSON", function_name)
@@ -194,19 +198,38 @@ async def parse_api_response(api_response: Optional[Dict], default_output: Dict,
 
 @retry(stop=stop_after_attempt(CONFIG["max_parse_retries"]), wait=wait_fixed(2))
 async def call_grok3_api(payload: Dict, timeout: int = CONFIG["parse_timeout"], function_name: str = "unknown") -> Optional[Dict]:
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=timeout) as response:
-            if response.status != 200 or not (data := await response.json()).get("choices"):
-                log_event("warning", f"API call failed: status={response.status}, no choices", function_name)
-                raise ValueError("API call failed")
-            log_event("info", "API call succeeded", function_name, prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0), completion_tokens=data.get("usage", {}).get("completion_tokens", 0))
-            return data
+    try:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=timeout) as response:
+                if response.status != 200:
+                    log_event("warning", f"API call failed: status={response.status}", function_name)
+                    raise ValueError(f"API call failed with status {response.status}")
+                data = await response.json()
+                if not data.get("choices"):
+                    log_event("warning", f"No choices in API response: {data}", function_name)
+                    raise ValueError("No choices in API response")
+                log_event("info", "API call succeeded", function_name, prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0), completion_tokens=data.get("usage", {}).get("completion_tokens", 0))
+                return data
+    except Exception as e:
+        log_event("error", f"API call error: {str(e)}", function_name)
+        raise
 
 async def parse_query(query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg") -> Dict:
     conversation_context = conversation_context or []
+    default_output = {
+        "keywords": [],
+        "related_terms": [],
+        "time_sensitive": False,
+        "intents": [{"intent": "summarize_posts", "confidence": 0.7, "reason": "Default fallback"}],
+        "reason": "Default output",
+        "thread_ids": [],
+        "confidence": 0.7
+    }
+    
     if not isinstance(query, str):
-        return {"intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "Invalid query type"}], "keywords": [], "related_terms": [], "time_range": "all", "thread_ids": [], "reason": "Invalid query type", "confidence": 0.5}
+        log_event("warning", "Invalid query type", "parse_query", query_type=type(query))
+        return {**default_output, "reason": "Invalid query type", "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "Invalid query type"}]}
 
     generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
     platform_terms = {"lihkg": ["吹水", "高登", "連登"], "reddit": ["YOLO", "DD", "subreddit"]}
@@ -226,8 +249,17 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
         "max_tokens": 300,
         "temperature": 0.5,
     }
-    default_output = {"keywords": [], "related_terms": [], "time_sensitive": False, "intents": [{"intent": "summarize_posts", "confidence": 0.7, "reason": "API call failed"}], "reason": "API call failed"}
-    result = await parse_api_response(await call_grok3_api(payload, function_name="parse_query"), default_output, "parse_query")
+
+    try:
+        api_response = await call_grok3_api(payload, function_name="parse_query")
+        result = await parse_api_response(api_response, default_output, "parse_query")
+    except Exception as e:
+        log_event("error", f"Failed to parse query: {str(e)}", "parse_query")
+        return default_output
+
+    if not isinstance(result, dict):
+        log_event("warning", f"Invalid result type from parse_api_response: {type(result)}", "parse_query")
+        return default_output
 
     intents, thread_ids = [], []
     query_lower = query.lower()
@@ -240,21 +272,23 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
         elif "keywords" in triggers and any(kw.lower() in query_lower for kw in triggers["keywords"]):
             intents.append({"intent": intent, "confidence": triggers["confidence"], "reason": triggers["reason"]})
 
-    is_vague = len(result["keywords"]) < 2 and not any(kw in query_lower for kw in ["分析", "總結", "討論", "主題", "時事", "推薦", "熱門", "最多", "關注"])
-    intents = intents or result["intents"]
+    is_vague = len(result.get("keywords", [])) < 2 and not any(kw in query_lower for kw in ["分析", "總結", "討論", "主題", "時事", "推薦", "熱門", "最多", "關注"])
+    intents = intents or result.get("intents", default_output["intents"])
     if is_vague and not any(ind in query_lower for ind in ["並且", "同時", "總結並", "列出並", "分析並"]):
         intents = [max(intents, key=lambda x: x["confidence"])]
 
-    log_event("info", f"Parsed query: intents={[i['intent'] for i in intents]}, keywords={result['keywords']}, thread_ids={thread_ids}", "parse_query")
-    return {
+    output = {
         "intents": intents[:4],
         "keywords": [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms][:CONFIG["max_keywords"]],
         "related_terms": result.get("related_terms", [])[:8],
         "time_range": "recent" if result.get("time_sensitive", False) else "all",
         "thread_ids": thread_ids,
         "reason": result.get("reason", "Semantic matching"),
-        "confidence": max(i["confidence"] for i in intents),
+        "confidence": max(i["confidence"] for i in intents) if intents else 0.7
     }
+
+    log_event("info", f"Parsed query: intents={[i['intent'] for i in intents]}, keywords={output['keywords']}, thread_ids={thread_ids}", "parse_query")
+    return output
 
 async def extract_relevant_thread(conversation_context: List[Dict], query: str, grok3_api_key: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     if not conversation_context or len(conversation_context) < 2:
