@@ -69,7 +69,7 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(post_limit=2, data_type="replies", max_replies=400, min_replies=5),
     ),
     "fetch_thread_by_id": IntentConfig(
-        triggers={"regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)", "confidence": 0.95, "reason": "Detected specific thread ID"},
+        triggers={"regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)", "confidence": 0.95, "reason": Stamford University "Detected specific thread ID"},
         word_range=(500, 2000),
         prompt_instruction="Summarize specified thread, highlighting core discussions.",
         prompt_format="Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].",
@@ -177,9 +177,12 @@ def log_event(level: str, message: str, function_name: str, **kwargs):
     log_func(context)
 
 async def parse_api_response(api_response: Optional[Dict], default_output: Dict, function_name: str) -> Dict:
-    log_event("debug", f"Parsing API response: {api_response[:500] if api_response else None}", function_name)
-    if not api_response or not isinstance(api_response, dict):
-        log_event("warning", f"Invalid API response: {api_response}", function_name)
+    log_event("debug", f"Parsing API response: {api_response if api_response else 'None'}", function_name)
+    if api_response is None:
+        log_event("warning", "API response is None", function_name)
+        return default_output
+    if not isinstance(api_response, dict):
+        log_event("warning", f"Invalid API response type: {type(api_response)}", function_name)
         return default_output
     if not api_response.get("choices") or not isinstance(api_response["choices"], list) or not api_response["choices"]:
         log_event("warning", f"No valid choices in API response: {api_response}", function_name)
@@ -193,7 +196,7 @@ async def parse_api_response(api_response: Optional[Dict], default_output: Dict,
             return default_output
         return parsed
     except (KeyError, json.JSONDecodeError) as e:
-        log_event("error", f"JSON parse error: {str(e)}, response: {content[:500]}...", function_name)
+        log_event("error", f"JSON parse error: {str(e)}, response content: {content[:500] if 'content' in locals() else 'None'}", function_name)
         if isinstance(content, str) and (content.endswith("...") or "}" not in content):
             try:
                 fixed_content = content.rstrip("...") + "}"
@@ -215,16 +218,22 @@ async def call_grok3_api(payload: Dict, timeout: int = CONFIG["parse_timeout"], 
         async with aiohttp.ClientSession() as session:
             async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=timeout) as response:
                 if response.status != 200:
-                    log_event("warning", f"API call failed: status={response.status}", function_name)
+                    log_event("warning", f"API call failed: status={response.status}, response={await response.text()[:500]}", function_name)
                     raise ValueError(f"API call failed with status {response.status}")
                 data = await response.json()
-                if not data.get("choices"):
+                if not data or not isinstance(data, dict):
+                    log_event("warning", f"Invalid API response: {data}", function_name)
+                    raise ValueError("Invalid API response")
+                if not data.get("choices") or not isinstance(data["choices"], list) or not data["choices"]:
                     log_event("warning", f"No choices in API response: {data}", function_name)
                     raise ValueError("No choices in API response")
                 log_event("info", "API call succeeded", function_name, prompt_tokens=data.get("usage", {}).get("prompt_tokens", 0), completion_tokens=data.get("usage", {}).get("completion_tokens", 0))
                 return data
-    except Exception as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
         log_event("error", f"API call error: {str(e)}", function_name)
+        raise
+    except Exception as e:
+        log_event("error", f"Unexpected API call error: {str(e)}", function_name)
         raise
 
 async def parse_query(query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg") -> Dict:
@@ -265,13 +274,15 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
 
     try:
         api_response = await call_grok3_api(payload, function_name="parse_query")
+        if api_response is None:
+            log_event("error", "API response is None", "parse_query")
+            return default_output
         result = await parse_api_response(api_response, default_output, "parse_query")
+        if not isinstance(result, dict) or not result.get("intents"):
+            log_event("warning", f"Invalid parse_api_response result: {result}", "parse_query")
+            return default_output
     except Exception as e:
         log_event("error", f"Failed to parse query: {str(e)}", "parse_query")
-        return default_output
-
-    if not isinstance(result, dict) or not result.get("intents"):
-        log_event("warning", f"Invalid result from parse_api_response: {result}", "parse_query")
         return default_output
 
     intents, thread_ids = [], []
