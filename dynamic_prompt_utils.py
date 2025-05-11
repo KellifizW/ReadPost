@@ -6,7 +6,7 @@ import re
 from logging_config import configure_logger
 import streamlit as st
 from typing import Dict, List, Optional, Tuple
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from jinja2 import Template
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -38,6 +38,8 @@ class IntentConfig(BaseModel):
     prompt_instruction: str
     prompt_format: str
     processing: ProcessingConfig = ProcessingConfig()
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)  # Allow arbitrary types like regex
 
 # Default intent configuration
 DEFAULT_INTENT = IntentConfig(
