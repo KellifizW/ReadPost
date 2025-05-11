@@ -177,6 +177,7 @@ def log_event(level: str, message: str, function_name: str, **kwargs):
     log_func(context)
 
 async def parse_api_response(api_response: Optional[Dict], default_output: Dict, function_name: str) -> Dict:
+    log_event("debug", f"Parsing API response: {api_response[:500] if api_response else None}", function_name)
     if not api_response or not isinstance(api_response, dict):
         log_event("warning", f"Invalid API response: {api_response}", function_name)
         return default_output
@@ -185,17 +186,22 @@ async def parse_api_response(api_response: Optional[Dict], default_output: Dict,
         return default_output
     try:
         content = api_response["choices"][0]["message"]["content"]
-        return json.loads(content)
+        log_event("debug", f"API response content: {content[:500]}...", function_name)
+        parsed = json.loads(content)
+        if not parsed.get("keywords") or not parsed.get("intents"):
+            log_event("warning", "Parsed JSON missing required fields", function_name)
+            return default_output
+        return parsed
     except (KeyError, json.JSONDecodeError) as e:
         log_event("error", f"JSON parse error: {str(e)}, response: {content[:500]}...", function_name)
         if isinstance(content, str) and (content.endswith("...") or "}" not in content):
             try:
-                # 嘗試修復截斷的 JSON
                 fixed_content = content.rstrip("...") + "}"
                 parsed = json.loads(fixed_content)
                 if not parsed.get("keywords") or not parsed.get("intents"):
                     log_event("warning", "Fixed JSON missing required fields", function_name)
                     return default_output
+                log_event("info", "Successfully fixed truncated JSON", function_name)
                 return parsed
             except json.JSONDecodeError:
                 log_event("warning", "Failed to fix truncated JSON", function_name)
@@ -203,6 +209,7 @@ async def parse_api_response(api_response: Optional[Dict], default_output: Dict,
 
 @retry(stop=stop_after_attempt(CONFIG["max_parse_retries"]), wait=wait_fixed(2))
 async def call_grok3_api(payload: Dict, timeout: int = CONFIG["parse_timeout"], function_name: str = "unknown") -> Optional[Dict]:
+    log_event("debug", f"Calling API with payload: {json.dumps(payload)[:500]}...", function_name)
     try:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
         async with aiohttp.ClientSession() as session:
@@ -221,6 +228,7 @@ async def call_grok3_api(payload: Dict, timeout: int = CONFIG["parse_timeout"], 
         raise
 
 async def parse_query(query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg") -> Dict:
+    log_event("debug", f"Parsing query: query={query}, source_type={source_type}, conversation_context_length={len(conversation_context)}", "parse_query")
     conversation_context = conversation_context or []
     default_output = {
         "keywords": [],
@@ -233,7 +241,7 @@ async def parse_query(query: str, conversation_context: List[Dict], grok3_api_ke
     }
     
     if not isinstance(query, str):
-        log_event("warning", "Invalid query type", "parse_query", query_type=type(query))
+        log_event("warning", f"Invalid query type: {type(query)}", "parse_query")
         return {**default_output, "reason": "Invalid query type", "intents": [{"intent": "summarize_posts", "confidence": 0.5, "reason": "Invalid query type"}]}
 
     generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
@@ -251,7 +259,7 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
     payload = {
         "model": "grok-3",
         "messages": [{"role": "system", "content": "Semantic analysis assistant."}, *conversation_context, {"role": "user", "content": prompt}],
-        "max_tokens": 500,  # 增加 max_tokens 以避免截斷
+        "max_tokens": 500,
         "temperature": 0.5,
     }
 
@@ -296,21 +304,32 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
     return output
 
 async def extract_relevant_thread(conversation_context: List[Dict], query: str, grok3_api_key: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+    log_event("debug", f"Extracting relevant thread: query={query}, conversation_context_length={len(conversation_context)}", "extract_relevant_thread")
     if not conversation_context or len(conversation_context) < 2:
+        log_event("info", "No conversation history available", "extract_relevant_thread")
         return None, None, None, "No conversation history"
 
     query_result = await parse_query(query, conversation_context, grok3_api_key)
+    if not query_result:
+        log_event("warning", "Failed to parse query result", "extract_relevant_thread")
+        return None, None, None, "Failed to parse query"
+
     query_keywords = query_result["keywords"] + query_result["related_terms"]
+    log_event("debug", f"Query keywords: {query_keywords}", "extract_relevant_thread")
 
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
                 title_result = await parse_query(title, conversation_context, grok3_api_key)
+                if not title_result:
+                    log_event("warning", f"Failed to parse title: {title}", "extract_relevant_thread")
+                    continue
                 title_keywords = title_result["keywords"] + title_result["related_terms"]
                 common_keywords = set(query_keywords).intersection(set(title_keywords))
                 content_contains_keywords = any(kw.lower() in message["content"].lower() for kw in query_keywords)
                 if common_keywords or content_contains_keywords:
+                    log_event("info", f"Found relevant thread: thread_id={thread_id}, title={title}", "extract_relevant_thread")
                     return thread_id, title, message["content"], f"Keyword match: {common_keywords or query_keywords}"
 
     prompt = f"""
@@ -330,45 +349,85 @@ Return empty object {{}} if no match.
     default_output = {}
     result = await parse_api_response(await call_grok3_api(payload, function_name="extract_relevant_thread"), default_output, "extract_relevant_thread")
     thread_id = result.get("thread_id")
+    log_event("info", f"Extract relevant thread result: thread_id={thread_id}, reason={result.get('reason', 'No matching thread')}", "extract_relevant_thread")
     return thread_id, result.get("title"), None, result.get("reason", "No matching thread") if thread_id else "No matching thread"
 
 async def truncate_data(thread_data: List[Dict], max_length: int) -> List[Dict]:
+    log_event("debug", f"Truncating thread data: input_length={len(thread_data)}, max_length={max_length}", "truncate_data")
+    if not thread_data:
+        log_event("warning", "Empty thread data provided", "truncate_data")
+        return []
     if sum(len(json.dumps(d, ensure_ascii=False)) for d in thread_data) <= max_length:
         return thread_data
-    return [{"thread_id": d["thread_id"], "title": d["title"], "replies": d.get("replies", [])[:10], "total_fetched_replies": min(len(d.get("replies", [])), 10)} for d in thread_data[:3]]
+    truncated = [{"thread_id": d["thread_id"], "title": d["title"], "replies": d.get("replies", [])[:10], "total_fetched_replies": min(len(d.get("replies", [])), 10)} for d in thread_data[:3]]
+    log_event("info", f"Truncated thread data: output_length={len(truncated)}", "truncate_data")
+    return truncated
 
 async def build_dynamic_prompt(query: str, conversation_context: List[Dict], metadata: List[Dict], thread_data: List[Dict], filters: Dict, intent: str, selected_source: Dict, grok3_api_key: str) -> str:
+    log_event("debug", f"Building dynamic prompt: query={query[:50]}..., intent={intent}, metadata_length={len(metadata if metadata else [])}, thread_data_length={len(thread_data if thread_data else [])}", "build_dynamic_prompt")
+    
+    if not query or not isinstance(query, str):
+        log_event("warning", f"Invalid query: {query}", "build_dynamic_prompt")
+        return "Invalid query provided."
+    if metadata is None:
+        log_event("warning", "Metadata is None, using empty list", "build_dynamic_prompt")
+        metadata = []
+    if thread_data is None:
+        log_event("warning", "Thread data is None, using empty list", "build_dynamic_prompt")
+        thread_data = []
+    if filters is None:
+        log_event("warning", "Filters is None, using empty dict", "build_dynamic_prompt")
+        filters = {}
+
     selected_source = {"source_name": selected_source, "source_type": "reddit" if "reddit" in str(selected_source).lower() else "lihkg"} if isinstance(selected_source, str) else selected_source or {"source_name": "Unknown", "source_type": "lihkg"}
     source_name, source_type = selected_source.get("source_name", "Unknown"), selected_source.get("source_type", "lihkg")
+    log_event("debug", f"Source: name={source_name}, type={source_type}", "build_dynamic_prompt")
 
     intent_config = INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])
     word_min, word_max = intent_config.word_range
     prompt_length = len(query) + len(json.dumps(conversation_context, ensure_ascii=False)) + len(json.dumps(thread_data, ensure_ascii=False))
     length_factor = min(prompt_length / (CONFIG["max_prompt_length"] * 0.8), 1.0)
     word_min, word_max = int(word_min * (1 + length_factor * 0.7)), int(word_max * (1 + length_factor * 0.7))
+    log_event("debug", f"Prompt parameters: word_min={word_min}, word_max={word_max}, prompt_length={prompt_length}", "build_dynamic_prompt")
 
-    # Inline metadata extraction
-    metadata = [{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "like_count": item.get("like_count", 0), "last_reply_time": item.get("last_reply_time", 0)} for item in metadata]
-    thread_data = await truncate_data(thread_data, CONFIG["max_prompt_length"] - 2000)
+    # Inline metadata extraction with validation
+    validated_metadata = []
+    for item in metadata:
+        if not isinstance(item, dict) or "thread_id" not in item or "title" not in item:
+            log_event("warning", f"Invalid metadata item: {item}", "build_dynamic_prompt")
+            continue
+        validated_metadata.append({
+            "thread_id": item["thread_id"],
+            "title": item["title"],
+            "no_of_reply": item.get("no_of_reply", 0),
+            "like_count": item.get("like_count", 0),
+            "last_reply_time": item.get("last_reply_time", 0)
+        })
+    log_event("debug", f"Validated metadata: length={len(validated_metadata)}", "build_dynamic_prompt")
+
+    validated_thread_data = await truncate_data(thread_data, CONFIG["max_prompt_length"] - 2000)
+    log_event("debug", f"Validated thread data: length={len(validated_thread_data)}", "build_dynamic_prompt")
 
     prompt = PROMPT_TEMPLATE.render(
         source_name=source_name,
         source_type=source_type,
         query=query,
         history=conversation_context,
-        metadata=metadata,
-        thread_data=thread_data,
+        metadata=validated_metadata,
+        thread_data=validated_thread_data,
         filters=filters,
         instruction=intent_config.prompt_instruction,
         format=intent_config.prompt_format,
         word_min=word_min,
         word_max=word_max
     )
-    log_event("info", f"構建提示：查詢={query[:50]}..., 長度={len(prompt)} 字符, 意圖={intent}", "build_dynamic_prompt")
+    log_event("info", f"Built prompt: query={query[:50]}..., length={len(prompt)} chars, intent={intent}", "build_dynamic_prompt")
     return prompt
 
 def get_intent_processing_params(intent: str, source_type: str = "lihkg") -> Dict:
+    log_event("debug", f"Getting intent processing params: intent={intent}, source_type={source_type}", "get_intent_processing_params")
     params = INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"]).processing.dict()
     params["sort"] = params.get("sort_override", {}).get(source_type.lower(), params["sort"])
     params["sort"] = "hot" if source_type.lower() == "lihkg" and params["sort"] == "confidence" else params["sort"]
+    log_event("debug", f"Intent processing params: {params}", "get_intent_processing_params")
     return params
