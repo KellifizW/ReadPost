@@ -187,11 +187,16 @@ async def parse_api_response(api_response: Optional[Dict], default_output: Dict,
         content = api_response["choices"][0]["message"]["content"]
         return json.loads(content)
     except (KeyError, json.JSONDecodeError) as e:
-        log_event("error", f"JSON parse error: {str(e)}, response: {api_response}", function_name)
-        if isinstance(content, str) and content.endswith("..."):
+        log_event("error", f"JSON parse error: {str(e)}, response: {content[:500]}...", function_name)
+        if isinstance(content, str) and (content.endswith("...") or "}" not in content):
             try:
-                fixed_content = content.rsplit(",", 1)[0] + "]}"
-                return json.loads(fixed_content)
+                # 嘗試修復截斷的 JSON
+                fixed_content = content.rstrip("...") + "}"
+                parsed = json.loads(fixed_content)
+                if not parsed.get("keywords") or not parsed.get("intents"):
+                    log_event("warning", "Fixed JSON missing required fields", function_name)
+                    return default_output
+                return parsed
             except json.JSONDecodeError:
                 log_event("warning", "Failed to fix truncated JSON", function_name)
         return default_output
@@ -246,7 +251,7 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
     payload = {
         "model": "grok-3",
         "messages": [{"role": "system", "content": "Semantic analysis assistant."}, *conversation_context, {"role": "user", "content": prompt}],
-        "max_tokens": 300,
+        "max_tokens": 500,  # 增加 max_tokens 以避免截斷
         "temperature": 0.5,
     }
 
@@ -257,8 +262,8 @@ Output Format: {{"keywords": [], "related_terms": [], "time_sensitive": true/fal
         log_event("error", f"Failed to parse query: {str(e)}", "parse_query")
         return default_output
 
-    if not isinstance(result, dict):
-        log_event("warning", f"Invalid result type from parse_api_response: {type(result)}", "parse_query")
+    if not isinstance(result, dict) or not result.get("intents"):
+        log_event("warning", f"Invalid result from parse_api_response: {result}", "parse_query")
         return default_output
 
     intents, thread_ids = [], []
