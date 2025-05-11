@@ -349,12 +349,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
     if not intents:
         intents = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "Default to summarization"}]
 
-    log_event(
-        "info", "Parsed query", "parse_query",
-        intents=[i["intent"] for i in intents], keywords=keywords,
-        thread_ids=thread_ids, time_range="recent" if time_sensitive else "all"
-    )
-    return {
+    result = {
         "intents": intents[:4],
         "keywords": keywords[:CONFIG["max_keywords"]],
         "related_terms": related_terms[:8],
@@ -363,6 +358,13 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
         "reason": result.get("reason", "Semantic matching"),
         "confidence": max(i["confidence"] for i in intents),
     }
+    log_event(
+        "info", "Parsed query result", "parse_query",
+        intents=[i["intent"] for i in intents], keywords=keywords,
+        thread_ids=thread_ids, time_range="recent" if time_sensitive else "all",
+        result=result
+    )
+    return result
 
 async def extract_relevant_thread(
     conversation_context: List[Dict], query: str, grok3_api_key: str
@@ -415,6 +417,8 @@ Return empty object {{}} if no match.
 
 async def truncate_data(thread_data: List[Dict], max_length: int) -> List[Dict]:
     """Truncate thread data to fit prompt length."""
+    if not thread_data:
+        return []
     if sum(len(json.dumps(d, ensure_ascii=False)) for d in thread_data) <= max_length:
         return thread_data
     return [
@@ -438,13 +442,23 @@ async def build_dynamic_prompt(
     grok3_api_key: str,
 ) -> str:
     """Build dynamic prompt using Jinja2 template."""
+    # Handle None or invalid selected_source
+    if not isinstance(selected_source, (str, dict)):
+        log_event("warning", "Invalid selected_source, using default", "build_dynamic_prompt")
+        selected_source = {"source_name": "Unknown", "source_type": "lihkg"}
     selected_source = (
         {"source_name": selected_source, "source_type": "reddit" if "reddit" in selected_source.lower() else "lihkg"}
         if isinstance(selected_source, str) else
-        selected_source or {"source_name": "Unknown", "source_type": "lihkg"}
+        selected_source
     )
     source_name = selected_source.get("source_name", "Unknown")
     source_type = selected_source.get("source_type", "lihkg")
+
+    # Handle None inputs
+    conversation_context = conversation_context or []
+    metadata = metadata or []
+    thread_data = thread_data or []
+    filters = filters or {}
 
     intent_config = INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])
     word_min, word_max = intent_config.word_range
@@ -452,8 +466,8 @@ async def build_dynamic_prompt(
     length_factor = min(prompt_length / (CONFIG["max_prompt_length"] * 0.8), 1.0)
     word_min, word_max = int(word_min * (1 + length_factor * 0.7)), int(word_max * (1 + length_factor * 0.7))
 
-    # Inline metadata extraction
-    metadata = [
+    # Inline metadata extraction with validation
+    validated_metadata = [
         {
             "thread_id": item["thread_id"],
             "title": item["title"],
@@ -471,7 +485,7 @@ async def build_dynamic_prompt(
         source_type=source_type,
         query=query,
         history=conversation_context,
-        metadata=metadata,
+        metadata=validated_metadata,
         thread_data=thread_data,
         filters=filters,
         instruction=intent_config.prompt_instruction,
@@ -479,7 +493,10 @@ async def build_dynamic_prompt(
         word_min=word_min,
         word_max=word_max
     )
-    log_event("info", f"Built prompt: query={query[:50]}..., length={len(prompt)}", "build_dynamic_prompt", intent=intent)
+    log_event(
+        "info", f"Built prompt: query={query[:50]}..., length={len(prompt)}", "build_dynamic_prompt",
+        intent=intent, source_name=source_name, source_type=source_type
+    )
     return prompt
 
 def get_intent_processing_params(intent: str, source_type: str = "lihkg") -> Dict:
