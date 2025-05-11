@@ -387,7 +387,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                         if response.status != 200:
                             logger.error(f"非流式 API 失敗：狀態碼={response.status}")
-                            yield f"错误：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
+                            yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
                             return
                         data = await response.json()
                         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -397,9 +397,9 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         return
                 except Exception as e:
                     logger.error(f"非流式 API 錯誤：{str(e)}")
-                    yield f"错误：生成回應失敗（{str(e)}）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
+                    yield f"錯誤：生成回應失敗（{str(e)}）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
                     return
-        yield f"错误：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
+        yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
 
 async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     logger.debug(f"Processing user question: user_query={user_query}, selected_source={selected_source}, source_id={source_id}, source_type={source_type}")
@@ -642,7 +642,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 continue
             processed_thread_ids.add(thread_id)
             async with request_semaphore:
-                logger棒棒棒棒 logger.debug(f"Fetching supplemental thread content: thread_id={thread_id}, source_id={source_id}")
+                logger.debug(f"Fetching supplemental thread content: thread_id={thread_id}, source_id={source_id}")
                 if source_type == "lihkg":
                     result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if analysis.get("processing", {}).get("analysis", {}).get("time_sensitive", False) else 0)
                 else:
