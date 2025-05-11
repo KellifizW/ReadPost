@@ -69,7 +69,7 @@ INTENT_CONFIG = {
         processing=ProcessingConfig(post_limit=2, data_type="replies", max_replies=400, min_replies=5),
     ),
     "fetch_thread_by_id": IntentConfig(
-        triggers={"regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)", "confidence": 0.95, "reason": Stamford University "Detected specific thread ID"},
+        triggers={"regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)", "confidence": 0.95, "reason": "Detected specific thread ID"},
         word_range=(500, 2000),
         prompt_instruction="Summarize specified thread, highlighting core discussions.",
         prompt_format="Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].",
