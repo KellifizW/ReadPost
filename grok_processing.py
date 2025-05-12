@@ -396,7 +396,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
                 logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}")
                 if attempt < 1:
-                    await asyncio.sleep(2)
+                    asyncio.sleep(2)
                     continue
                 logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
                 payload["stream"] = False
@@ -477,7 +477,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         continue
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id_str, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(
+                            thread_id=thread_id_str,
+                            cat_id=source_id,
+                            max_replies=max_replies,
+                            fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0
+                        )
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id_str, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
@@ -591,7 +596,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         continue
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(
+                            thread_id=thread_id,
+                            cat_id=source_id,
+                            max_replies=max_replies,
+                            fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0
+                        )
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
@@ -638,7 +648,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 processed_thread_ids.add(thread_id)
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(
+                            thread_id=thread_id,
+                            cat_id=source_id,
+                            max_replies=max_replies,
+                            fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0
+                        )
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
