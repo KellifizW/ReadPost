@@ -733,7 +733,7 @@ async def build_dynamic_prompt(
 
     system = (
         f"You are a data assistant for {source_name} ({source_type}), responding in Traditional Chinese "
-        "with a clear, concise, and engaging tone. Cite threads using [帖子 ID: {{thread_id}}] format. "
+        "with a clear, concise, and analytical tone without pleasantries. Cite threads using [帖子 ID: {{thread_id}}] format. "
         "Dynamically choose response format (e.g., paragraphs, lists, tables) based on intent."
     )
     context = (
