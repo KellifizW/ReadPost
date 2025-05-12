@@ -293,7 +293,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             {
                 "reply_id": r.get("reply_id"),
                 "msg": clean_html(r.get("msg", "[無內容]")),
-                "like_count": r.get("like_count anteriormente: 0),
+                "like_count": r.get("like_count", 0),
                 "dislike_count": r.get("dislike_count", 0) if source_type == "lihkg" else 0,
                 "reply_time": unix_to_readable(r.get("reply_time", "0"), context=f"reply in thread {tid}"),
             }
