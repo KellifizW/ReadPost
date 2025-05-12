@@ -129,7 +129,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
         try:
             subreddit_obj = await reddit.subreddit(subreddit)
             sort_methods = {
-                "confidence": lambda: subreddit_obj.hot(limit=total_limit),  # confidence is equivalent to hot in asyncpraw
+                "confidence": lambda: subreddit_obj.hot(limit=total_limit),
                 "new": lambda: subreddit_obj.new(limit=total_limit),
                 "top": lambda: subreddit_obj.top(time_filter="day", limit=total_limit),
                 "controversial": lambda: subreddit_obj.controversial(time_filter="day", limit=total_limit),
@@ -142,9 +142,20 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
             
             logger.info(f"開始抓取子版 {subreddit}，排序：{sort}，當前請求次數 {client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)]}")
             
-            async for submission in sort_methods[sort]():
-                if submission.created_utc:
-                    items.append(await format_submission(submission))
+            submission_stream = sort_methods[sort]()
+            async for submission in submission_stream:
+                try:
+                    async with asyncio.timeout(10):  # Set 10-second timeout per submission
+                        if submission.created_utc:
+                            items.append(await format_submission(submission))
+                except asyncio.TimeoutError:
+                    logger.error(f"抓取貼文超時：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}")
+                    rate_limit_info.append({"message": f"抓取貼文超時：子版={subreddit}"})
+                    continue
+                except Exception as e:
+                    logger.error(f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}")
+                    rate_limit_info.append({"message": f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}"})
+                    continue
             
             logger.info(f"抓取子版 {subreddit} 成功，總項目數 {len(items)}")
             
@@ -160,7 +171,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
                 }
             }
         except Exception as e:
-            logger.error(f"抓取貼文列表失敗：{str(e)}")
+            logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         
         return {
@@ -178,16 +189,24 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
     
     try:
         async for comment in submission.comments:
-            if isinstance(comment, asyncpraw.models.MoreComments):
-                more_comments_ids.extend(comment.children)
-            elif hasattr(comment, 'body') and comment.body:
-                hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-                comments.append({
-                    "reply_id": comment.id,
-                    "msg": comment.body,
-                    "like_count": comment.score,
-                    "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                })
+            try:
+                async with asyncio.timeout(10):  # Set 10-second timeout per comment
+                    if isinstance(comment, asyncpraw.models.MoreComments):
+                        more_comments_ids.extend(comment.children)
+                    elif hasattr(comment, 'body') and comment.body:
+                        hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
+                        comments.append({
+                            "reply_id": comment.id,
+                            "msg": comment.body,
+                            "like_count": comment.score,
+                            "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
+                        })
+            except asyncio.TimeoutError:
+                logger.error(f"抓取評論超時：貼文ID={submission.id}")
+                continue
+            except Exception as e:
+                logger.error(f"處理評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
+                continue
         
         BATCH_SIZE = 100
         for i in range(0, len(more_comments_ids), BATCH_SIZE):
@@ -200,30 +219,34 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
             request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
             
             try:
-                more_comments = await reddit.comment.more_children(
-                    link_id=f"t3_{submission.id}",
-                    children=",".join(batch_ids),
-                    sort=sort
-                )
-                for comment in more_comments:
-                    if hasattr(comment, 'body') and comment.body:
-                        hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-                        comments.append({
-                            "reply_id": comment.id,
-                            "msg": comment.body,
-                            "like_count": comment.score,
-                            "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                        })
-                        if len(comments) >= max_comments:
-                            break
-            except (aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
-                logger.warning(f"/api/morechildren 請求失敗：{str(e)}")
+                async with asyncio.timeout(10):  # Set 10-second timeout for more_comments
+                    more_comments = await reddit.comment.more_children(
+                        link_id=f"t3_{submission.id}",
+                        children=",".join(batch_ids),
+                        sort=sort
+                    )
+                    for comment in more_comments:
+                        if hasattr(comment, 'body') and comment.body:
+                            hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
+                            comments.append({
+                                "reply_id": comment.id,
+                                "msg": comment.body,
+                                "like_count": comment.score,
+                                "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                            if len(comments) >= max_comments:
+                                break
+            except asyncio.TimeoutError:
+                logger.warning(f"/api/morechildren 請求超時：貼文ID={submission.id}")
+                continue
+            except (aiohttp.ClientResponseError, Exception) as e:
+                logger.warning(f"/api/morechildren 請求失敗：貼文ID={submission.id}, 錯誤={str(e)}")
                 continue
             
         return comments[:max_comments], request_counter, last_reset
     
     except Exception as e:
-        logger.error(f"收集更多評論失敗：{str(e)}")
+        logger.error(f"收集更多評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
         return comments[:max_comments], request_counter, last_reset
 
 async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset, sort="confidence"):
@@ -260,7 +283,9 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
         
         logger.info(f"開始抓取貼文：[{post_id}]，排序：{sort}，當前請求次數：{request_counter}")
         
-        submission = await reddit.submission(id=post_id)
+        async with asyncio.timeout(10):  # Set 10-second timeout for submission fetch
+            submission = await reddit.submission(id=post_id)
+        
         if not submission:
             logger.error(f"無法獲取貼文：{post_id}")
             rate_limit_info.append({"message": f"無法獲取貼文 {post_id}"})
@@ -309,27 +334,8 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
         
         return result, request_counter, last_reset
     
-    except aiohttp.ClientResponseError as e:
-        if e.status == 429:
-            logger.error(f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}")
-            rate_limit_info.append({"message": f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}"})
-        else:
-            logger.error(f"抓取貼文內容失敗：{str(e)}")
-            rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
-        return {
-            "title": "",
-            "total_replies": 0,
-            "last_reply_time": "1970-01-01 00:00:00",
-            "like_count": 0,
-            "replies": [],
-            "fetched_pages": [],
-            "rate_limit_info": rate_limit_info,
-            "request_counter": request_counter,
-            "last_reset": last_reset,
-            "rate_limit_until": 0
-        }, request_counter, last_reset
     except asyncio.TimeoutError as e:
-        logger.error(f"抓取貼文內容超時：{str(e)}")
+        logger.error(f"抓取貼文內容超時：貼文ID={post_id}, 錯誤={str(e)}")
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 超時：{str(e)}"})
         return {
             "title": "",
@@ -343,8 +349,27 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
             "last_reset": last_reset,
             "rate_limit_until": 0
         }, request_counter, last_reset
+    except aiohttp.ClientResponseError as e:
+        if e.status == 429:
+            logger.error(f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}")
+            rate_limit_info.append({"message": f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}"})
+        else:
+            logger.error(f"抓取貼文內容失敗：貼文ID={post_id}, 錯誤={str(e)}")
+            rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
+        return {
+            "title": "",
+            "total_replies": 0,
+            "last_reply_time": "1970-01-01 00:00:00",
+            "like_count": 0,
+            "replies": [],
+            "fetched_pages": [],
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": 0
+        }, request_counter, last_reset
     except Exception as e:
-        logger.error(f"抓取貼文內容失敗：{str(e)}")
+        logger.error(f"抓取貼文內容失敗：貼文ID={post_id}, 錯誤={str(e)}")
         rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
         return {
             "title": "",
@@ -395,7 +420,8 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                     "total_replies": 0
                 }
             
-            submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
+            async with asyncio.timeout(30):  # Set 30-second timeout for batch info fetch
+                submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
             
             for i in range(0, len(post_ids), batch_size):
                 batch_ids = [pid for pid in post_ids[i:i + batch_size] if pid and pid.strip() and pid.lower() != "id"]
@@ -444,16 +470,16 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                                 "like_count": 0,
                                 "replies": [],
                                 "fetched_pages": [],
-                                "rate_limit_info": rate_limit_info,
-                                "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
-                                "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-                                "rate_limit_until": 0
+                               emptive_timeout": 0
                             })
                             fetch_status[post_id] = {"status": "failed", "replies": 0}
             
             total_requests = sum(client_manager.request_counters)
             logger.info(f"Reddit API 調用統計：抓取帖子數={total_posts}, 回覆數={total_replies}, 總請求次數={total_requests}")
         
+        except asyncio.TimeoutError:
+            logger.error(f"批次抓取貼文超時：{post_ids}")
+            rate_limit_info.append({"message": f"批次抓取貼文超時：{post_ids}"})
         except Exception as e:
             logger.error(f"批次抓取貼文內容失敗：{str(e)}")
             rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(e)}"})
