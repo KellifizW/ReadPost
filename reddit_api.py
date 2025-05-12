@@ -26,7 +26,7 @@ class RedditClientManager:
             self.topic_cache = {}
             self.thread_cache = {}
             self.topic_cache_duration = 1800
-            self.thread_cache_duration = 300
+            self.thread_cache_duration = 600  # 增加緩存時間到 10 分鐘
             self.max_cache_size = 100
         except KeyError as e:
             logger.error(f"Secrets 配置錯誤：{str(e)}")
@@ -125,7 +125,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
         items = []
         rate_limit_info = []
         total_limit = 100
-        items_per_page = 25  # 每頁最多25篇貼文
+        items_per_page = 25
         start_index = (start_page - 1) * items_per_page
         end_index = start_index + (max_pages * items_per_page)
         
@@ -151,15 +151,14 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
                     submissions.append(submission)
                 return submissions
             
-            async with asyncio.timeout(30):  # 設置30秒超時來抓取所有貼文
+            async with asyncio.timeout(30):
                 submissions = await fetch_submissions()
             
-            # 模擬分頁並限制範圍
             for idx, submission in enumerate(submissions):
                 if idx < start_index or idx >= end_index:
                     continue
                 try:
-                    async with asyncio.timeout(10):  # 每個貼文處理10秒超時
+                    async with asyncio.timeout(10):
                         if submission.created_utc:
                             formatted_submission = await format_submission(submission)
                             items.append(formatted_submission)
@@ -189,7 +188,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
             logger.error(f"抓取貼文列表超時：子版={subreddit}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 超時"})
         except Exception as e:
-            logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}")
+            logger.error(f"抓取貼文列表失敗 Negotiation：子版={subreddit}, 錯誤={str(e)}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         
         return {
@@ -203,17 +202,52 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
 
 async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset, sort="confidence"):
     comments = []
+    max_more_comments = 100  # 限制展開的 MoreComments 數量
     
     try:
         # 設置評論排序
         submission.comment_sort = sort
-        # 展開所有 MoreComments 物件
-        async with asyncio.timeout(30):  # 設置30秒超時來展開評論
-            await submission.comments.replace_more(limit=None)
+        logger.info(f"設置貼文 {submission.id} 的評論排序為 {sort}")
+        
+        # 重置評論以確保排序生效
+        submission._comments = None
+        await submission.load()
+        
+        # 分批展開 MoreComments
+        for attempt in range(3):  # 最多重試 3 次
+            try:
+                async with asyncio.timeout(60):  # 增加超時到 60 秒
+                    logger.info(f"開始展開 MoreComments，貼文ID={submission.id}，嘗試={attempt + 1}")
+                    start_time = time.time()
+                    await submission.comments.replace_more(limit=max_more_comments)
+                    logger.info(f"展開 MoreComments 完成，貼文ID={submission.id}，耗時={time.time() - start_time:.2f} 秒")
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"展開 MoreComments 超時，貼文ID={submission.id}，嘗試={attempt + 1}")
+                    if attempt < 2:
+                        await asyncio.sleep(2)  # 等待 2 秒後重試
+                        continue
+                    logger.error(f"展開 MoreComments 最終超時：貼文ID={submission.id}")
+                    return comments[:max_comments], request_counter, last_reset
+            except Exception as e:
+                logger.error(f"展開 MoreComments 失敗：貼文ID={submission.id}，錯誤={str(e)}，嘗試={attempt + 1}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                return comments[:max_comments], request_counter, last_reset
+        
+        # 檢查速率限制
+        if request_counter >= client_manager.rate_limit_requests_per_minute - 5:  # 留 5 次請求的緩衝
+            wait_time = 60 - (time.time() - last_reset)
+            if wait_time > 0:
+                logger.warning(f"接近速率限制，等待 {wait_time:.2f} 秒")
+                await asyncio.sleep(wait_time)
+                request_counter = 0
+                last_reset = time.time()
         
         async for comment in submission.comments:
             try:
-                async with asyncio.timeout(10):  # 每個評論處理10秒超時
+                async with asyncio.timeout(10):
                     if hasattr(comment, 'body') and comment.body:
                         hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
                         comments.append({
@@ -235,9 +269,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
         
         return comments[:max_comments], request_counter, last_reset
     
-    except asyncio.TimeoutError:
-        logger.error(f"展開評論超時：貼文ID={submission.id}")
-        return comments[:max_comments], request_counter, last_reset
     except Exception as e:
         logger.error(f"收集評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
         return comments[:max_comments], request_counter, last_reset
