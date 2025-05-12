@@ -145,7 +145,7 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
             submission_stream = sort_methods[sort]()
             async for submission in submission_stream:
                 try:
-                    async with asyncio.timeout(10):  # Set 10-second timeout per submission
+                    async with asyncio.timeout(10):
                         if submission.created_utc:
                             items.append(await format_submission(submission))
                 except asyncio.TimeoutError:
@@ -190,7 +190,7 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
     try:
         async for comment in submission.comments:
             try:
-                async with asyncio.timeout(10):  # Set 10-second timeout per comment
+                async with asyncio.timeout(10):
                     if isinstance(comment, asyncpraw.models.MoreComments):
                         more_comments_ids.extend(comment.children)
                     elif hasattr(comment, 'body') and comment.body:
@@ -219,7 +219,7 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
             request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
             
             try:
-                async with asyncio.timeout(10):  # Set 10-second timeout for more_comments
+                async with asyncio.timeout(10):
                     more_comments = await reddit.comment.more_children(
                         link_id=f"t3_{submission.id}",
                         children=",".join(batch_ids),
@@ -283,7 +283,7 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
         
         logger.info(f"開始抓取貼文：[{post_id}]，排序：{sort}，當前請求次數：{request_counter}")
         
-        async with asyncio.timeout(10):  # Set 10-second timeout for submission fetch
+        async with asyncio.timeout(10):
             submission = await reddit.submission(id=post_id)
         
         if not submission:
@@ -420,7 +420,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                     "total_replies": 0
                 }
             
-            async with asyncio.timeout(30):  # Set 30-second timeout for batch info fetch
+            async with asyncio.timeout(30):
                 submissions = {s.id: s async for s in reddit.info(fullnames=ids)}
             
             for i in range(0, len(post_ids), batch_size):
@@ -470,7 +470,10 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                                 "like_count": 0,
                                 "replies": [],
                                 "fetched_pages": [],
-                               emptive_timeout": 0
+                                "rate_limit_info": rate_limit_info,
+                                "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
+                                "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
+                                "rate_limit_until": 0
                             })
                             fetch_status[post_id] = {"status": "failed", "replies": 0}
             
