@@ -302,7 +302,7 @@ INTENT_CONFIG = {
 }
 
 CONFIG = {
-    "max_prompt_length": 190000,
+    "max_prompt_length": 240000,
     "max_parse_retries": 3,
     "parse_timeout": 90,
     "min_keywords": 1,
