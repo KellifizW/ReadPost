@@ -125,6 +125,9 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
         items = []
         rate_limit_info = []
         total_limit = 100
+        items_per_page = 25  # 每頁最多25篇貼文
+        start_index = (start_page - 1) * items_per_page
+        end_index = start_index + (max_pages * items_per_page)
         
         try:
             subreddit_obj = await reddit.subreddit(subreddit)
@@ -142,18 +145,30 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
             
             logger.info(f"開始抓取子版 {subreddit}，排序：{sort}，當前請求次數 {client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)]}")
             
-            submission_stream = sort_methods[sort]()
-            async for submission in submission_stream:
+            async def fetch_submissions():
+                submissions = []
+                async for submission in sort_methods[sort]():
+                    submissions.append(submission)
+                return submissions
+            
+            async with asyncio.timeout(30):  # 設置30秒超時來抓取所有貼文
+                submissions = await fetch_submissions()
+            
+            # 模擬分頁並限制範圍
+            for idx, submission in enumerate(submissions):
+                if idx < start_index or idx >= end_index:
+                    continue
                 try:
-                    async with asyncio.timeout(10):
+                    async with asyncio.timeout(10):  # 每個貼文處理10秒超時
                         if submission.created_utc:
-                            items.append(await format_submission(submission))
+                            formatted_submission = await format_submission(submission)
+                            items.append(formatted_submission)
                 except asyncio.TimeoutError:
                     logger.error(f"抓取貼文超時：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}")
                     rate_limit_info.append({"message": f"抓取貼文超時：子版={subreddit}"})
                     continue
                 except Exception as e:
-                    logger.error(f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}")
+                    logger.error(f"處理貼文失敗：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}, 錯誤={str(e)}")
                     rate_limit_info.append({"message": f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}"})
                     continue
             
@@ -170,6 +185,9 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
                     "total_posts": len(items)
                 }
             }
+        except asyncio.TimeoutError:
+            logger.error(f"抓取貼文列表超時：子版={subreddit}")
+            rate_limit_info.append({"message": f"抓取子版 {subreddit} 超時"})
         except Exception as e:
             logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
