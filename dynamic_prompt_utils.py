@@ -25,8 +25,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "analyze_sentiment": {
@@ -42,8 +43,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 300,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "follow_up": {
@@ -59,13 +61,14 @@ INTENT_CONFIG = {
             "post_limit": 2,
             "data_type": "replies",
             "max_replies": 400,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 5,
+            "sort_override": {"reddit": "new"},
         },
     },
     "fetch_thread_by_id": {
         "triggers": {
-            "regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)",  # Updated regex to handle "帖子 ID: 1kiu8i8"
+            "regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)",  # Matches "帖子 ID: 1kiu8i8" or "ID: 3926787"
             "confidence": 0.95,
             "reason": "Detected specific thread ID",
         },
@@ -76,8 +79,9 @@ INTENT_CONFIG = {
             "post_limit": 1,
             "data_type": "replies",
             "max_replies": 400,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 0,
+            "sort_override": {"reddit": "top"},
         },
     },
     "general_query": {
@@ -93,8 +97,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "list_titles": {
@@ -110,8 +115,9 @@ INTENT_CONFIG = {
             "post_limit": 15,
             "data_type": "metadata",
             "max_replies": 20,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 5,
+            "sort_override": {"reddit": "top"},
         },
     },
     "find_themed": {
@@ -127,8 +133,9 @@ INTENT_CONFIG = {
             "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "fetch_dates": {
@@ -161,8 +168,9 @@ INTENT_CONFIG = {
             "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "recommend_threads": {
@@ -178,8 +186,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "time_sensitive_analysis": {
@@ -212,8 +221,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "rank_topics": {
@@ -229,8 +239,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "search_odd_posts": {
@@ -246,8 +257,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 10,
+            "sort_override": {"reddit": "top"},
         },
     },
     "hypothetical_advice": {
@@ -264,8 +276,9 @@ INTENT_CONFIG = {
             "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
-            "sort": "confidence",
+            "sort": "hot",
             "min_replies": 5,
+            "sort_override": {"reddit": "top"},
         },
     },
     "risk_warning": {
@@ -304,10 +317,15 @@ async def call_grok3_api(
     function_name: str = "unknown",
 ) -> Optional[Dict]:
     """Unified Grok 3 API call handler with retry and error logging."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {st.secrets['grok3key']}",
-    }
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {st.secrets['grok3key']}",
+        }
+    except KeyError:
+        logger.error(f"API call failed in {function_name}: Missing Grok 3 API key")
+        return None
+
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession() as session:
@@ -333,8 +351,12 @@ async def call_grok3_api(
                         f"completion_tokens={data.get('usage', {}).get('completion_tokens', 0)}"
                     )
                     return data
-        except Exception as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"API call error in {function_name}: {str(e)}, attempt={attempt + 1}")
+            if attempt < retries - 1:
+                await asyncio.sleep(2)
+        except json.JSONDecodeError as e:
+            logger.error(f"API response JSON decode error in {function_name}: {str(e)}, attempt={attempt + 1}")
             if attempt < retries - 1:
                 await asyncio.sleep(2)
     logger.warning(f"API call failed in {function_name} after {retries} attempts")
@@ -437,7 +459,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
             "temperature": 0.5,
         }
         api_response = await call_grok3_api(payload, function_name="parse_query")
-        if api_response:
+        if api_response and api_response.get("choices"):
             response_content = api_response["choices"][0]["message"]["content"]
             try:
                 result = json.loads(response_content)
@@ -541,7 +563,7 @@ Output Format: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 c
         "temperature": 0.3,
     }
     api_response = await call_grok3_api(payload, function_name="extract_keywords")
-    if not api_response:
+    if not api_response or not api_response.get("choices"):
         return {
             "keywords": [],
             "related_terms": [],
@@ -550,7 +572,8 @@ Output Format: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 c
         }
 
     try:
-        result = json.loads(api_response["choices"][0]["message"]["content"])
+        response_content = api_response["choices"][0]["message"]["content"]
+        result = json.loads(response_content)
         keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
         logger.info(f"Extracted keywords: {result}")
         return {
@@ -559,8 +582,8 @@ Output Format: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 c
             "reason": result.get("reason", "No reason provided")[:70],
             "time_sensitive": result.get("time_sensitive", False),
         }
-    except Exception as e:
-        logger.error(f"Extract keywords response error: {str(e)}")
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Extract keywords response error: {str(e)}, response_content={response_content}")
         return {
             "keywords": [],
             "related_terms": [],
@@ -607,17 +630,18 @@ Return empty object {{}} if no match.
         "temperature": 0.5,
     }
     api_response = await call_grok3_api(payload, function_name="extract_relevant_thread")
-    if not api_response:
+    if not api_response or not api_response.get("choices"):
         return None, None, None, "API call failed"
 
     try:
-        result = json.loads(api_response["choices"][0]["message"]["content"])
+        response_content = api_response["choices"][0]["message"]["content"]
+        result = json.loads(response_content)
         thread_id = result.get("thread_id")
         title = result.get("title")
         reason = result.get("reason", "No reason provided")
         return thread_id, title, None, reason if thread_id else "No matching thread"
-    except Exception as e:
-        logger.error(f"Extract relevant thread response error: {str(e)}")
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Extract relevant thread response error: {str(e)}, response_content={response_content}")
         return None, None, None, f"Error: {str(e)}"
 
 async def build_dynamic_prompt(
