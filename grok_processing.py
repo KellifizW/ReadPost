@@ -39,7 +39,7 @@ def clean_html(text):
 def clean_response(response):
     if isinstance(response, str):
         cleaned = re.sub(r"\[post_id: [a-f0-9]{40}\]", "[回覆]", response)
-        return cleaned
+        return response
     return response
 
 def unix_to_readable(timestamp, context="unknown"):
@@ -153,7 +153,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "filters": {
             "min_replies": intent_params.get("min_replies", 10),
             "min_likes": 0,
-            "sort": intent_params.get("sort", "confidence" if source_type == "reddit" else "hot"), 
+            "sort": intent_params.get("sort", "confidence" if source_type == "reddit" else "hot"),
             "keywords": theme_keywords,
         },
         "processing": {"intents": [i["intent"] for i in intents], "top_thread_ids": top_thread_ids, "analysis": parsed_query},
@@ -165,6 +165,7 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     }
 
 async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, source_type="lihkg", intents=["summarize_posts"]):
+    logger.info(f"Prioritizing threads: query={user_query}, thread_count={len(threads)}, intents={intents}")
     try:
         api_key = st.secrets["grok3key"]
     except KeyError:
@@ -174,6 +175,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\d+)\]", st.session_state.get("conversation_context", [])[-1].get("content", ""))
         valid_ids = [tid for tid in referenced_thread_ids if any(str(t["thread_id"]) == tid for t in threads)]
         if valid_ids:
+            logger.info(f"Follow-up intent detected, using referenced thread IDs: {valid_ids}")
             return {"top_thread_ids": valid_ids[:5], "reason": "追問參考帖子", "intent_breakdown": [{"intent": "follow_up", "thread_ids": valid_ids[:5]}]}
     threads = [{"thread_id": str(t["thread_id"]), **t} for t in threads]
     prompt = f"""
@@ -209,7 +211,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                     response_content = data["choices"][0]["message"]["content"]
                     result = json.loads(response_content)
                     top_thread_ids = [str(tid) for tid in result.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]]
-                    logger.info(f"帖子排序成功：top_thread_ids={top_thread_ids}")
+                    logger.info(f"帖子排序成功：top_thread_ids={top_thread_ids}, reason={result.get('reason', '無原因')}")
                     return {
                         "top_thread_ids": top_thread_ids,
                         "reason": result.get("reason", "無原因"),
@@ -221,8 +223,10 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
                     await asyncio.sleep(2)
                     continue
                 sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+                top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]]
+                logger.info(f"排序失敗，回退到熱門度排序：top_thread_ids={top_thread_ids}")
                 return {
-                    "top_thread_ids": [str(t["thread_id"]) for t in sorted_threads[:20]],
+                    "top_thread_ids": top_thread_ids,
                     "reason": f"排序失敗（{str(e)}），回退到熱門度排序",
                     "intent_breakdown": [],
                 }
@@ -232,7 +236,12 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
     filters = filters or {"min_replies": 10, "min_likes": 0}
     selected_source = normalize_selected_source(selected_source, source_type)
     if not thread_data:
-        error_msg = f"在 {selected_source['source_name']} 中未找到符合條件的帖子（篩選：{json.dumps(filters, ensure_ascii=False)}）。"
+        error_msg = (
+            f"在 {selected_source['source_name']} 中未找到符合條件的帖子。\n"
+            f"查詢：{user_query}\n"
+            f"篩選條件：{json.dumps(filters, ensure_ascii=False)}\n"
+            f"建議：嘗試不同的關鍵詞或更廣泛的查詢範圍。"
+        )
         logger.warning(error_msg)
         yield error_msg
         return
@@ -500,6 +509,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 if progress_callback:
                     progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0.2 * (page / 3), {"current_page": page, "total_pages": 3})
         filtered_items = [item for item in initial_threads if item.get("no_of_reply", 0) >= intent_params.get("min_replies", 10)]
+        logger.info(f"Filtered items: count={len(filtered_items)}, items={[item['thread_id'] for item in filtered_items[:5]]}")
         for item in initial_threads:
             thread_id = str(item["thread_id"])
             async with cache_lock:
@@ -524,7 +534,24 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             if filtered_items:
                 prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_source["source_name"], source_id, source_type, [primary_intent])
                 top_thread_ids = prioritization.get("top_thread_ids", [])
-                candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in map(str, top_thread_ids)][:post_limit] or sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)[:post_limit]
+                valid_thread_ids = [tid for tid in top_thread_ids if str(tid) in [str(item["thread_id"]) for item in filtered_items]]
+                logger.info(f"Valid thread IDs after prioritization: {valid_thread_ids}")
+                candidate_threads = [item for item in filtered_items if str(item["thread_id"]) in valid_thread_ids][:post_limit]
+                if not candidate_threads:
+                    logger.warning(f"No matching threads found for top_thread_ids: {top_thread_ids}, falling back to sorting by engagement")
+                    candidate_threads = sorted(filtered_items, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)[:post_limit]
+        logger.info(f"Candidate threads: count={len(candidate_threads)}, threads={[item['thread_id'] for item in candidate_threads]}")
+        if not candidate_threads:
+            logger.warning(f"No candidate threads found for query: {user_query}, source: {selected_source}")
+            return {
+                "selected_source": selected_source,
+                "thread_data": [],
+                "rate_limit_info": rate_limit_info,
+                "request_counter": request_counter,
+                "last_reset": last_reset,
+                "rate_limit_until": rate_limit_until,
+                "analysis": analysis,
+            }
         if progress_callback:
             progress_callback("正在抓取帖子內容", 0.3)
         for item in candidate_threads:
@@ -578,6 +605,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     if len(thread_data) < intent_params.get("post_limit", 5) and primary_intent == "follow_up":
         supplemental_result = await (get_lihkg_topic_list(cat_id=source_id, start_page=1, max_pages=2) if source_type == "lihkg" else get_reddit_topic_list(subreddit=source_id, start_page=1, max_pages=2, sort=sort))
         supplemental_threads = [item for item in supplemental_result.get("items", []) if str(item["thread_id"]) not in top_thread_ids and any(kw.lower() in item["title"].lower() for kw in keyword_result.get("keywords", ["新話題"]))][:intent_params.get("post_limit", 5) - len(thread_data)]
+        logger.info(f"Supplemental threads: count={len(supplemental_threads)}, threads={[item['thread_id'] for item in supplemental_threads]}")
         for item in supplemental_threads:
             thread_id = str(item["thread_id"])
             if thread_id in processed_thread_ids:
@@ -601,7 +629,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                             "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                         }
-                        for reply in result.get("replies", []) 
+                        for reply in result.get("replies", [])
                         if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                     ]
                     total_replies = result.get("total_replies", item.get("no_of_reply", 0))
