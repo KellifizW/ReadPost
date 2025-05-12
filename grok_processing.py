@@ -477,7 +477,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         continue
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id_str, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(thread_id=thread_id_str, cat_id=source_id, max_replies=max_replies, fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0)
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id_str, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
@@ -591,7 +591,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         continue
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0)
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
@@ -638,7 +638,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 processed_thread_ids.add(thread_id)
                 async with request_semaphore:
                     if source_type == "lihkg":
-                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=1 if keyword_result.get("time_sensitive", False) else 0)
+                        result = await get_lihkg_thread_content(thread_id=thread_id, cat_id=source_id, max_replies=max_replies, fetch_last_pages=3 if keyword_result.get("time_sensitive", False) else 0)
                     else:
                         result = await get_reddit_thread_content(post_id=thread_id, subreddit=source_id, max_comments=max_comments)
                     request_counter = result.get("request_counter", request_counter)
