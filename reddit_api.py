@@ -202,16 +202,19 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
         }
 
 async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset, sort="confidence"):
-    more_comments_ids = []
     comments = []
     
     try:
+        # 設置評論排序
+        submission.comment_sort = sort
+        # 展開所有 MoreComments 物件
+        async with asyncio.timeout(30):  # 設置30秒超時來展開評論
+            await submission.comments.replace_more(limit=None)
+        
         async for comment in submission.comments:
             try:
-                async with asyncio.timeout(10):
-                    if isinstance(comment, asyncpraw.models.MoreComments):
-                        more_comments_ids.extend(comment.children)
-                    elif hasattr(comment, 'body') and comment.body:
+                async with asyncio.timeout(10):  # 每個評論處理10秒超時
+                    if hasattr(comment, 'body') and comment.body:
                         hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
                         comments.append({
                             "reply_id": comment.id,
@@ -219,52 +222,24 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                             "like_count": comment.score,
                             "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
                         })
+                        if len(comments) >= max_comments:
+                            break
             except asyncio.TimeoutError:
-                logger.error(f"抓取評論超時：貼文ID={submission.id}")
+                logger.error(f"抓取評論超時：貼文ID={submission.id}, 評論ID={getattr(comment, 'id', 'unknown')}")
                 continue
             except Exception as e:
-                logger.error(f"處理評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
+                logger.error(f"處理評論失敗：貼文ID={submission.id}, 評論ID={getattr(comment, 'id', 'unknown')}, 錯誤={str(e)}")
                 continue
         
-        BATCH_SIZE = 100
-        for i in range(0, len(more_comments_ids), BATCH_SIZE):
-            if len(comments) >= max_comments:
-                break
-            batch_ids = more_comments_ids[i:i + BATCH_SIZE]
-            if not batch_ids:
-                continue
-            
-            request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
-            
-            try:
-                async with asyncio.timeout(10):
-                    more_comments = await reddit.comment.more_children(
-                        link_id=f"t3_{submission.id}",
-                        children=",".join(batch_ids),
-                        sort=sort
-                    )
-                    for comment in more_comments:
-                        if hasattr(comment, 'body') and comment.body:
-                            hk_time = datetime.fromtimestamp(comment.created_utc, tz=HONG_KONG_TZ)
-                            comments.append({
-                                "reply_id": comment.id,
-                                "msg": comment.body,
-                                "like_count": comment.score,
-                                "reply_time": hk_time.strftime("%Y-%m-%d %H:%M:%S")
-                            })
-                            if len(comments) >= max_comments:
-                                break
-            except asyncio.TimeoutError:
-                logger.warning(f"/api/morechildren 請求超時：貼文ID={submission.id}")
-                continue
-            except (aiohttp.ClientResponseError, Exception) as e:
-                logger.warning(f"/api/morechildren 請求失敗：貼文ID={submission.id}, 錯誤={str(e)}")
-                continue
-            
+        request_counter, last_reset = await client_manager._handle_rate_limit(client_manager.current_client_index % len(client_manager.clients))
+        
         return comments[:max_comments], request_counter, last_reset
     
+    except asyncio.TimeoutError:
+        logger.error(f"展開評論超時：貼文ID={submission.id}")
+        return comments[:max_comments], request_counter, last_reset
     except Exception as e:
-        logger.error(f"收集更多評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
+        logger.error(f"收集評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
         return comments[:max_comments], request_counter, last_reset
 
 async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset, sort="confidence"):
