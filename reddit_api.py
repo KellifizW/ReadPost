@@ -222,7 +222,7 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                     await submission.comments.replace_more(limit=max_more_comments)
                     logger.info(f"展開 MoreComments 完成，貼文ID={submission.id}，耗時={time.time() - start_time:.2f} 秒")
                     break
-                except asyncio.TimeoutError:
+            except asyncio.TimeoutError:
                     logger.warning(f"展開 MoreComments 超時，貼文ID={submission.id}，嘗試={attempt + 1}")
                     if attempt < 2:
                         await asyncio.sleep(2)  # 等待 2 秒後重試
