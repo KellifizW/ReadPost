@@ -19,11 +19,10 @@ INTENT_CONFIG = {
             "reason": "Detected summarization query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to {post_limit} threads, focusing on key points and keywords.",
+        "prompt_instruction": "Summarize up to 5 threads, focusing on key points and keywords.",
         "prompt_format": "Paragraphs summarizing discussions, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": None,  # None indicates dynamic determination by Grok3
-            "default_post_limit": 5,  # Fallback if Grok3 fails
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -38,11 +37,10 @@ INTENT_CONFIG = {
             "reason": "Detected sentiment analysis query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Analyze sentiment of up to {post_limit} threads (positive/neutral/negative).",
+        "prompt_instruction": "Analyze sentiment of up to 5 threads (positive/neutral/negative).",
         "prompt_format": "Paragraphs with sentiment summary, optional table: | ID | Sentiment | Ratio |.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 300,
             "sort": "hot",
@@ -57,11 +55,10 @@ INTENT_CONFIG = {
             "reason": "Detected follow-up query",
         },
         "word_range": (1000, 4000),
-        "prompt_instruction": "Deep dive into up to {post_limit} referenced threads, supplementing with context.",
+        "prompt_instruction": "Deep dive into referenced threads, supplementing with context.",
         "prompt_format": "Paragraphs with cohesive follow-up, segmented by viewpoints.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 2,
+            "post_limit": 2,
             "data_type": "replies",
             "max_replies": 400,
             "sort": "hot",
@@ -71,7 +68,7 @@ INTENT_CONFIG = {
     },
     "fetch_thread_by_id": {
         "triggers": {
-            "regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)",
+            "regex": r"(?:帖子\s*ID\s*[:=]?\s*|ID\s*[:=]?\s*)(\w+)",  # Matches "帖子 ID: 1kiu8i8" or "ID: 3926787"
             "confidence": 0.95,
             "reason": "Detected specific thread ID",
         },
@@ -79,7 +76,7 @@ INTENT_CONFIG = {
         "prompt_instruction": "Summarize specified thread, highlighting core discussions.",
         "prompt_format": "Paragraphs summarizing thread, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": 1,  # Fixed, as it targets a specific thread
+            "post_limit": 1,
             "data_type": "replies",
             "max_replies": 400,
             "sort": "hot",
@@ -94,11 +91,10 @@ INTENT_CONFIG = {
             "reason": "Default general query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Provide concise summary based on up to {post_limit} metadata, keeping it brief.",
+        "prompt_instruction": "Provide concise summary based on metadata, keeping it brief.",
         "prompt_format": "Paragraphs answering query, citing relevant threads if needed.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
             "sort": "hot",
@@ -113,11 +109,10 @@ INTENT_CONFIG = {
             "reason": "Detected list titles query",
         },
         "word_range": (500, 3000),
-        "prompt_instruction": "List up to {post_limit} thread titles, explaining relevance.",
+        "prompt_instruction": "List up to 15 thread titles, explaining relevance.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and relevance note.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 15,
+            "post_limit": 15,
             "data_type": "metadata",
             "max_replies": 20,
             "sort": "hot",
@@ -125,7 +120,6 @@ INTENT_CONFIG = {
             "sort_override": {"reddit": "top"},
         },
     },
-    # Other intents remain unchanged, but update their "post_limit" to None and add "default_post_limit"
     "find_themed": {
         "triggers": {
             "keywords": ["主題", "類似", "相關"],
@@ -133,11 +127,10 @@ INTENT_CONFIG = {
             "reason": "Detected themed query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Find up to {post_limit} threads matching themes, highlighting thematic links.",
+        "prompt_instruction": "Find threads matching themes, highlighting thematic links.",
         "prompt_format": "Paragraphs emphasizing themes, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 10,
+            "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -152,11 +145,10 @@ INTENT_CONFIG = {
             "reason": "Detected date-focused query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Extract dates for up to {post_limit} threads, integrating into summary.",
+        "prompt_instruction": "Extract dates for up to 5 threads, integrating into summary.",
         "prompt_format": "Table: | ID | Title | Date |, followed by brief summary.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
             "sort": "new",
@@ -170,11 +162,10 @@ INTENT_CONFIG = {
             "reason": "Detected keyword search query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Search up to {post_limit} threads with matching keywords, emphasizing matches.",
+        "prompt_instruction": "Search threads with matching keywords, emphasizing matches.",
         "prompt_format": "Paragraphs highlighting keyword matches, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 10,
+            "post_limit": 20,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -189,11 +180,10 @@ INTENT_CONFIG = {
             "reason": "Detected recommendation query",
         },
         "word_range": (500, 3000),
-        "prompt_instruction": "Recommend up to {post_limit} threads based on replies/likes, justifying choices.",
+        "prompt_instruction": "Recommend 2-5 threads based on replies/likes, justifying choices.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and recommendation reason.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
             "sort": "hot",
@@ -208,11 +198,10 @@ INTENT_CONFIG = {
             "reason": "Detected time-sensitive query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Summarize up to {post_limit} threads from last 24 hours, focusing on recent discussions.",
+        "prompt_instruction": "Summarize threads from last 24 hours, focusing on recent discussions.",
         "prompt_format": "Paragraphs noting reply times, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
             "sort": "new",
@@ -226,11 +215,10 @@ INTENT_CONFIG = {
             "reason": "Detected platform-specific query",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to {post_limit} threads, identifying themes and sentiment ratios.",
+        "prompt_instruction": "Summarize 5 threads, identifying themes and sentiment ratios.",
         "prompt_format": "Paragraphs by theme, ending with table: | Theme | Ratio | Thread |.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -245,11 +233,10 @@ INTENT_CONFIG = {
             "reason": "Detected ranking query",
         },
         "word_range": (500, 2000),
-        "prompt_instruction": "Rank up to {post_limit} threads/topics by engagement, explaining reasons.",
+        "prompt_instruction": "Rank up to 5 threads/topics by engagement, explaining reasons.",
         "prompt_format": "List with [帖子 ID: {thread_id}], title, and engagement reason.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "metadata",
             "max_replies": 100,
             "sort": "hot",
@@ -264,11 +251,10 @@ INTENT_CONFIG = {
             "reason": "Detected query for odd or unusual posts",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Summarize up to {post_limit} threads with odd or unusual content, highlighting peculiar aspects.",
+        "prompt_instruction": "Summarize up to 5 threads with odd or unusual content, highlighting peculiar aspects.",
         "prompt_format": "Paragraphs summarizing odd discussions, citing [帖子 ID: {thread_id}].",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -284,11 +270,10 @@ INTENT_CONFIG = {
             "reason": "Detected hypothetical or advice-seeking query targeting Grok's perspective",
         },
         "word_range": (500, 2500),
-        "prompt_instruction": "Answer as Grok, providing insights or advice for the hypothetical scenario or query, incorporating up to {post_limit} platform discussions if relevant.",
+        "prompt_instruction": "Answer as Grok, providing insights or advice for the hypothetical scenario or query, incorporating platform discussions if relevant.",
         "prompt_format": "Paragraphs with Grok's perspective, optionally citing [帖子 ID: {thread_id}] for context.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 100,
             "sort": "hot",
@@ -303,11 +288,10 @@ INTENT_CONFIG = {
             "reason": "Detected financial query requiring risk analysis",
         },
         "word_range": (700, 3000),
-        "prompt_instruction": "Identify and analyze risk factors in up to {post_limit} financial discussions, assessing their potential impact on the specified investment.",
+        "prompt_instruction": "Identify and analyze risk factors (e.g., policy changes, market volatility, negative news) in financial discussions, assessing their potential impact on the specified investment.",
         "prompt_format": "Table: | Risk Factor | Description | Potential Impact | Thread Reference |, followed by a summary paragraph.",
         "processing": {
-            "post_limit": None,
-            "default_post_limit": 5,
+            "post_limit": 5,
             "data_type": "both",
             "max_replies": 150,
             "sort": "hot",
@@ -378,25 +362,26 @@ async def call_grok3_api(
     logger.warning(f"API call failed in {function_name} after {retries} attempts")
     return None
 
-async def determine_post_limit(query: str, intents: List[Dict], conversation_context: List[Dict], source_type: str) -> int:
-    """Use Grok3 to determine an appropriate post_limit based on query and intents."""
+async def determine_post_limit(
+    query: str, keywords: List[str], intents: List[Dict], source_type: str, grok3_api_key: str
+) -> int:
+    """Determine dynamic post limit (3-15) based on query specificity."""
+    logger.info(f"Determining post_limit: query={query}, keywords={keywords}, intents={intents}")
     prompt = f"""
-Analyze the query and intents to recommend a post_limit between 3 and 15.
+Analyze the query to determine the optimal number of posts (3-15) to fetch.
+- Broad queries (e.g., '市場趨勢') require more posts (10-15).
+- Specific queries (e.g., '某帖子詳情') require fewer posts (3-5).
+- Consider keywords and intents for specificity.
 Query: {query}
+Keywords: {json.dumps(keywords, ensure_ascii=False)}
 Intents: {json.dumps(intents, ensure_ascii=False)}
-Conversation History: {json.dumps(conversation_context, ensure_ascii=False)}
 Source: {source_type}
-Consider:
-- Query specificity (specific: lower limit, broad: higher limit)
-- Intent type (e.g., list_titles may need higher limit, fetch_thread_by_id needs 1)
-- Conversation context (follow-up may need fewer posts)
-Output Format: {{"post_limit": integer, "reason": "explanation"}}
+Output Format: {{"post_limit": number, "reason": "reason (max 70 chars)"}}
 """
     payload = {
         "model": "grok-3",
         "messages": [
             {"role": "system", "content": "You are an assistant determining optimal post limits."},
-            *conversation_context,
             {"role": "user", "content": prompt},
         ],
         "max_tokens": 100,
@@ -405,22 +390,42 @@ Output Format: {{"post_limit": integer, "reason": "explanation"}}
     api_response = await call_grok3_api(payload, function_name="determine_post_limit")
     if api_response and api_response.get("choices"):
         response_content = api_response["choices"][0]["message"]["content"]
+        logger.info(f"Raw API response in determine_post_limit: {response_content}")
         try:
             result = json.loads(response_content)
-            post_limit = result.get("post_limit", 5)
-            post_limit = max(3, min(15, int(post_limit)))  # Ensure within 3-15
-            logger.info(f"Dynamic post_limit determined: {post_limit}, reason={result.get('reason', 'No reason provided')}")
+            post_limit = max(3, min(15, result.get("post_limit", 5)))
+            logger.info(f"Dynamic post_limit: {post_limit}, reason={result.get('reason', 'No reason')}")
             return post_limit
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error in determine_post_limit: {str(e)}")
+            logger.error(f"JSON decode error in determine_post_limit: {str(e)}, response_content={response_content}")
+            # Attempt to fix truncated JSON
+            if response_content.strip().endswith("...") or response_content.strip().endswith('"'):
+                try:
+                    fixed_content = response_content.rsplit(",", 1)[0] + "}"
+                    result = json.loads(fixed_content)
+                    post_limit = max(3, min(15, result.get("post_limit", 5)))
+                    logger.info(f"Fixed truncated JSON: post_limit={post_limit}, reason={result.get('reason', 'Fixed JSON')}")
+                    return post_limit
+                except json.JSONDecodeError:
+                    logger.warning("Failed to fix truncated JSON")
+            # Fallback based on keyword count
+            keyword_count = len(keywords)
+            if keyword_count <= 2:
+                post_limit = 3  # Specific query
+            elif keyword_count <= 4:
+                post_limit = 5  # Moderately specific
+            else:
+                post_limit = 10  # Broad query
+            logger.info(f"Fallback post_limit: {post_limit}, reason=JSON parsing failed, keyword_count={keyword_count}")
+            return post_limit
+    # Fallback when API fails
     logger.warning("Failed to determine dynamic post_limit, using default")
-    primary_intent = max(intents, key=lambda x: x["confidence"])["intent"]
-    return INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"])["processing"].get("default_post_limit", 5)
+    return 5
 
 async def parse_query(
     query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg"
 ) -> Dict:
-    """Parse user query to extract intents, keywords, thread IDs, and dynamic post_limit."""
+    """Parse user query to extract intents, keywords, thread IDs, and post_limit."""
     conversation_context = conversation_context or []
     if not isinstance(query, str):
         logger.error(f"Invalid query type: expected str, got {type(query)}")
@@ -486,7 +491,7 @@ async def parse_query(
     is_vague = len(keywords) < 2 and not any(
         kw in query_lower for kw in ["分析", "總結", "討論", "主題", "時事", "推薦", "熱門", "最多", "關注"]
     )
-    has_multi_intent = any(ind in query_lower for ind in ["並且", "同時", "總結並", "列 出並", "分析並"])
+    has_multi_intent = any(ind in query_lower for ind in ["並且", "同時", "總結並", "列出並", "分析並"])
 
     # Step 2: Use API for semantic analysis if no clear intent or vague query
     if not intents or (is_vague and not has_multi_intent):
@@ -576,11 +581,7 @@ Filter intents with confidence >= {CONFIG["intent_confidence_threshold"]}.
         intents = [max(intents, key=lambda x: x["confidence"])]
 
     # Step 3: Determine dynamic post_limit
-    primary_intent = max(intents, key=lambda x: x["confidence"])["intent"]
-    if INTENT_CONFIG.get(primary_intent, {}).get("processing", {}).get("post_limit") is None:
-        post_limit = await determine_post_limit(query, intents, conversation_context, source_type)
-    else:
-        post_limit = INTENT_CONFIG[primary_intent]["processing"]["post_limit"]
+    post_limit = await determine_post_limit(query, keywords, intents, source_type, grok3_api_key)
 
     time_range = "recent" if time_sensitive else "all"
     logger.info(
@@ -753,7 +754,7 @@ async def build_dynamic_prompt(
     word_min = int(word_min + (word_max - word_min) * length_factor * 0.7)
     word_max = int(word_min + (word_max - word_min) * (1 + length_factor * 0.7))
 
-    instruction_parts = [intent_config["prompt_instruction"].format(post_limit=len(thread_data))]
+    instruction_parts = [intent_config["prompt_instruction"]]
     format_instructions = [intent_config["prompt_format"]]
 
     platform_instruction = (
@@ -810,9 +811,7 @@ def get_intent_processing_params(intent: str, source_type: str = "lihkg") -> Dic
     sort_override = params.get("sort_override", {})
     if sort_override and source_type.lower() in sort_override:
         params["sort"] = sort_override[source_type.lower()]
+    # For LIHKG, replace 'confidence' with 'hot' as LIHKG does not support 'confidence'
     if source_type.lower() == "lihkg" and params["sort"] == "confidence":
         params["sort"] = "hot"
-    # Use default_post_limit if post_limit is None (dynamic)
-    if params.get("post_limit") is None:
-        params["post_limit"] = params.get("default_post_limit", 5)
     return params
