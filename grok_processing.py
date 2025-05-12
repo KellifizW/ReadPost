@@ -15,7 +15,7 @@ from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keyw
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
 GROK3_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK3_TOKEN_LIMIT = 190000
+GROK3_TOKEN_LIMIT = 270000
 API_TIMEOUT = 120
 MAX_CACHE_SIZE = 100
 
