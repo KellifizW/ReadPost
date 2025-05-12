@@ -205,7 +205,7 @@ INTENT_CONFIG = {
             "data_type": "both",
             "max_replies": 150,
             "sort": "new",
-            "min_replies": 5,
+            "min_replies": 15,
         },
     },
     "contextual_analysis": {
