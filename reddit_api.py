@@ -21,12 +21,12 @@ class RedditClientManager:
             self.clients = [None] * len(credentials)
             self.request_counters = [0] * len(self.clients)
             self.last_resets = [time.time()] * len(self.clients)
-            self.rate_limit_requests_per_minute = 60
+            self.rate_limit_requests_per_minute = 30  # 降低以避免速率限制
             self.current_client_index = 0
             self.topic_cache = {}
             self.thread_cache = {}
             self.topic_cache_duration = 1800
-            self.thread_cache_duration = 600  # 增加緩存時間到 10 分鐘
+            self.thread_cache_duration = 600
             self.max_cache_size = 100
         except KeyError as e:
             logger.error(f"Secrets 配置錯誤：{str(e)}")
@@ -34,33 +34,59 @@ class RedditClientManager:
 
     @asynccontextmanager
     async def get_client(self):
-        client_idx = self.current_client_index % len(self.clients)
-        if self.clients[client_idx] is None:
-            self.clients[client_idx] = await self._init_reddit_client(client_idx)
-        try:
-            self.request_counters[client_idx], self.last_resets[client_idx] = await self._handle_rate_limit(client_idx)
-            self.current_client_index += 1
-            yield self.clients[client_idx]
-        finally:
-            pass
+        for i in range(len(self.clients)):
+            client_idx = (self.current_client_index + i) % len(self.clients)
+            if self.clients[client_idx] is None:
+                try:
+                    self.clients[client_idx] = await self._init_reddit_client(client_idx)
+                except Exception as e:
+                    logger.error(f"客戶端 {client_idx} 初始化失敗：{str(e)}，嘗試下一個客戶端")
+                    continue
+            try:
+                self.request_counters[client_idx], self.last_resets[client_idx] = await self._handle_rate_limit(client_idx)
+                self.current_client_index = client_idx + 1
+                yield self.clients[client_idx]
+                return
+            except Exception as e:
+                logger.error(f"客戶端 {client_idx} 獲取失敗：{str(e)}，嘗試下一個客戶端")
+                continue
+        raise Exception("所有 Reddit 客戶端均無法初始化")
 
     async def _init_reddit_client(self, client_idx):
         try:
             cred = st.secrets["reddit"]["credentials"][client_idx]
+            user_agent = f"python:LIHKGChatBot:v1.0.{client_idx} (by /u/{st.secrets['reddit']['username']})"
             reddit = asyncpraw.Reddit(
                 client_id=cred["client_id"],
                 client_secret=cred["client_secret"],
                 username=st.secrets["reddit"]["username"],
                 password=st.secrets["reddit"]["password"],
-                user_agent=f"LIHKGChatBot/v1.0 by u/{st.secrets['reddit']['username']}_{client_idx}",
-                timeout=30
+                user_agent=user_agent,
+                timeout=30,
+                requestor_kwargs={"headers": {"Accept": "application/json"}}
             )
             reddit.is_shared = True
             user = await reddit.user.me()
             logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
+            # 檢查速率限制頭部
+            async with reddit.get("api/v1/me") as response:
+                headers = response.headers
+                logger.info(
+                    f"客戶端 {client_idx} 速率限制資訊："
+                    f"X-Ratelimit-Remaining={headers.get('X-Ratelimit-Remaining', '未知')}, "
+                    f"X-Ratelimit-Reset={headers.get('X-Ratelimit-Reset', '未知')}"
+                )
             return reddit
+        except asyncpraw.exceptions.RedditAPIException as e:
+            logger.error(
+                f"Reddit API 錯誤（客戶端 {client_idx}）：{str(e)}, "
+                f"詳細：{e.__dict__}, "
+                f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+            )
+            raise
         except KeyError as e:
-            logger.error(f"缺少 Secrets 配置：{str(e)}")
+            logger.error(f"缺少 Secrets 配置（客戶端 {client_idx}）：{str(e)}")
             raise
         except Exception as e:
             logger.error(f"Reddit 客戶端 {client_idx} 初始化失敗：{str(e)}")
@@ -68,7 +94,7 @@ class RedditClientManager:
 
     async def _handle_rate_limit(self, client_idx):
         if self.request_counters[client_idx] >= self.rate_limit_requests_per_minute:
-            wait_time = 60 - (time.time() - self.last_resets[client_idx])
+            wait_time = 120 - (time.time() - self.last_resets[client_idx])
             if wait_time > 0:
                 logger.warning(f"客戶端 {client_idx} 達到速率限制，等待 {wait_time:.2f} 秒")
                 await asyncio.sleep(wait_time)
@@ -97,6 +123,13 @@ async def get_subreddit_name(subreddit):
         try:
             subreddit_obj = await reddit.subreddit(subreddit)
             return subreddit_obj.display_name
+        except asyncpraw.exceptions.RedditAPIException as e:
+            logger.error(
+                f"獲取子版名稱失敗：{str(e)}, "
+                f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+            )
+            return "未知子版"
         except Exception as e:
             logger.error(f"獲取子版名稱失敗：{str(e)}")
             return "未知子版"
@@ -166,6 +199,15 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
                     logger.error(f"抓取貼文超時：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}")
                     rate_limit_info.append({"message": f"抓取貼文超時：子版={subreddit}"})
                     continue
+                except asyncpraw.exceptions.RedditAPIException as e:
+                    logger.error(
+                        f"處理貼文失敗：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}, "
+                        f"錯誤={str(e)}, "
+                        f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                        f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+                    )
+                    rate_limit_info.append({"message": f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}"})
+                    continue
                 except Exception as e:
                     logger.error(f"處理貼文失敗：子版={subreddit}, 貼文ID={getattr(submission, 'id', 'unknown')}, 錯誤={str(e)}")
                     rate_limit_info.append({"message": f"處理貼文失敗：子版={subreddit}, 錯誤={str(e)}"})
@@ -187,8 +229,16 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
         except asyncio.TimeoutError:
             logger.error(f"抓取貼文列表超時：子版={subreddit}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 超時"})
+        except asyncpraw.exceptions.RedditAPIException as e:
+            logger.error(
+                f"抓取貼文列表失敗：子版={subreddit}, "
+                f"錯誤={str(e)}, "
+                f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+            )
+            rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         except Exception as e:
-            logger.error(f"抓取貼文列表失敗 Negotiation：子版={subreddit}, 錯誤={str(e)}")
+            logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}")
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         
         return {
@@ -202,33 +252,41 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
 
 async def collect_more_comments(reddit, submission, max_comments, request_counter, last_reset, sort="confidence"):
     comments = []
-    max_more_comments = 100  # 限制展開的 MoreComments 數量
+    max_more_comments = 100
     
     try:
-        # 設置評論排序
         submission.comment_sort = sort
         logger.info(f"設置貼文 {submission.id} 的評論排序為 {sort}")
         
-        # 重置評論以確保排序生效
         submission._comments = None
         await submission.load()
         
-        # 分批展開 MoreComments
-        for attempt in range(3):  # 最多重試 3 次
+        for attempt in range(3):
             try:
-                async with asyncio.timeout(60):  # 增加超時到 60 秒
+                async with asyncio.timeout(60):
                     logger.info(f"開始展開 MoreComments，貼文ID={submission.id}，嘗試={attempt + 1}")
                     start_time = time.time()
                     await submission.comments.replace_more(limit=max_more_comments)
                     logger.info(f"展開 MoreComments 完成，貼文ID={submission.id}，耗時={time.time() - start_time:.2f} 秒")
                     break
             except asyncio.TimeoutError:
-                    logger.warning(f"展開 MoreComments 超時，貼文ID={submission.id}，嘗試={attempt + 1}")
-                    if attempt < 2:
-                        await asyncio.sleep(2)  # 等待 2 秒後重試
-                        continue
-                    logger.error(f"展開 MoreComments 最終超時：貼文ID={submission.id}")
-                    return comments[:max_comments], request_counter, last_reset
+                logger.warning(f"展開 MoreComments 超時，貼文ID={submission.id}，嘗試={attempt + 1}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                logger.error(f"展開 MoreComments 最終超時：貼文ID={submission.id}")
+                return comments[:max_comments], request_counter, last_reset
+            except asyncpraw.exceptions.RedditAPIException as e:
+                logger.error(
+                    f"展開 MoreComments 失敗：貼文ID={submission.id}, "
+                    f"錯誤={str(e)}, "
+                    f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                    f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                return comments[:max_comments], request_counter, last_reset
             except Exception as e:
                 logger.error(f"展開 MoreComments 失敗：貼文ID={submission.id}，錯誤={str(e)}，嘗試={attempt + 1}")
                 if attempt < 2:
@@ -236,9 +294,8 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
                     continue
                 return comments[:max_comments], request_counter, last_reset
         
-        # 檢查速率限制
-        if request_counter >= client_manager.rate_limit_requests_per_minute - 5:  # 留 5 次請求的緩衝
-            wait_time = 60 - (time.time() - last_reset)
+        if request_counter >= client_manager.rate_limit_requests_per_minute - 5:
+            wait_time = 120 - (time.time() - last_reset)
             if wait_time > 0:
                 logger.warning(f"接近速率限制，等待 {wait_time:.2f} 秒")
                 await asyncio.sleep(wait_time)
@@ -261,6 +318,14 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
             except asyncio.TimeoutError:
                 logger.error(f"抓取評論超時：貼文ID={submission.id}, 評論ID={getattr(comment, 'id', 'unknown')}")
                 continue
+            except asyncpraw.exceptions.RedditAPIException as e:
+                logger.error(
+                    f"處理評論失敗：貼文ID={submission.id}, 評論ID={getattr(comment, 'id', 'unknown')}, "
+                    f"錯誤={str(e)}, "
+                    f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                    f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+                )
+                continue
             except Exception as e:
                 logger.error(f"處理評論失敗：貼文ID={submission.id}, 評論ID={getattr(comment, 'id', 'unknown')}, 錯誤={str(e)}")
                 continue
@@ -269,6 +334,14 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
         
         return comments[:max_comments], request_counter, last_reset
     
+    except asyncpraw.exceptions.RedditAPIException as e:
+        logger.error(
+            f"收集評論失敗：貼文ID={submission.id}, "
+            f"錯誤={str(e)}, "
+            f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+            f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+        )
+        return comments[:max_comments], request_counter, last_reset
     except Exception as e:
         logger.error(f"收集評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
         return comments[:max_comments], request_counter, last_reset
@@ -374,12 +447,34 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
             "rate_limit_until": 0
         }, request_counter, last_reset
     except aiohttp.ClientResponseError as e:
-        if e.status == 429:
-            logger.error(f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}")
-            rate_limit_info.append({"message": f"速率限制錯誤（429）抓取貼文 {post_id}：{str(e)}"})
-        else:
-            logger.error(f"抓取貼文內容失敗：貼文ID={post_id}, 錯誤={str(e)}")
-            rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
+        logger.error(
+            f"抓取貼文內容失敗：貼文ID={post_id}, "
+            f"錯誤={str(e)}, "
+            f"狀態碼={e.status}, "
+            f"回應頭部：{e.headers or '無頭部資訊'}, "
+            f"回應正文：{e.message or '無正文資訊'}"
+        )
+        rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
+        return {
+            "title": "",
+            "total_replies": 0,
+            "last_reply_time": "1970-01-01 00:00:00",
+            "like_count": 0,
+            "replies": [],
+            "fetched_pages": [],
+            "rate_limit_info": rate_limit_info,
+            "request_counter": request_counter,
+            "last_reset": last_reset,
+            "rate_limit_until": 0
+        }, request_counter, last_reset
+    except asyncpraw.exceptions.RedditAPIException as e:
+        logger.error(
+            f"抓取貼文內容失敗：貼文ID={post_id}, "
+            f"錯誤={str(e)}, "
+            f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+            f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+        )
+        rate_limit_info.append({"message": f"抓取貼文 {post_id} 失敗：{str(e)}"})
         return {
             "title": "",
             "total_replies": 0,
@@ -485,7 +580,11 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                             total_posts += 1
                             total_replies += len(result.get("replies", []))
                         else:
-                            logger.error(f"批次抓取貼文失敗：{str(result)}")
+                            logger.error(
+                                f"批次抓取貼文失敗：{str(result)}, "
+                                f"回應頭部：{getattr(result, 'response', {}).get('headers', '無頭部資訊')}, "
+                                f"回應正文：{getattr(result, 'response', {}).get('text', '無正文資訊')}"
+                            )
                             rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(result)}"})
                             results.append({
                                 "title": "",
@@ -507,6 +606,13 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
         except asyncio.TimeoutError:
             logger.error(f"批次抓取貼文超時：{post_ids}")
             rate_limit_info.append({"message": f"批次抓取貼文超時：{post_ids}"})
+        except asyncpraw.exceptions.RedditAPIException as e:
+            logger.error(
+                f"批次抓取貼文內容失敗：{str(e)}, "
+                f"回應頭部：{getattr(e, 'response', {}).get('headers', '無頭部資訊')}, "
+                f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
+            )
+            rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(e)}"})
         except Exception as e:
             logger.error(f"批次抓取貼文內容失敗：{str(e)}")
             rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(e)}"})
