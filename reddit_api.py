@@ -62,8 +62,7 @@ class RedditClientManager:
                 username=st.secrets["reddit"]["username"],
                 password=st.secrets["reddit"]["password"],
                 user_agent=user_agent,
-                timeout=30,
-                requestor_kwargs={"headers": {"Accept": "application/json"}}
+                timeout=30
             )
             reddit.is_shared = True
             user = await reddit.user.me()
