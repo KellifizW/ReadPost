@@ -239,31 +239,65 @@ CONFIG = {
 }
 
 async def call_ai_api(api_type: str, api_key: str, messages: List[dict], base_url: str = None, model: str = None, max_tokens: int = 3000, temperature: float = 0.7, stream: bool = False) -> Optional[Dict]:
-    """Unified API call handler for Grok and other APIs."""
+    """Unified API call handler for Grok and other APIs, supporting streaming and non-streaming responses."""
     try:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     except KeyError:
         logger.error(f"API call failed: Missing API key for {api_type}")
         return None
+    
+    # Use different endpoints based on api_type
+    endpoint = "/chat/completions" if api_type == "grok" else "/completions"
     base_url = base_url or GROK3_API_URL
+    url = f"{base_url.rstrip('/')}{endpoint}"
+    
+    payload = {
+        "model": model or ("grok-3" if api_type == "grok" else "default-model"),
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream
+    }
+    
+    logger.info(f"Calling API: type={api_type}, url={url}, stream={stream}, payload={json.dumps(payload, ensure_ascii=False)[:200]}...")
+    
     async with aiohttp.ClientSession() as session:
         try:
-            payload = {
-                "model": model or ("grok-3" if api_type == "grok" else "default-model"),
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": stream
-            }
-            async with session.post(base_url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as response:
+            async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as response:
                 if response.status != 200:
-                    logger.warning(f"API call failed: status={response.status}")
+                    error_message = await response.text()
+                    logger.warning(f"API call failed: status={response.status}, message={error_message}, url={url}")
                     return None
-                data = await response.json()
-                logger.info(f"API call successful: status={response.status}")
-                return data
-        except Exception as e:
-            logger.error(f"API call error: {str(e)}")
+                
+                if stream:
+                    if response.content_type != "text/event-stream":
+                        logger.error(f"Unexpected content type: {response.content_type}, expected text/event-stream, url={url}")
+                        return None
+                    async def stream_response():
+                        try:
+                            async for line in response.content:
+                                if line and not line.isspace():
+                                    line_str = line.decode("utf-8").strip()
+                                    if line_str == "data: [DONE]":
+                                        break
+                                    if line_str.startswith("data:"):
+                                        try:
+                                            chunk = json.loads(line_str[5:])
+                                            yield chunk
+                                        except json.JSONDecodeError as e:
+                                            logger.warning(f"Failed to parse stream chunk: {line_str}, error={str(e)}")
+                                            continue
+                                yield line_str
+                        finally:
+                            await response.release()
+                    logger.info(f"Streaming API call successful: status={response.status}, url={url}")
+                    return stream_response()
+                else:
+                    data = await response.json()
+                    logger.info(f"Non-streaming API call successful: status={response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
+                    return data
+        except aiohttp.ClientError as e:
+            logger.error(f"API call error: {str(e)}, url={url}, payload={json.dumps(payload, ensure_ascii=False)[:200]}...")
             return None
 
 async def call_grok3_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
