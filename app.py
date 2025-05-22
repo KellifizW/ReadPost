@@ -90,7 +90,7 @@ def update_progress(message, progress, source_type=None, details=None):
             message += f" (第 {details['current_thread']}/{details['total_threads']} 帖子)"
         elif "wait_time" in details:
             message += f" (等待速率限制 {details['wait_time']:.2f} 秒)"
-    status_text.write(f"正在處理：{message}")
+    status_text.text(f"正在處理：{message}")
     progress_bar.progress(min(max(progress, 0.0), 1.0))
 
 async def main():
@@ -203,9 +203,11 @@ async def main():
         st.session_state.last_user_query = user_query
 
         update_progress("分析問題意圖", 0.15)
+        # 修正：僅傳遞 5 個參數，並添加日誌
+        logger.info(f"調用 analyze_and_screen: user_query={user_query}, source_name={selected_cat}, source_id={source_id}, source_type={source_type}, conversation_context={st.session_state.conversation_context}")
         analysis = await analyze_and_screen(
             user_query, selected_cat, source_id, source_type, 
-            st.session_state.conversation_context, api_type, api_base_url
+            st.session_state.conversation_context
         )
         logger.info(f"分析完成：意圖={[i['intent'] for i in analysis.get('intents', [])]}")
 
