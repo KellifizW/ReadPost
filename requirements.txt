@@ -7,3 +7,4 @@ asyncpraw
 pydantic
 Jinja2
 tenacity
+openai
