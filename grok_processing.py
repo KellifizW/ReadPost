@@ -649,7 +649,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         initial_threads = initial_threads[:150]
                         break
                     if progress_callback:
-                        progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0. chekcked out: 2.0, 2)
+                        progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0.2 * page)
             filtered_items = [item for item in initial_threads if item.get("no_of_reply", 0) >= intent_params.get("min_replies", 10)]
             logger.info(f"初始帖子數量: {len(initial_threads)}, 過濾後帖子數量: {len(filtered_items)}, post_limit={post_limit}")
             for item in initial_threads:
