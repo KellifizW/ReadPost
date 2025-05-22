@@ -21,7 +21,7 @@ class RedditClientManager:
             self.clients = [None] * len(credentials)
             self.request_counters = [0] * len(self.clients)
             self.last_resets = [time.time()] * len(self.clients)
-            self.rate_limit_requests_per_minute = 20  # 進一步降低以避免速率限制
+            self.rate_limit_requests_per_minute = 20  # 保守的速率限制
             self.current_client_index = 0
             self.topic_cache = {}
             self.thread_cache = {}
@@ -69,13 +69,13 @@ class RedditClientManager:
                 user = await reddit.user.me()
                 logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
                 # 檢查速率限制頭部
-                async with reddit.get("api/v1/me") as response:
-                    headers = response.headers
-                    logger.info(
-                        f"客戶端 {client_idx} 速率限制資訊："
-                        f"X-Ratelimit-Remaining={headers.get('X-Ratelimit-Remaining', '未知')}, "
-                        f"X-Ratelimit-Reset={headers.get('X-Ratelimit-Reset', '未知')}"
-                    )
+                response = await reddit.get("api/v1/me")
+                headers = response.headers
+                logger.info(
+                    f"客戶端 {client_idx} 速率限制資訊："
+                    f"X-Ratelimit-Remaining={headers.get('X-Ratelimit-Remaining', '未知')}, "
+                    f"X-Ratelimit-Reset={headers.get('X-Ratelimit-Reset', '未知')}"
+                )
                 return reddit
             except asyncpraw.exceptions.RedditAPIException as e:
                 logger.error(
@@ -86,7 +86,6 @@ class RedditClientManager:
                 )
                 raise
             finally:
-                # 確保客戶端關閉以釋放資源
                 await reddit.close()
         except KeyError as e:
             logger.error(f"缺少 Secrets 配置（客戶端 {client_idx}）：{str(e)}")
@@ -551,7 +550,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                     "rate_limit_info": rate_limit_info,
                     "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
                     "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-                    "rate_limit_until": 0,
+                     "rate_limit_until": 0,
                     "total_posts": 0,
                     "total_replies": 0
                 }
