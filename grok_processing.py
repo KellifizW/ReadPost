@@ -100,7 +100,15 @@ async def summarize_context(conversation_context):
             logger.warning(f"對話摘要錯誤：{str(e)}")
     return {"theme": "一般", "keywords": []}
 
-async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
+async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None, **kwargs):
+    # 記錄接收到的參數
+    logger.info(f"analyze_and_screen 收到參數：user_query={user_query}, source_name={source_name}, source_id={source_id}, source_type={source_type}, conversation_context={conversation_context}, 額外參數={kwargs}")
+    
+    # 參數驗證
+    if not all([user_query, source_name, source_id]):
+        logger.error(f"缺少必需參數：user_query={user_query}, source_name={source_name}, source_id={source_id}")
+        raise ValueError("缺少必需參數：user_query, source_name, source_id 必須提供")
+    
     conversation_context = conversation_context or []
     try:
         api_key = st.secrets["grok3key"]
@@ -248,7 +256,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         "intent_breakdown": [],
     }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg", api_type="grok", api_base_url=None):
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     selected_source = normalize_selected_source(selected_source, source_type)
@@ -263,10 +271,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield error_msg
         return
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
-        logger.error("缺少 Grok 3 API 密鑰")
-        yield "錯誤：缺少 API 密鑰"
+        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
+        yield f"錯誤：缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"
         return
     intents_info = processing.get("analysis", {}).get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "默認意圖"}])
     intents = [i["intent"] for i in intents_info if i["intent"] is not None]
@@ -281,7 +289,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intent_params["sort"] = sort_override[source_type.lower()]
     if source_type.lower() == "lihkg" and intent_params.get("sort") == "confidence":
         intent_params["sort"] = "hot"
-    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}")
+    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}, API={api_type}")
     total_min_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][0] / 0.8 for intent in intents)
     total_max_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
@@ -360,10 +368,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         for attempt in range(2):
             try:
                 api_response = await call_ai_api(
-                    api_type="grok",
+                    api_type=api_type,
                     api_key=api_key,
                     messages=messages,
-                    base_url=GROK3_API_URL,
+                    base_url=api_base_url or GROK3_API_URL,
                     max_tokens=max_tokens,
                     temperature=0.7,
                     stream=True
@@ -404,10 +412,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                     continue
                 logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
                 api_response = await call_ai_api(
-                    api_type="grok",
+                    api_type=api_type,
                     api_key=api_key,
                     messages=messages,
-                    base_url=GROK3_API_URL,
+                    base_url=api_base_url or GROK3_API_URL,
                     max_tokens=max_tokens // 2,
                     temperature=0.7,
                     stream=False
@@ -425,7 +433,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
                         return
         yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
 
-async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
+async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None, api_type="grok", api_base_url=None):
     if source_type == "lihkg":
         configure_lihkg_api_logger()
     else:
@@ -443,12 +451,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "analysis": analysis,
         }
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
         return {
             "selected_source": selected_source,
             "thread_data": [],
-            "rate_limit_info": [{"message": "缺少 API 密鑰"}],
+            "rate_limit_info": [{"message": f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
