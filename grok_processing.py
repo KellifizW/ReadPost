@@ -282,7 +282,6 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents = ["summarize_posts"]
         logger.warning(f"無有效意圖，回退到：{intents}")
     primary_intent = max(intents_info, key=lambda x: x["confidence"])["intent"]
-    # 內聯 get_intent_processing_params 邏輯
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
     if source_type.lower() in sort_override:
@@ -353,7 +352,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         reduction_attempts += 1
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"提示長度 {prompt_length} 超過限制 {GROK3_TOKEN_LIMIT}，無法進一步縮減")
-        yield "錯誤：提示過大，請縮減查詢範圍或聯繫 xAI 支持：https://x.ai/api。"
+        yield f"錯誤：提示過大，請縮減查詢範围或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
         return
     logger.info(f"生成提示：查詢={user_query}, 提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, 意圖={intents}, 提示摘要={prompt_summary}")
     messages = [
@@ -364,74 +363,61 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         *conversation_context,
         {"role": "user", "content": prompt},
     ]
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(2):
-            try:
-                api_response = await call_ai_api(
-                    api_type=api_type,
-                    api_key=api_key,
-                    messages=messages,
-                    base_url=api_base_url or GROK3_API_URL,
-                    max_tokens=max_tokens,
-                    temperature=0.7,
-                    stream=True
-                )
-                if api_response:
-                    response_content = ""
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                    async for line in api_response.content:
-                        if line and not line.isspace():
-                            line_str = line.decode("utf-8").strip()
-                            if line_str == "data: [DONE]":
-                                break
-                            if line_str.startswith("data:"):
-                                try:
-                                    chunk = json.loads(line_str[6:])
-                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        cleaned_content = clean_response(content)
-                                        response_content += cleaned_content
-                                        yield cleaned_content
-                                    usage = chunk.get("usage", {})
-                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
-                                except json.JSONDecodeError:
-                                    continue
-                    logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
-                    return
-                else:
-                    logger.error(f"流式 API 失敗：嘗試={attempt + 1}")
-                    if attempt < 1:
-                        await asyncio.sleep(2)
-                    continue
-            except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
-                logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}")
-                if attempt < 1:
-                    await asyncio.sleep(2)
-                    continue
-                logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
-                api_response = await call_ai_api(
-                    api_type=api_type,
-                    api_key=api_key,
-                    messages=messages,
-                    base_url=api_base_url or GROK3_API_URL,
-                    max_tokens=max_tokens // 2,
-                    temperature=0.7,
-                    stream=False
-                )
-                if api_response:
-                    try:
-                        content = api_response.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        cleaned_content = clean_response(content)
-                        logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={api_response.get('usage', {}).get('prompt_tokens', 0)}")
-                        yield cleaned_content
-                        return
-                    except Exception as e:
-                        logger.error(f"非流式 API 錯誤：{str(e)}")
-                        yield f"錯誤：生成回應失敗（{str(e)}）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
-                        return
-        yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
+    try:
+        api_response = await call_ai_api(
+            api_type=api_type,
+            api_key=api_key,
+            messages=messages,
+            base_url=api_base_url or GROK3_API_URL,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            stream=True
+        )
+        if api_response:
+            response_content = ""
+            prompt_tokens = 0
+            completion_tokens = 0
+            async for chunk in api_response:
+                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if content:
+                    cleaned_content = clean_response(content)
+                    response_content += cleaned_content
+                    yield cleaned_content
+                usage = chunk.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                completion_tokens = usage.get("completion_tokens", completion_tokens)
+            logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
+            return
+        else:
+            logger.error("流式 API 返回空響應")
+            yield f"錯誤：生成回應失敗（API 返回空響應）。請檢查網絡或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
+            return
+    except Exception as e:
+        logger.error(f"流式 API 錯誤：{str(e)}，回退到非流式")
+        try:
+            api_response = await call_ai_api(
+                api_type=api_type,
+                api_key=api_key,
+                messages=messages,
+                base_url=api_base_url or GROK3_API_URL,
+                max_tokens=max_tokens // 2,
+                temperature=0.7,
+                stream=False
+            )
+            if api_response:
+                content = api_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                cleaned_content = clean_response(content)
+                logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={api_response.get('usage', {}).get('prompt_tokens', 0)}")
+                yield cleaned_content
+                return
+            else:
+                logger.error("非流式 API 返回空響應")
+                yield f"錯誤：生成回應失敗（非流式 API 返回空響應）。請檢查網絡或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
+                return
+        except Exception as retry_e:
+            logger.error(f"非流式 API 錯誤：{str(retry_e)}")
+            yield f"錯誤：生成回應失敗（{str(retry_e)}）。請升級 ChatAnywhere API 金鑰（https://api.chatanywhere.tech/#/shop）或聯繫 xAI 支持（https://x.ai/api）。"
+            return
 
 async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None, api_type="grok", api_base_url=None):
     if source_type == "lihkg":
