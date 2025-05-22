@@ -6,7 +6,7 @@ import datetime
 import time
 import logging
 import streamlit as st
-import pytz
+import openai
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
@@ -21,6 +21,120 @@ MAX_CACHE_SIZE = 100
 
 cache_lock = asyncio.Lock()
 request_semaphore = asyncio.Semaphore(5)
+
+class AIClient:
+    """統一管理 Grok 和 ChatAnywhere API 調用的客戶端"""
+    
+    def __init__(self, api_type: str, api_key: str, base_url: str = None):
+        self.api_type = api_type.lower()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.client = None
+        self.rate_limit_info = []
+        self.setup_client()
+
+    def setup_client(self):
+        if self.api_type == "grok":
+            self.client = aiohttp.ClientSession(headers={"Authorization": f"Bearer {self.api_key}"})
+        elif self.api_type == "chatanywhere":
+            self.client = openai.AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url or "https://api.chatanywhere.tech/v1"
+            )
+        else:
+            raise ValueError(f"不支持的 API 類型：{self.api_type}")
+
+    async def check_rate_limit(self) -> bool:
+        if self.api_type != "chatanywhere":
+            return True
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://status.chatanywhere.tech") as response:
+                    if response.status == 200:
+                        status = await response.json()
+                        if status.get("requests_remaining", 0) <= 0:
+                            self.rate_limit_info.append({"message": "ChatAnywhere API 已達每日限制"})
+                            logger.warning("ChatAnywhere API 已達每日限制")
+                            return False
+                        return True
+                    return True
+        except Exception as e:
+            logger.error(f"速率限制檢查失敗：{str(e)}")
+            return True
+
+    async def call_api(self, messages: List[dict], model: str = None, max_tokens: int = 3000, temperature: float = 0.7, stream: bool = False):
+        if self.api_type == "chatanywhere" and not await self.check_rate_limit():
+            self.rate_limit_info.append({"message": "已達 ChatAnywhere 每日請求限制"})
+            return {"error": "已達 ChatAnywhere 每日請求限制"}
+        
+        try:
+            if self.api_type == "grok":
+                payload = {
+                    "model": "grok-3",
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": stream
+                }
+                async with self.client.post(GROK3_API_URL, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status != 200:
+                        self.rate_limit_info.append({"message": f"Grok API 錯誤：HTTP {response.status}"})
+                        logger.error(f"Grok API 錯誤：{await response.text()}")
+                        return {"error": f"HTTP {response.status}"}
+                    if stream:
+                        return response
+                    return await response.json()
+            
+            elif self.api_type == "chatanywhere":
+                if not model:
+                    model = "gpt-3.5-turbo"
+                if stream:
+                    response = await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=True
+                    )
+                    return response
+                else:
+                    response = await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature
+                    )
+                    return {
+                        "choices": [{"message": {"content": response.choices[0].message.content}}],
+                        "usage": {"prompt_tokens": response.usage.prompt_tokens, "completion_tokens": response.usage.completion_tokens}
+                    }
+        
+        except Exception as e:
+            self.rate_limit_info.append({"message": f"{self.api_type} API 錯誤：{str(e)}"})
+            logger.error(f"{self.api_type} API 錯誤：{str(e)}", exc_info=True)
+            return {"error": str(e)}
+
+    async def close(self):
+        if self.api_type == "grok" and self.client:
+            await self.client.close()
+
+async def call_ai_api(api_type: str, api_key: str, messages: List[dict], base_url: str = None, model: str = None, max_tokens: int = 3000, temperature: float = 0.7, stream: bool = False):
+    client = AIClient(api_type, api_key, base_url)
+    for attempt in range(2):
+        try:
+            result = await client.call_api(messages, model, max_tokens, temperature, stream)
+            if stream:
+                return result, client.rate_limit_info
+            await client.close()
+            return result
+        except Exception as e:
+            logger.warning(f"API 調用失敗（第 {attempt+1} 次）：{str(e)}")
+            if attempt == 1:
+                await client.close()
+                return {"error": f"API 調用失敗：{str(e)}"}
+            await asyncio.sleep(2)
+    await client.close()
+    return {"error": "未知錯誤"}
 
 def clean_html(text):
     if not isinstance(text, str):
@@ -68,41 +182,38 @@ def normalize_selected_source(selected_source, source_type):
         return {"source_name": "未知", "source_type": source_type}
     return selected_source
 
-async def summarize_context(conversation_context):
+async def summarize_context(conversation_context, api_type, api_base_url):
     if not conversation_context:
         return {"theme": "一般", "keywords": []}
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
-        logger.error("缺少 Grok 3 API 密鑰")
+        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
         return {"theme": "一般", "keywords": []}
     prompt = f"""
 你是對話摘要助手，請分析以下對話歷史，提煉主要主題和關鍵詞（最多3個）。
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
 """
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.5}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                if response.status != 200:
-                    logger.warning(f"對話摘要失敗：狀態碼={response.status}")
-                    return {"theme": "一般", "keywords": []}
-                data = await response.json()
-                result = json.loads(data["choices"][0]["message"]["content"])
-                logger.info(f"對話摘要成功：result={result}")
-                return result
-        except Exception as e:
-            logger.warning(f"對話摘要錯誤：{str(e)}")
-            return {"theme": "一般", "keywords": []}
+    messages = [{"role": "user", "content": prompt}]
+    response = await call_ai_api(api_type, api_key, messages, base_url=api_base_url, max_tokens=100, temperature=0.5)
+    if "error" in response:
+        logger.warning(f"對話摘要失敗：{response['error']}")
+        return {"theme": "一般", "keywords": []}
+    try:
+        result = json.loads(response["choices"][0]["message"]["content"])
+        logger.info(f"對話摘要成功：result={result}")
+        return result
+    except Exception as e:
+        logger.warning(f"對話摘要錯誤：{str(e)}")
+        return {"theme": "一般", "keywords": []}
 
-async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
+async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None, api_type="grok", api_base_url=None):
     conversation_context = conversation_context or []
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
-        logger.error("缺少 Grok 3 API 密鑰")
+        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
         return {
             "direct_response": True,
             "intents": [{"intent": "general_query", "confidence": 0.5, "reason": "缺少 API 密鑰"}],
@@ -119,8 +230,8 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
             "reason": "缺少 API 密鑰",
             "theme_keywords": [],
         }
-    logger.info(f"開始語義分析：查詢={user_query}")
-    parsed_query = await parse_query(user_query, conversation_context, api_key, source_type)
+    logger.info(f"開始語義分析：查詢={user_query}, API={api_type}")
+    parsed_query = await parse_query(user_query, conversation_context, api_key, source_type, api_type, api_base_url)
     intents = parsed_query.get("intents", [])
     if not intents:
         intents = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "無法識別有效意圖，默認總結"}]
@@ -129,8 +240,8 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     top_thread_ids = parsed_query.get("thread_ids", [])
     reason = parsed_query.get("reason", "無原因")
     confidence = parsed_query.get("confidence", 0.5)
-    post_limit = max(3, min(15, parsed_query.get("post_limit", 5)))  # 確保 post_limit 在 3 到 15
-    context_summary = await summarize_context(conversation_context)
+    post_limit = max(3, min(15, parsed_query.get("post_limit", 5)))
+    context_summary = await summarize_context(conversation_context, api_type, api_base_url)
     historical_theme = context_summary.get("theme", "一般")
     historical_keywords = context_summary.get("keywords", [])
     is_vague = len(query_keywords) < 2 and not any(keyword in user_query for keyword in ["分析", "總結", "討論", "主題", "時事"]) and not any(i["intent"] == "list_titles" and i["confidence"] >= 0.9 for i in intents)
@@ -140,7 +251,6 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
     theme = historical_theme if is_vague else (query_keywords[0] if query_keywords else "一般")
     theme_keywords = historical_keywords if is_vague else query_keywords
     primary_intent = max(intents, key=lambda x: x["confidence"])["intent"]
-    # 內聯 get_intent_processing_params 邏輯
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
     if source_type.lower() in sort_override:
@@ -170,12 +280,12 @@ async def analyze_and_screen(user_query, source_name, source_id, source_type="li
         "theme_keywords": theme_keywords,
     }
 
-async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, source_type="lihkg", intents=["summarize_posts"], post_limit=5):
-    logger.info(f"正在排序帖子：查詢={user_query}, 帖子數={len(threads)}, 意圖={intents}, post_limit={post_limit}")
+async def prioritize_threads_with_grok(user_query, threads, source_name, source_id, source_type="lihkg", intents=["summarize_posts"], post_limit=5, api_type="grok", api_base_url=None):
+    logger.info(f"正在排序帖子：查詢={user_query}, 帖子數={len(threads)}, 意圖={intents}, post_limit={post_limit}, API={api_type}")
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
-        logger.error("缺少 Grok 3 API 密鑰")
+        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
         return {"top_thread_ids": [], "reason": "缺少 API 密鑰", "intent_breakdown": []}
     
     max_threads = 50
@@ -186,7 +296,7 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
         referenced_thread_ids = re.findall(r"\[帖子 ID: (\w+)\]", st.session_state.get("conversation_context", [])[-1].get("content", "") if st.session_state.get("conversation_context") else "")
         valid_ids = [tid for tid in referenced_thread_ids if any(str(t["thread_id"]) == tid for t in threads)]
         if valid_ids:
-            valid_ids = valid_ids[:post_limit]  # 尊重 post_limit
+            valid_ids = valid_ids[:post_limit]
             logger.info(f"檢測到追問意圖，使用參考帖子 ID: {valid_ids}")
             return {"top_thread_ids": valid_ids, "reason": "追問參考帖子", "intent_breakdown": [{"intent": "follow_up", "thread_ids": valid_ids}]}
     
@@ -212,53 +322,42 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     estimated_tokens = prompt_length // 4
     logger.info(f"創建提示：長度={prompt_length} 字符, 估計 token={estimated_tokens}, 提示預覽={prompt[:200]}...")
     
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 500, "temperature": 0.7}
-    logger.info(f"API payload: {json.dumps(payload, ensure_ascii=False)[:200]}...")
+    messages = [{"role": "user", "content": prompt}]
+    response = await call_ai_api(api_type, api_key, messages, base_url=api_base_url, max_tokens=500, temperature=0.7)
     
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(2):
-            try:
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    if response.status != 200:
-                        logger.warning(f"API 調用失敗：狀態碼={response.status}, 嘗試={attempt + 1}")
-                        continue
-                    data = await response.json()
-                    if not data.get("choices"):
-                        logger.warning(f"API 調用失敗：無選擇，嘗試={attempt + 1}")
-                        continue
-                    response_content = data["choices"][0]["message"]["content"]
-                    logger.info(f"原始 API 回應：{response_content[:500]}...")
-                    try:
-                        result = json.loads(response_content)
-                        top_thread_ids = [str(tid) for tid in result.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]][:20]  # 最多 20 個
-                        top_thread_ids = top_thread_ids[:post_limit]  # 根據動態 post_limit 裁剪
-                        logger.info(f"API 返回 top_thread_ids: {top_thread_ids}, 原因={result.get('reason', '無原因')}, 最終選取數量={len(top_thread_ids)}")
-                        return {
-                            "top_thread_ids": top_thread_ids,
-                            "reason": result.get("reason", "無原因"),
-                            "intent_breakdown": result.get("intent_breakdown", []),
-                        }
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON 解碼錯誤：{str(e)}, response_content={response_content[:200]}...")
-                        continue
-            except Exception as e:
-                logger.error(f"API 調用錯誤：{str(e)}, 嘗試={attempt + 1}")
-                if attempt < 1:
-                    await asyncio.sleep(2)
-                    continue
-                sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
-                top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]][:post_limit]  # 回退時也尊重 post_limit
-                logger.info(f"回退到熱門度排序：top_thread_ids={top_thread_ids}, 原因=API 失敗 ({str(e)}), 最終選取數量={len(top_thread_ids)}")
-                return {
-                    "top_thread_ids": top_thread_ids,
-                    "reason": f"排序失敗（{str(e)}），回退到熱門度排序",
-                    "intent_breakdown": [],
-                }
-    logger.warning(f"排序失敗，所有嘗試均失敗")
-    return {"top_thread_ids": [], "reason": "排序失敗，所有嘗試均失敗", "intent_breakdown": []}
+    if "error" in response:
+        logger.warning(f"API 調用失敗：{response['error']}")
+        sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+        top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]][:post_limit]
+        logger.info(f"回退到熱門度排序：top_thread_ids={top_thread_ids}, 原因=API 失敗 ({response['error']})")
+        return {
+            "top_thread_ids": top_thread_ids,
+            "reason": f"排序失敗（{response['error']}），回退到熱門度排序",
+            "intent_breakdown": [],
+        }
+    
+    try:
+        result = json.loads(response["choices"][0]["message"]["content"])
+        top_thread_ids = [str(tid) for tid in result.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]][:20]
+        top_thread_ids = top_thread_ids[:post_limit]
+        logger.info(f"API 返回 top_thread_ids: {top_thread_ids}, 原因={result.get('reason', '無原因')}")
+        return {
+            "top_thread_ids": top_thread_ids,
+            "reason": result.get("reason", "無原因"),
+            "intent_breakdown": result.get("intent_breakdown", []),
+        }
+    except Exception as e:
+        logger.error(f"JSON 解碼錯誤：{str(e)}")
+        sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+        top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]][:post_limit]
+        logger.info(f"回退到熱門度排序：top_thread_ids={top_thread_ids}, 原因=JSON 錯誤 ({str(e)})")
+        return {
+            "top_thread_ids": top_thread_ids,
+            "reason": f"排序失敗（{str(e)}），回退到熱門度排序",
+            "intent_breakdown": [],
+        }
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg", api_type="grok", api_base_url=None):
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     selected_source = normalize_selected_source(selected_source, source_type)
@@ -273,10 +372,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield error_msg
         return
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
-        logger.error("缺少 Grok 3 API 密鑰")
-        yield "錯誤：缺少 API 密鑰"
+        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
+        yield f"錯誤：缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"
         return
     intents_info = processing.get("analysis", {}).get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "默認意圖"}])
     intents = [i["intent"] for i in intents_info if i["intent"] is not None]
@@ -284,14 +383,13 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents = ["summarize_posts"]
         logger.warning(f"無有效意圖，回退到：{intents}")
     primary_intent = max(intents_info, key=lambda x: x["confidence"])["intent"]
-    # 內聯 get_intent_processing_params 邏輯
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
     if source_type.lower() in sort_override:
         intent_params["sort"] = sort_override[source_type.lower()]
     if source_type.lower() == "lihkg" and intent_params.get("sort") == "confidence":
         intent_params["sort"] = "hot"
-    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}")
+    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}, API={api_type}")
     total_min_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][0] / 0.8 for intent in intents)
     total_max_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
@@ -323,7 +421,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
             "no_of_reply": data.get("no_of_reply", 0),
         }
-    prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
+    prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key, api_type, api_base_url)
     prompt_length = len(prompt)
     estimated_tokens = prompt_length // 4
     prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
@@ -347,7 +445,7 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
             total_replies_count += len(replies)
             filtered_thread_data[tid]["replies"] = replies
             filtered_thread_data[tid]["total_fetched_replies"] = len(replies)
-        prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
+        prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key, api_type, api_base_url)
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4
         prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
@@ -355,83 +453,82 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         reduction_attempts += 1
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"提示長度 {prompt_length} 超過限制 {GROK3_TOKEN_LIMIT}，無法進一步縮減")
-        yield "錯誤：提示過大，請縮減查詢範圍或聯繫 xAI 支持：https://x.ai/api。"
+        yield f"錯誤：提示過大，請縮減查詢範圍或聯繫支持。"
         return
     logger.info(f"生成提示：查詢={user_query}, 提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, 意圖={intents}, 提示摘要={prompt_summary}")
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    payload = {
-        "model": "grok-3",
-        "messages": [
-            {
-                "role": "system",
-                "content": f"你是社交媒體數據助手，以繁體中文回答，語氣客觀輕鬆，使用 [帖子 ID: {{thread_id}}] 格式引用帖子。",
-            },
-            *conversation_context,
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.7,
-        "stream": True,
-    }
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(2):
-            try:
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                    if response.status != 200:
-                        logger.error(f"API 失敗：狀態碼={response.status}, 嘗試={attempt + 1}")
-                        if attempt < 1:
-                            await asyncio.sleep(2)
-                        continue
-                    response_content = ""
-                    prompt_tokens = 0
-                    completion_tokens = 0
-                    async for line in response.content:
-                        if line and not line.isspace():
-                            line_str = line.decode("utf-8").strip()
-                            if line_str == "data: [DONE]":
-                                break
-                            if line_str.startswith("data:"):
-                                try:
-                                    chunk = json.loads(line_str[6:])
-                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        cleaned_content = clean_response(content)
-                                        response_content += cleaned_content
-                                        yield cleaned_content
-                                    usage = chunk.get("usage", {})
-                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
-                                except json.JSONDecodeError:
-                                    continue
-                    logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
-                    return
-            except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
-                logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}")
+    messages = [
+        {
+            "role": "system",
+            "content": f"你是社交媒體數據助手，以繁體中文回答，語氣客觀輕鬆，使用 [帖子 ID: {{thread_id}}] 格式引用帖子。",
+        },
+        *conversation_context,
+        {"role": "user", "content": prompt},
+    ]
+    client = AIClient(api_type, api_key, api_base_url)
+    for attempt in range(2):
+        try:
+            response, rate_limit_info = await call_ai_api(api_type, api_key, messages, api_base_url, max_tokens=max_tokens, temperature=0.7, stream=True)
+            if "error" in response:
+                logger.error(f"API 失敗：{response['error']}")
                 if attempt < 1:
                     await asyncio.sleep(2)
                     continue
-                logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
-                payload["stream"] = False
-                payload["max_tokens"] = max_tokens // 2
-                try:
-                    async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
-                        if response.status != 200:
-                            logger.error(f"非流式 API 失敗：狀態碼={response.status}")
-                            yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
-                            return
-                        data = await response.json()
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                yield f"錯誤：生成回應失敗（{response['error']}）。請稍後重試。"
+                return
+            response_content = ""
+            prompt_tokens = 0
+            completion_tokens = 0
+            if api_type == "grok":
+                async for line in response.content:
+                    if line and not line.isspace():
+                        line_str = line.decode("utf-8").strip()
+                        if line_str == "data: [DONE]":
+                            break
+                        if line_str.startswith("data:"):
+                            try:
+                                chunk = json.loads(line_str[6:])
+                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    cleaned_content = clean_response(content)
+                                    response_content += cleaned_content
+                                    yield cleaned_content
+                                usage = chunk.get("usage", {})
+                                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                                completion_tokens = usage.get("completion_tokens", completion_tokens)
+                            except json.JSONDecodeError:
+                                continue
+            else:  # chatanywhere
+                async for chunk in response:
+                    content = chunk.choices[0].delta.content if chunk.choices else ""
+                    if content:
                         cleaned_content = clean_response(content)
-                        logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={data.get('usage', {}).get('prompt_tokens', 0)}")
+                        response_content += cleaned_content
                         yield cleaned_content
-                        return
-                except Exception as e:
-                    logger.error(f"非流式 API 錯誤：{str(e)}")
-                    yield f"錯誤：生成回應失敗（{str(e)}）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
-                    return
-        yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
+                    # ChatAnywhere 不提供即時 usage，需在非流式調用中獲取
+            logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
+            await client.close()
+            return
+        except Exception as e:
+            logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}")
+            if attempt < 1:
+                await asyncio.sleep(2)
+                continue
+            logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
+            response = await call_ai_api(api_type, api_key, messages, api_base_url, max_tokens=max_tokens // 2, temperature=0.7, stream=False)
+            await client.close()
+            if "error" in response:
+                logger.error(f"非流式 API 失敗：{response['error']}")
+                yield f"錯誤：生成回應失敗（{response['error']}）。請稍後重試。"
+                return
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            cleaned_content = clean_response(content)
+            logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}")
+            yield cleaned_content
+            return
+    await client.close()
+    yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫支持。"
 
-async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
+async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None, api_type="grok", api_base_url=None):
     if source_type == "lihkg":
         configure_lihkg_api_logger()
     else:
@@ -449,40 +546,39 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "analysis": analysis,
         }
     try:
-        api_key = st.secrets["grok3key"]
+        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
     except KeyError:
         return {
             "selected_source": selected_source,
             "thread_data": [],
-            "rate_limit_info": [{"message": "缺少 API 密鑰"}],
+            "rate_limit_info": [{"message": f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
             "analysis": analysis,
         }
-    analysis = analysis or await analyze_and_screen(user_query, selected_source["source_name"], source_id, source_type, conversation_context)
+    analysis = analysis or await analyze_and_screen(user_query, selected_source["source_name"], source_id, source_type, conversation_context, api_type, api_base_url)
     primary_intent = max(analysis.get("intents", [{"intent": "summarize_posts", "confidence": 0.7}]), key=lambda x: x["confidence"])["intent"]
-    # 內聯 get_intent_processing_params 邏輯
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
     if source_type.lower() in sort_override:
         sort = intent_params["sort"] = sort_override[source_type.lower()]
     if source_type.lower() == "lihkg" and intent_params.get("sort") == "confidence":
         sort = intent_params["sort"] = "hot"
-    post_limit = max(3, min(15, analysis.get("post_limit", 5)))  # 確保 post_limit 在 3 到 15
+    post_limit = max(3, min(15, analysis.get("post_limit", 5)))
     top_thread_ids = list(set(analysis.get("top_thread_ids", [])))
-    keyword_result = await extract_keywords(user_query, conversation_context, api_key, source_type)
+    keyword_result = await extract_keywords(user_query, conversation_context, api_key, source_type, api_type, api_base_url)
     max_replies = intent_params.get("max_replies", 100)
     max_comments = intent_params.get("max_replies", 100) if source_type == "reddit" else 100
     thread_data = []
     rate_limit_info = []
     processed_thread_ids = set()
     
-    logger.info(f"處理查詢：查詢={user_query}, post_limit={post_limit}, 意圖={primary_intent}")
+    logger.info(f"處理查詢：查詢={user_query}, post_limit={post_limit}, 意圖={primary_intent}, API={api_type}")
     
     try:
         if top_thread_ids and primary_intent in ["fetch_thread_by_id", "follow_up", "analyze_sentiment"]:
-            for thread_id in top_thread_ids[:post_limit]:  # 尊重 post_limit
+            for thread_id in top_thread_ids[:post_limit]:
                 thread_id_str = str(thread_id)
                 if thread_id_str in processed_thread_ids:
                     continue
@@ -553,7 +649,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                         initial_threads = initial_threads[:150]
                         break
                     if progress_callback:
-                        progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0.2 * (page / 3), {"current_page": page, "total_pages": 3})
+                        progress_callback(f"已抓取第 {page}/3 頁", 0.1 + 0. chekcked out: 2.0, 2)
             filtered_items = [item for item in initial_threads if item.get("no_of_reply", 0) >= intent_params.get("min_replies", 10)]
             logger.info(f"初始帖子數量: {len(initial_threads)}, 過濾後帖子數量: {len(filtered_items)}, post_limit={post_limit}")
             for item in initial_threads:
@@ -578,7 +674,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                 candidate_threads = sorted(filtered_items, key=lambda x: x.get("last_reply_time", "1970-01-01 00:00:00"), reverse=True)[:post_limit]
             else:
                 if filtered_items:
-                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_source["source_name"], source_id, source_type, [primary_intent], post_limit)
+                    prioritization = await prioritize_threads_with_grok(user_query, filtered_items, selected_source["source_name"], source_id, source_type, [primary_intent], post_limit, api_type, api_base_url)
                     top_thread_ids = prioritization.get("top_thread_ids", [])
                     logger.info(f"優先排序結果: top_thread_ids={top_thread_ids}, 原因={prioritization.get('reason', '無原因')}, 最終選取數量={len(top_thread_ids)}")
                     valid_thread_ids = [tid for tid in top_thread_ids if str(tid) in [str(item["thread_id"]) for item in filtered_items]]
@@ -656,7 +752,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                             st.session_state.thread_cache[thread_id] = {"data": thread_info, "timestamp": time.time()}
         if len(thread_data) < post_limit and primary_intent == "follow_up":
             supplemental_result = await (get_lihkg_topic_list(cat_id=source_id, start_page=1, max_pages=2) if source_type == "lihkg" else get_reddit_topic_list(subreddit=source_id, start_page=1, max_pages=2, sort=sort))
-            supplemental_threads = [item for item in supplemental_result.get("items", []) if str(item["thread_id"]) not in top_thread_ids and any(kw.lower() in item["title"].lower() for kw in keyword_result.get("keywords", ["新話題"]))][:post_limit - len(thread_data)]  # 尊重 post_limit
+            supplemental_threads = [item for item in supplemental_result.get("items", []) if str(item["thread_id"]) not in top_thread_ids and any(kw.lower() in item["title"].lower() for kw in keyword_result.get("keywords", ["新話題"]))][:post_limit - len(thread_data)]
             logger.info(f"補充帖子: 數量={len(supplemental_threads)}, 帖子 ID={[item['thread_id'] for item in supplemental_threads]}")
             for item in supplemental_threads:
                 thread_id = str(item["thread_id"])
@@ -686,7 +782,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                                 "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                             }
-                            for reply in result.get("replies", []) 
+                            for reply in result.get("replies", [])
                             if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                         ]
                         total_replies = result.get("total_replies", item.get("no_of_reply", 0))
@@ -714,7 +810,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "thread_data": thread_data,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            " humanities": [],
+            "humanities": [],
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
             "analysis": analysis,
@@ -739,15 +835,16 @@ async def process_user_question(user_query, selected_source, source_id, source_t
         }
 
 def clean_cache(max_age=3600):
-    current_time = time.time()
-    expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
-    for key in expired_keys:
-        del st.session_state.thread_cache[key]
-    if len(st.session_state.thread_cache) > MAX_CACHE_SIZE:
-        sorted_keys = sorted(st.session_state.thread_cache.items(), key=lambda x: x[1]["timestamp"])[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]
-        for key, _ in sorted_keys:
+    async with cache_lock:
+        current_time = time.time()
+        expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
+        for key in expired_keys:
             del st.session_state.thread_cache[key]
-        logger.info(f"清理緩存，移除 {len(sorted_keys)} 個條目，當前大小：{len(st.session_state.thread_cache)}")
+        if len(st.session_state.thread_cache) > MAX_CACHE_SIZE:
+            sorted_keys = sorted(st.session_state.thread_cache.items(), key=lambda x: x[1]["timestamp"])[:len(st.session_state.thread_cache) - MAX_CACHE_SIZE]
+            for key, _ in sorted_keys:
+                del st.session_state.thread_cache[key]
+            logger.info(f"清理緩存，移除 {len(sorted_keys)} 個條目，當前大小：{len(st.session_state.thread_cache)}")
 
 def configure_lihkg_api_logger():
     configure_logger("lihkg_api", "lihkg_api.log")
