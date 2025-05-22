@@ -68,14 +68,22 @@ class RedditClientManager:
             try:
                 user = await reddit.user.me()
                 logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
-                # 檢查速率限制頭部
-                response = await reddit.get("api/v1/me")
-                headers = response.headers
-                logger.info(
-                    f"客戶端 {client_idx} 速率限制資訊："
-                    f"X-Ratelimit-Remaining={headers.get('X-Ratelimit-Remaining', '未知')}, "
-                    f"X-Ratelimit-Reset={headers.get('X-Ratelimit-Reset', '未知')}"
-                )
+                # 嘗試獲取速率限制資訊
+                try:
+                    response = await reddit.get("api/v1/me")
+                    logger.debug(f"客戶端 {client_idx} API 回應：{response}")
+                    # 檢查回應是否為字典
+                    if isinstance(response, dict):
+                        logger.info(f"客戶端 {client_idx} 速率限制資訊：無法直接獲取 headers，回應為字典")
+                    else:
+                        headers = getattr(response, 'headers', {})
+                        logger.info(
+                            f"客戶端 {client_idx} 速率限制資訊："
+                            f"X-Ratelimit-Remaining={headers.get('X-Ratelimit-Remaining', '未知')}, "
+                            f"X-Ratelimit-Reset={headers.get('X-Ratelimit-Reset', '未知')}"
+                        )
+                except Exception as e:
+                    logger.warning(f"客戶端 {client_idx} 無法獲取速率限制資訊：{str(e)}")
                 return reddit
             except asyncpraw.exceptions.RedditAPIException as e:
                 logger.error(
@@ -550,7 +558,7 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
                     "rate_limit_info": rate_limit_info,
                     "request_counter": client_manager.request_counters[client_manager.current_client_index % len(client_manager.clients)],
                     "last_reset": client_manager.last_resets[client_manager.current_client_index % len(client_manager.clients)],
-                     "rate_limit_until": 0,
+                    "rate_limit_until": 0,
                     "total_posts": 0,
                     "total_replies": 0
                 }
