@@ -534,7 +534,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
     else:
         configure_reddit_api_logger()
     selected_source = normalize_selected_source(selected_source, source_type)
-    clean_cache()
+    await clean_cache()
     if rate_limit_until > time.time():
         return {
             "selected_source": selected_source,
@@ -782,8 +782,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
                                 "dislike_count": reply.get("dislike_count", 0) if source_type == "lihkg" else 0,
                                 "reply_time": unix_to_readable(reply.get("reply_time", "0"), context=f"supplemental reply in thread {thread_id}"),
                             }
-                            for reply in result.get("replies", [])
-                            if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
+                            for reply in result.get("replies", []) if reply.get("msg") and clean_html(reply.get("msg")) not in ["[無內容]", "[圖片]", "[表情符號]"] and len(clean_html(reply.get("msg")).strip()) > 7
                         ]
                         total_replies = result.get("total_replies", item.get("no_of_reply", 0))
                         if total_replies == 0:
@@ -834,7 +833,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "error": str(e),
         }
 
-def clean_cache(max_age=3600):
+async def clean_cache(max_age=3600):
     async with cache_lock:
         current_time = time.time()
         expired_keys = [key for key, value in st.session_state.thread_cache.items() if current_time - value["timestamp"] > max_age]
