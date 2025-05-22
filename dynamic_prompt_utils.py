@@ -249,10 +249,11 @@ async def call_ai_api(api_type: str, api_key: str, messages: List[dict], base_ur
     # Use different endpoints based on api_type
     endpoint = "/chat/completions" if api_type == "grok" else "/completions"
     base_url = base_url or GROK3_API_URL
-    url = f"{base_url.rstrip('/')}{endpoint}"
+    url = f"{base_url.rstrip('/')}{endpoint}"  # 修正 URL 拼接
     
-    # Set model based on api_type
-    model = model or ("grok-3" if api_type == "grok" else "gpt-3.5-turbo")
+    # Set model based on api_type with fallback for ChatAnywhere
+    models_to_try = ["gpt-3.5-turbo", "deepseek-r1", "deepseek-v3"] if api_type == "chatanywhere" else ["grok-3"]
+    model = model or models_to_try[0]
     
     payload = {
         "model": model,
@@ -262,84 +263,88 @@ async def call_ai_api(api_type: str, api_key: str, messages: List[dict], base_ur
         "stream": stream
     }
     
-    logger.info(f"Calling API: type={api_type}, url={url}, stream={stream}, payload={json.dumps(payload, ensure_ascii=False)[:200]}...")
+    logger.info(f"Calling API: type={api_type}, url={url}, model={model}, stream={stream}, payload_size={len(json.dumps(payload, ensure_ascii=False))} chars...")
     
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as response:
-                if response.status != 200:
-                    error_message = await response.text()
-                    logger.warning(f"API call failed: status={response.status}, message={error_message}, url={url}")
-                    # Fallback to non-streaming if streaming fails
-                    if stream and response.status in (403, 429):
-                        logger.info(f"Streaming failed, retrying with stream=False: status={response.status}, url={url}")
-                        payload["stream"] = False
-                        async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
-                            if retry_response.status != 200:
-                                retry_error = await retry_response.text()
-                                logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}")
-                                return None
-                            data = await retry_response.json()
-                            logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
-                            return data
-                    return None
-                
-                if stream:
-                    if response.content_type != "text/event-stream":
-                        logger.error(f"Unexpected content type: {response.content_type}, expected text/event-stream, url={url}")
-                        # Fallback to non-streaming
-                        logger.info(f"Streaming content type invalid, retrying with stream=False: content_type={response.content_type}, url={url}")
-                        payload["stream"] = False
-                        async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
-                            if retry_response.status != 200:
-                                retry_error = await retry_response.text()
-                                logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}")
-                                return None
-                            data = await retry_response.json()
-                            logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
-                            return data
-                    async def stream_response():
-                        try:
-                            async for line in response.content:
-                                if line and not line.isspace():
-                                    line_str = line.decode("utf-8").strip()
-                                    if line_str == "data: [DONE]":
-                                        break
-                                    if line_str.startswith("data:"):
-                                        try:
-                                            chunk = json.loads(line_str[5:])
-                                            yield chunk
-                                        except json.JSONDecodeError as e:
-                                            logger.warning(f"Failed to parse stream chunk: {line_str}, error={str(e)}")
-                                            continue
-                                yield line_str
-                        finally:
-                            await response.release()
-                    logger.info(f"Streaming API call successful: status={response.status}, url={url}")
-                    return stream_response()
-                else:
-                    data = await response.json()
-                    logger.info(f"Non-streaming API call successful: status={response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
-                    return data
-        except aiohttp.ClientError as e:
-            logger.error(f"API call error: {str(e)}, url={url}, payload={json.dumps(payload, ensure_ascii=False)[:200]}...")
-            # Fallback to non-streaming for network errors
-            if stream:
-                logger.info(f"Streaming network error, retrying with stream=False: error={str(e)}, url={url}")
-                payload["stream"] = False
-                try:
-                    async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
-                        if retry_response.status != 200:
-                            retry_error = await retry_response.text()
-                            logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}")
-                            return None
-                        data = await retry_response.json()
-                        logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
+        for model in models_to_try:
+            payload["model"] = model
+            try:
+                async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as response:
+                    if response.status != 200:
+                        error_message = await response.text()
+                        logger.warning(f"API call failed: status={response.status}, message={error_message}, url={url}, model={model}")
+                        # Fallback to non-streaming if streaming fails
+                        if stream and response.status in (403, 429):
+                            logger.info(f"Streaming failed, retrying with stream=False: status={response.status}, url={url}, model={model}")
+                            payload["stream"] = False
+                            async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
+                                if retry_response.status != 200:
+                                    retry_error = await retry_response.text()
+                                    logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}, model={model}")
+                                    continue
+                                data = await retry_response.json()
+                                logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
+                                return data
+                        continue
+                    
+                    if stream:
+                        if response.content_type != "text/event-stream":
+                            logger.error(f"Unexpected content type: {response.content_type}, expected text/event-stream, url={url}, model={model}")
+                            # Fallback to non-streaming
+                            logger.info(f"Streaming content type invalid, retrying with stream=False: content_type={response.content_type}, url={url}, model={model}")
+                            payload["stream"] = False
+                            async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
+                                if retry_response.status != 200:
+                                    retry_error = await retry_response.text()
+                                    logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}, model={model}")
+                                    continue
+                                data = await retry_response.json()
+                                logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}...")
+                                return data
+                        async def stream_response():
+                            try:
+                                async for line in response.content:
+                                    if line and not line.isspace():
+                                        line_str = line.decode("utf-8").strip()
+                                        if line_str == "data: [DONE]":
+                                            break
+                                        if line_str.startswith("data:"):
+                                            try:
+                                                chunk = json.loads(line_str[5:])
+                                                yield chunk
+                                            except json.JSONDecodeError as e:
+                                                logger.warning(f"Failed to parse stream chunk: {line_str}, error={str(e)}")
+                                                continue
+                                        yield line_str
+                            finally:
+                                await response.release()
+                        logger.info(f"Streaming API call successful: status={response.status}, url={url}, model={model}")
+                        return stream_response()
+                    else:
+                        data = await response.json()
+                        logger.info(f"Non-streaming API call successful: status={response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}..., model={model}")
                         return data
-                except aiohttp.ClientError as retry_e:
-                    logger.error(f"Non-streaming retry error: {str(retry_e)}, url={url}")
-                    return None
-            return None
+            except aiohttp.ClientError as e:
+                logger.error(f"API call error: {str(e)}, url={url}, model={model}, payload_size={len(json.dumps(payload, ensure_ascii=False))} chars...")
+                # Fallback to non-streaming for network errors
+                if stream:
+                    logger.info(f"Streaming network error, retrying with stream=False: error={str(e)}, url={url}, model={model}")
+                    payload["stream"] = False
+                    try:
+                        async with session.post(url, headers=headers, json=payload, timeout=CONFIG["parse_timeout"]) as retry_response:
+                            if retry_response.status != 200:
+                                retry_error = await retry_response.text()
+                                logger.warning(f"Non-streaming retry failed: status={retry_response.status}, message={retry_error}, url={url}, model={model}")
+                                continue
+                            data = await retry_response.json()
+                            logger.info(f"Non-streaming retry successful: status={retry_response.status}, response={json.dumps(data, ensure_ascii=False)[:200]}..., model={model}")
+                            return data
+                    except aiohttp.ClientError as retry_e:
+                        logger.error(f"Non-streaming retry error: {str(retry_e)}, url={url}, model={model}")
+                        continue
+                continue
+        logger.error(f"All model attempts failed for {api_type}: models={models_to_try}, url={url}")
+        return None
 
 async def call_grok3_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
     """Unified Grok 3 API call handler with detailed logging and JSON fix."""
