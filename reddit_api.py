@@ -68,11 +68,9 @@ class RedditClientManager:
             try:
                 user = await reddit.user.me()
                 logger.info(f"Reddit 客戶端 {client_idx} 初始化成功，已認證用戶：{user.name}")
-                # 嘗試獲取速率限制資訊
                 try:
                     response = await reddit.get("api/v1/me")
                     logger.debug(f"客戶端 {client_idx} API 回應：{response}")
-                    # 檢查回應是否為字典
                     if isinstance(response, dict):
                         logger.info(f"客戶端 {client_idx} 速率限制資訊：無法直接獲取 headers，回應為字典")
                     else:
@@ -93,8 +91,9 @@ class RedditClientManager:
                     f"回應正文：{getattr(e, 'response', {}).get('text', '無正文資訊')}"
                 )
                 raise
-            finally:
-                await reddit.close()
+            except Exception as e:
+                logger.error(f"Reddit 客戶端 {client_idx} 初始化失敗：{str(e)}")
+                raise
         except KeyError as e:
             logger.error(f"缺少 Secrets 配置（客戶端 {client_idx}）：{str(e)}")
             raise
@@ -104,6 +103,9 @@ class RedditClientManager:
                 f"可能原因：憑證無效、帳戶受限或網路問題"
             )
             raise
+        finally:
+            if 'reddit' in locals():
+                await reddit.close()
 
     async def _handle_rate_limit(self, client_idx):
         if self.request_counters[client_idx] >= self.rate_limit_requests_per_minute:
@@ -146,8 +148,6 @@ async def get_subreddit_name(subreddit):
         except Exception as e:
             logger.error(f"獲取子版名稱失敗：{str(e)}")
             return "未知子版"
-        finally:
-            await reddit.close()
 
 async def format_submission(submission):
     hk_time = datetime.fromtimestamp(submission.created_utc, tz=HONG_KONG_TZ)
@@ -253,9 +253,10 @@ async def get_reddit_topic_list(subreddit, start_page=1, max_pages=1, sort="conf
             )
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         except Exception as e:
-            logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}")
+            logger.error(f"抓取貼文列表失敗：子版={subreddit}, 錯誤={str(e)}", exc_info=True)
             rate_limit_info.append({"message": f"抓取子版 {subreddit} 失敗：{str(e)}"})
         finally:
+            # 確保在退出時關閉客戶端
             await reddit.close()
         
         return {
@@ -362,8 +363,6 @@ async def collect_more_comments(reddit, submission, max_comments, request_counte
     except Exception as e:
         logger.error(f"收集評論失敗：貼文ID={submission.id}, 錯誤={str(e)}")
         return comments[:max_comments], request_counter, last_reset
-    finally:
-        await reddit.close()
 
 async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_counter, last_reset, sort="confidence"):
     if not post_id or not post_id.strip() or post_id.lower() == "id":
@@ -521,8 +520,6 @@ async def fetch_single_thread(post_id, subreddit, max_comments, reddit, request_
             "last_reset": last_reset,
             "rate_limit_until": 0
         }, request_counter, last_reset
-    finally:
-        await reddit.close()
 
 async def get_reddit_thread_content(post_id, subreddit, max_comments=100, sort="confidence"):
     async with client_manager.get_client() as reddit:
@@ -534,8 +531,9 @@ async def get_reddit_thread_content(post_id, subreddit, max_comments=100, sort="
                 sort=sort
             )
             return result
-        finally:
-            await reddit.close()
+        except Exception as e:
+            logger.error(f"抓取單篇貼文內容失敗：貼文ID={post_id}, 錯誤={str(e)}")
+            raise
 
 async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100, sort="confidence"):
     results = []
@@ -640,8 +638,6 @@ async def get_reddit_thread_content_batch(post_ids, subreddit, max_comments=100,
         except Exception as e:
             logger.error(f"批次抓取貼文內容失敗：{str(e)}")
             rate_limit_info.append({"message": f"批次抓取貼文失敗：{str(e)}"})
-        finally:
-            await reddit.close()
         
         return {
             "results": results,
