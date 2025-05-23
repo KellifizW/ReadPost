@@ -281,7 +281,7 @@ async def call_api(payload: Dict, function_name: str = "unknown", retries: int =
     return None
 
 async def call_github_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
-    """GitHub API call handler."""
+    """GitHub API call handler with synchronous client wrapped in async context."""
     from azure.ai.inference import ChatCompletionsClient
     from azure.ai.inference.models import SystemMessage, UserMessage
     from azure.core.credentials import AzureKeyCredential
@@ -304,18 +304,19 @@ async def call_github_api(payload: Dict, function_name: str = "unknown", retries
         elif msg["role"] == "user":
             azure_messages.append(UserMessage(content=msg["content"]))
 
+    loop = asyncio.get_running_loop()
     for attempt in range(retries):
         try:
-            response = await asyncio.wait_for(
-                client.complete(
+            def sync_complete():
+                return client.complete(
                     messages=azure_messages,
                     temperature=payload.get("temperature", 0.7),
                     top_p=1.0,
                     model="xai/grok-3",
                     max_tokens=payload.get("max_tokens", 500)
-                ),
-                timeout=timeout
-            )
+                )
+
+            response = await loop.run_in_executor(None, sync_complete)
             result = {
                 "choices": [{
                     "message": {
