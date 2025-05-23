@@ -237,44 +237,54 @@ CONFIG = {
     "intent_confidence_threshold": 0.75
 }
 
-async def call_grok3_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
-    """Unified Grok 3 API call handler with detailed logging and JSON fix."""
+async def call_ai_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
+    """Unified AI API call handler for Grok 3 or ChatAnywhere with detailed logging and JSON fix."""
+    ai_engine = st.session_state.get("ai_engine", "grok3")
     try:
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
+        if ai_engine == "grok3":
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
+            api_url = GROK3_API_URL
+        else:  # chatanywhere
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['chatanywherekey']}"}
+            api_url = "https://api.chatanywhere.tech/v1/chat/completions"
+            # 調整 payload 以符合 ChatAnywhere 的模型名稱
+            payload = payload.copy()
+            payload["model"] = "gpt-3.5-turbo"
     except KeyError:
-        logger.error(f"API call failed in {function_name}: Missing Grok 3 API key")
+        logger.error(f"API call failed in {function_name}: Missing API key for {ai_engine}")
         return None
 
     async with aiohttp.ClientSession() as session:
         for attempt in range(retries):
             try:
-                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=timeout) as response:
+                async with session.post(api_url, headers=headers, json=payload, timeout=timeout) as response:
                     if response.status != 200:
-                        logger.warning(f"API call failed in {function_name}: status={response.status}, attempt={attempt + 1}")
+                        logger.warning(f"API call failed in {function_name}: status={response.status}, attempt={attempt + 1}, engine={ai_engine}")
                         if attempt < retries - 1:
                             await asyncio.sleep(2)
                         continue
                     data = await response.json()
                     if not data.get("choices"):
-                        logger.warning(f"API call failed in {function_name}: no choices, attempt={attempt + 1}")
+                        logger.warning(f"API call failed in {function_name}: no choices, attempt={attempt + 1}, engine={ai_engine}")
                         if attempt < retries - 1:
                             await asyncio.sleep(2)
                         continue
                     logger.info(
                         f"API call in {function_name}: status={response.status}, "
                         f"prompt_tokens={data.get('usage', {}).get('prompt_tokens', 0)}, "
-                        f"completion_tokens={data.get('usage', {}).get('completion_tokens', 0)}"
+                        f"completion_tokens={data.get('usage', {}).get('completion_tokens', 0)}, "
+                        f"engine={ai_engine}"
                     )
                     return data
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error(f"API call error in {function_name}: {str(e)}, attempt={attempt + 1}")
+                logger.error(f"API call error in {function_name}: {str(e)}, attempt={attempt + 1}, engine={ai_engine}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2)
             except json.JSONDecodeError as e:
-                logger.error(f"API response JSON decode error in {function_name}: {str(e)}, attempt={attempt + 1}")
+                logger.error(f"API response JSON decode error in {function_name}: {str(e)}, attempt={attempt + 1}, engine={ai_engine}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2)
-    logger.warning(f"API call failed in {function_name} after {retries} attempts")
+    logger.warning(f"API call failed in {function_name} after {retries} attempts, engine={ai_engine}")
     return None
 
 async def determine_post_limit(query: str, keywords: List[str], intents: List[Dict], source_type: str, grok3_api_key: str) -> int:
