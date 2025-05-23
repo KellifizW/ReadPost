@@ -8,3 +8,4 @@ pydantic
 Jinja2
 tenacity
 openai
+azure-ai-inference
