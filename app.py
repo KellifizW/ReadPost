@@ -58,7 +58,7 @@ def get_source_info(selected_source, source_map):
         source_type, source_id, selected_cat = "lihkg", "1", "LIHKG - 吹水台"
     return source_type, source_id, selected_cat
 
-async def fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, context, api_type, api_base_url):
+async def fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, context):
     cache_key = f"{source_id}_{user_query[:50]}_{','.join([i['intent'] for i in analysis.get('intents', [])])}"
     if cache_key in st.session_state.thread_cache and time.time() - st.session_state.thread_cache[cache_key]["timestamp"] < 300:
         logger.info(f"使用緩存數據，來源：{source_id}，查詢：{user_query}")
@@ -70,9 +70,7 @@ async def fetch_thread_data(user_query, selected_cat, source_id, source_type, an
         source_type=source_type,
         analysis=analysis,
         conversation_context=context,
-        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details),
-        api_type=api_type,
-        api_base_url=api_base_url
+        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
     )
     st.session_state.thread_cache[cache_key] = {"timestamp": time.time(), "data": result}
     return result, 0.55
@@ -90,7 +88,7 @@ def update_progress(message, progress, source_type=None, details=None):
             message += f" (第 {details['current_thread']}/{details['total_threads']} 帖子)"
         elif "wait_time" in details:
             message += f" (等待速率限制 {details['wait_time']:.2f} 秒)"
-    status_text.text(f"正在處理：{message}")
+    status_text.write(f"正在處理：{message}")
     progress_bar.progress(min(max(progress, 0.0), 1.0))
 
 async def main():
@@ -112,22 +110,6 @@ async def main():
         "Reddit - personalfinance": {"source": "reddit", "subreddit": "personalfinance"}, "Reddit - investing": {"source": "reddit", "subreddit": "investing"},
         "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"}, "Reddit - options": {"source": "reddit", "subreddit": "options"}
     }
-
-    # API 選擇選單
-    api_options = {
-        "Grok API": {"type": "grok", "base_url": None},
-        "ChatAnywhere API": {"type": "chatanywhere", "base_url": "https://api.chatanywhere.tech/v1"}
-    }
-    selected_api = st.selectbox("選擇 AI API 來源", list(api_options.keys()), index=0, key="api_select")
-    api_type = api_options[selected_api]["type"]
-    api_base_url = api_options[selected_api]["base_url"]
-
-    # 從 secrets 獲取 API Key
-    try:
-        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
-    except KeyError:
-        st.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰，請在 secrets.toml 中配置")
-        return
 
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -174,7 +156,7 @@ async def main():
         st.session_state.chat_history.append({"question": user_query, "answer": error_message})
         return
 
-    logger.info(f"用戶查詢：{user_query}，來源：{selected_source}，類型：{source_type}，ID：{source_id}，API：{api_type}")
+    logger.info(f"用戶查詢：{user_query}，來源：{selected_source}，類型：{source_type}，ID：{source_id}")
     with st.chat_message("user"):
         st.markdown(user_query)
     st.session_state.awaiting_response = True
@@ -203,18 +185,10 @@ async def main():
         st.session_state.last_user_query = user_query
 
         update_progress("分析問題意圖", 0.15)
-        # 修正：僅傳遞 5 個參數，並添加日誌
-        logger.info(f"調用 analyze_and_screen: user_query={user_query}, source_name={selected_cat}, source_id={source_id}, source_type={source_type}, conversation_context={st.session_state.conversation_context}")
-        analysis = await analyze_and_screen(
-            user_query, selected_cat, source_id, source_type, 
-            st.session_state.conversation_context
-        )
+        analysis = await analyze_and_screen(user_query, selected_cat, source_id, source_type, st.session_state.conversation_context)
         logger.info(f"分析完成：意圖={[i['intent'] for i in analysis.get('intents', [])]}")
 
-        result, progress = await fetch_thread_data(
-            user_query, selected_cat, source_id, source_type, analysis, 
-            st.session_state.conversation_context, api_type, api_base_url
-        )
+        result, progress = await fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, st.session_state.conversation_context)
         update_progress("數據處理完成", progress, source_type)
 
         if result.get("rate_limit_until", 0) > time.time():
@@ -250,9 +224,7 @@ async def main():
                 reason=analysis.get("reason", ""),
                 filters=analysis.get("filters", {}),
                 source_id=source_id,
-                source_type=source_type,
-                api_type=api_type,
-                api_base_url=api_base_url
+                source_type=source_type
             ):
                 response += chunk
                 grok_container.markdown(response)

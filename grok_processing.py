@@ -1,4 +1,3 @@
-# grok_processing.py
 import aiohttp
 import asyncio
 import json
@@ -11,7 +10,7 @@ import pytz
 from lihkg_api import get_lihkg_topic_list, get_lihkg_thread_content
 from reddit_api import get_reddit_topic_list, get_reddit_thread_content
 from logging_config import configure_logger
-from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG, INTENT_CONFIG, call_ai_api
+from dynamic_prompt_utils import build_dynamic_prompt, parse_query, extract_keywords, CONFIG, INTENT_CONFIG
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
 logger = configure_logger(__name__, "grok_processing.log")
@@ -82,33 +81,23 @@ async def summarize_context(conversation_context):
 對話歷史：{json.dumps(conversation_context, ensure_ascii=False)}
 輸出格式：{{"theme": "主要主題", "keywords": ["關鍵詞1", "關鍵詞2", "關鍵詞3"]}}
 """
-    messages = [{"role": "user", "content": prompt}]
-    api_response = await call_ai_api(
-        api_type="grok",
-        api_key=api_key,
-        messages=messages,
-        base_url=GROK3_API_URL,
-        max_tokens=100,
-        temperature=0.5
-    )
-    if api_response:
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.5}
+    async with aiohttp.ClientSession() as session:
         try:
-            result = json.loads(api_response["choices"][0]["message"]["content"])
-            logger.info(f"對話摘要成功：result={result}")
-            return result
+            async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                if response.status != 200:
+                    logger.warning(f"對話摘要失敗：狀態碼={response.status}")
+                    return {"theme": "一般", "keywords": []}
+                data = await response.json()
+                result = json.loads(data["choices"][0]["message"]["content"])
+                logger.info(f"對話摘要成功：result={result}")
+                return result
         except Exception as e:
             logger.warning(f"對話摘要錯誤：{str(e)}")
-    return {"theme": "一般", "keywords": []}
+            return {"theme": "一般", "keywords": []}
 
-async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None, **kwargs):
-    # 記錄接收到的參數
-    logger.info(f"analyze_and_screen 收到參數：user_query={user_query}, source_name={source_name}, source_id={source_id}, source_type={source_type}, conversation_context={conversation_context}, 額外參數={kwargs}")
-    
-    # 參數驗證
-    if not all([user_query, source_name, source_id]):
-        logger.error(f"缺少必需參數：user_query={user_query}, source_name={source_name}, source_id={source_id}")
-        raise ValueError("缺少必需參數：user_query, source_name, source_id 必須提供")
-    
+async def analyze_and_screen(user_query, source_name, source_id, source_type="lihkg", conversation_context=None):
     conversation_context = conversation_context or []
     try:
         api_key = st.secrets["grok3key"]
@@ -223,40 +212,53 @@ async def prioritize_threads_with_grok(user_query, threads, source_name, source_
     estimated_tokens = prompt_length // 4
     logger.info(f"創建提示：長度={prompt_length} 字符, 估計 token={estimated_tokens}, 提示預覽={prompt[:200]}...")
     
-    messages = [{"role": "user", "content": prompt}]
-    api_response = await call_ai_api(
-        api_type="grok",
-        api_key=api_key,
-        messages=messages,
-        base_url=GROK3_API_URL,
-        max_tokens=500,
-        temperature=0.7
-    )
-    if api_response:
-        try:
-            response_content = api_response["choices"][0]["message"]["content"]
-            logger.info(f"原始 API 回應：{response_content[:500]}...")
-            result = json.loads(response_content)
-            top_thread_ids = [str(tid) for tid in result.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]][:20]  # 最多 20 個
-            top_thread_ids = top_thread_ids[:post_limit]  # 根據動態 post_limit 裁剪
-            logger.info(f"API 返回 top_thread_ids: {top_thread_ids}, 原因={result.get('reason', '無原因')}, 最終選取數量={len(top_thread_ids)}")
-            return {
-                "top_thread_ids": top_thread_ids,
-                "reason": result.get("reason", "無原因"),
-                "intent_breakdown": result.get("intent_breakdown", []),
-            }
-        except Exception as e:
-            logger.error(f"處理 API 回應錯誤：{str(e)}")
-    sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
-    top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]][:post_limit]  # 回退時也尊重 post_limit
-    logger.info(f"回退到熱門度排序：top_thread_ids={top_thread_ids}, 原因=API 失敗, 最終選取數量={len(top_thread_ids)}")
-    return {
-        "top_thread_ids": top_thread_ids,
-        "reason": "回退到熱門度排序",
-        "intent_breakdown": [],
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    payload = {"model": "grok-3", "messages": [{"role": "user", "content": prompt}], "max_tokens": 500, "temperature": 0.7}
+    logger.info(f"API payload: {json.dumps(payload, ensure_ascii=False)[:200]}...")
+    
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(2):
+            try:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status != 200:
+                        logger.warning(f"API 調用失敗：狀態碼={response.status}, 嘗試={attempt + 1}")
+                        continue
+                    data = await response.json()
+                    if not data.get("choices"):
+                        logger.warning(f"API 調用失敗：無選擇，嘗試={attempt + 1}")
+                        continue
+                    response_content = data["choices"][0]["message"]["content"]
+                    logger.info(f"原始 API 回應：{response_content[:500]}...")
+                    try:
+                        result = json.loads(response_content)
+                        top_thread_ids = [str(tid) for tid in result.get("top_thread_ids", []) if str(tid) in [str(t["thread_id"]) for t in threads]][:20]  # 最多 20 個
+                        top_thread_ids = top_thread_ids[:post_limit]  # 根據動態 post_limit 裁剪
+                        logger.info(f"API 返回 top_thread_ids: {top_thread_ids}, 原因={result.get('reason', '無原因')}, 最終選取數量={len(top_thread_ids)}")
+                        return {
+                            "top_thread_ids": top_thread_ids,
+                            "reason": result.get("reason", "無原因"),
+                            "intent_breakdown": result.get("intent_breakdown", []),
+                        }
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON 解碼錯誤：{str(e)}, response_content={response_content[:200]}...")
+                        continue
+            except Exception as e:
+                logger.error(f"API 調用錯誤：{str(e)}, 嘗試={attempt + 1}")
+                if attempt < 1:
+                    await asyncio.sleep(2)
+                    continue
+                sorted_threads = sorted(threads, key=lambda x: x.get("no_of_reply", 0) * 0.6 + x.get("like_count", 0) * 0.4, reverse=True)
+                top_thread_ids = [str(t["thread_id"]) for t in sorted_threads[:20]][:post_limit]  # 回退時也尊重 post_limit
+                logger.info(f"回退到熱門度排序：top_thread_ids={top_thread_ids}, 原因=API 失敗 ({str(e)}), 最終選取數量={len(top_thread_ids)}")
+                return {
+                    "top_thread_ids": top_thread_ids,
+                    "reason": f"排序失敗（{str(e)}），回退到熱門度排序",
+                    "intent_breakdown": [],
+                }
+    logger.warning(f"排序失敗，所有嘗試均失敗")
+    return {"top_thread_ids": [], "reason": "排序失敗，所有嘗試均失敗", "intent_breakdown": []}
 
-async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg", api_type="grok", api_base_url=None):
+async def stream_grok3_response(user_query, metadata, thread_data, processing, selected_source, conversation_context=None, needs_advanced_analysis=False, reason="", filters=None, source_id=None, source_type="lihkg"):
     conversation_context = conversation_context or []
     filters = filters or {"min_replies": 10, "min_likes": 0}
     selected_source = normalize_selected_source(selected_source, source_type)
@@ -271,10 +273,10 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         yield error_msg
         return
     try:
-        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
+        api_key = st.secrets["grok3key"]
     except KeyError:
-        logger.error(f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰")
-        yield f"錯誤：缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"
+        logger.error("缺少 Grok 3 API 密鑰")
+        yield "錯誤：缺少 API 密鑰"
         return
     intents_info = processing.get("analysis", {}).get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "默認意圖"}])
     intents = [i["intent"] for i in intents_info if i["intent"] is not None]
@@ -282,13 +284,14 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         intents = ["summarize_posts"]
         logger.warning(f"無有效意圖，回退到：{intents}")
     primary_intent = max(intents_info, key=lambda x: x["confidence"])["intent"]
+    # 內聯 get_intent_processing_params 邏輯
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
     if source_type.lower() in sort_override:
         intent_params["sort"] = sort_override[source_type.lower()]
     if source_type.lower() == "lihkg" and intent_params.get("sort") == "confidence":
         intent_params["sort"] = "hot"
-    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}, API={api_type}")
+    logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}")
     total_min_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][0] / 0.8 for intent in intents)
     total_max_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
@@ -352,74 +355,83 @@ async def stream_grok3_response(user_query, metadata, thread_data, processing, s
         reduction_attempts += 1
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"提示長度 {prompt_length} 超過限制 {GROK3_TOKEN_LIMIT}，無法進一步縮減")
-        yield f"錯誤：提示過大，請縮減查詢範围或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
+        yield "錯誤：提示過大，請縮減查詢範圍或聯繫 xAI 支持：https://x.ai/api。"
         return
     logger.info(f"生成提示：查詢={user_query}, 提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, 意圖={intents}, 提示摘要={prompt_summary}")
-    messages = [
-        {
-            "role": "system",
-            "content": f"你是社交媒體數據助手，以繁體中文回答，語氣客觀輕鬆，使用 [帖子 ID: {{thread_id}}] 格式引用帖子。",
-        },
-        *conversation_context,
-        {"role": "user", "content": prompt},
-    ]
-    try:
-        api_response = await call_ai_api(
-            api_type=api_type,
-            api_key=api_key,
-            messages=messages,
-            base_url=api_base_url or GROK3_API_URL,
-            max_tokens=max_tokens,
-            temperature=0.7,
-            stream=True
-        )
-        if api_response:
-            response_content = ""
-            prompt_tokens = 0
-            completion_tokens = 0
-            async for chunk in api_response:
-                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                if content:
-                    cleaned_content = clean_response(content)
-                    response_content += cleaned_content
-                    yield cleaned_content
-                usage = chunk.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                completion_tokens = usage.get("completion_tokens", completion_tokens)
-            logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
-            return
-        else:
-            logger.error("流式 API 返回空響應")
-            yield f"錯誤：生成回應失敗（API 返回空響應）。請檢查網絡或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
-            return
-    except Exception as e:
-        logger.error(f"流式 API 錯誤：{str(e)}，回退到非流式")
-        try:
-            api_response = await call_ai_api(
-                api_type=api_type,
-                api_key=api_key,
-                messages=messages,
-                base_url=api_base_url or GROK3_API_URL,
-                max_tokens=max_tokens // 2,
-                temperature=0.7,
-                stream=False
-            )
-            if api_response:
-                content = api_response.get("choices", [{}])[0].get("message", {}).get("content", "")
-                cleaned_content = clean_response(content)
-                logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={api_response.get('usage', {}).get('prompt_tokens', 0)}")
-                yield cleaned_content
-                return
-            else:
-                logger.error("非流式 API 返回空響應")
-                yield f"錯誤：生成回應失敗（非流式 API 返回空響應）。請檢查網絡或聯繫支持：https://api.chatanywhere.tech/#/shop 或 https://x.ai/api。"
-                return
-        except Exception as retry_e:
-            logger.error(f"非流式 API 錯誤：{str(retry_e)}")
-            yield f"錯誤：生成回應失敗（{str(retry_e)}）。請升級 ChatAnywhere API 金鑰（https://api.chatanywhere.tech/#/shop）或聯繫 xAI 支持（https://x.ai/api）。"
-            return
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    payload = {
+        "model": "grok-3",
+        "messages": [
+            {
+                "role": "system",
+                "content": f"你是社交媒體數據助手，以繁體中文回答，語氣客觀輕鬆，使用 [帖子 ID: {{thread_id}}] 格式引用帖子。",
+            },
+            *conversation_context,
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+        "stream": True,
+    }
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(2):
+            try:
+                async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                    if response.status != 200:
+                        logger.error(f"API 失敗：狀態碼={response.status}, 嘗試={attempt + 1}")
+                        if attempt < 1:
+                            await asyncio.sleep(2)
+                        continue
+                    response_content = ""
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                    async for line in response.content:
+                        if line and not line.isspace():
+                            line_str = line.decode("utf-8").strip()
+                            if line_str == "data: [DONE]":
+                                break
+                            if line_str.startswith("data:"):
+                                try:
+                                    chunk = json.loads(line_str[6:])
+                                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        cleaned_content = clean_response(content)
+                                        response_content += cleaned_content
+                                        yield cleaned_content
+                                    usage = chunk.get("usage", {})
+                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
+                                except json.JSONDecodeError:
+                                    continue
+                    logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}")
+                    return
+            except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
+                logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}")
+                if attempt < 1:
+                    await asyncio.sleep(2)
+                    continue
+                logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}")
+                payload["stream"] = False
+                payload["max_tokens"] = max_tokens // 2
+                try:
+                    async with session.post(GROK3_API_URL, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
+                        if response.status != 200:
+                            logger.error(f"非流式 API 失敗：狀態碼={response.status}")
+                            yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
+                            return
+                        data = await response.json()
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        cleaned_content = clean_response(content)
+                        logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={data.get('usage', {}).get('prompt_tokens', 0)}")
+                        yield cleaned_content
+                        return
+                except Exception as e:
+                    logger.error(f"非流式 API 錯誤：{str(e)}")
+                    yield f"錯誤：生成回應失敗（{str(e)}）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
+                    return
+        yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫 xAI 支持：https://x.ai/api。"
 
-async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None, api_type="grok", api_base_url=None):
+async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
     if source_type == "lihkg":
         configure_lihkg_api_logger()
     else:
@@ -437,12 +449,12 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "analysis": analysis,
         }
     try:
-        api_key = st.secrets["grok3key"] if api_type == "grok" else st.secrets["chatanywhere_key"]
+        api_key = st.secrets["grok3key"]
     except KeyError:
         return {
             "selected_source": selected_source,
             "thread_data": [],
-            "rate_limit_info": [{"message": f"缺少 {'Grok 3' if api_type == 'grok' else 'ChatAnywhere'} API 密鑰"}],
+            "rate_limit_info": [{"message": "缺少 API 密鑰"}],
             "request_counter": request_counter,
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
@@ -702,7 +714,7 @@ async def process_user_question(user_query, selected_source, source_id, source_t
             "thread_data": thread_data,
             "rate_limit_info": rate_limit_info,
             "request_counter": request_counter,
-            "humanities": [],
+            " humanities": [],
             "last_reset": last_reset,
             "rate_limit_until": rate_limit_until,
             "analysis": analysis,
