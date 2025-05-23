@@ -58,7 +58,7 @@ def get_source_info(selected_source, source_map):
         source_type, source_id, selected_cat = "lihkg", "1", "LIHKG - 吹水台"
     return source_type, source_id, selected_cat
 
-async def fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, context):
+async def fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, context, ai_engine):
     cache_key = f"{source_id}_{user_query[:50]}_{','.join([i['intent'] for i in analysis.get('intents', [])])}"
     if cache_key in st.session_state.thread_cache and time.time() - st.session_state.thread_cache[cache_key]["timestamp"] < 300:
         logger.info(f"使用緩存數據，來源：{source_id}，查詢：{user_query}")
@@ -70,7 +70,8 @@ async def fetch_thread_data(user_query, selected_cat, source_id, source_type, an
         source_type=source_type,
         analysis=analysis,
         conversation_context=context,
-        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details)
+        progress_callback=lambda msg, prog, details=None: update_progress(msg, 0.25 + prog * 0.30, source_type, details),
+        ai_engine=ai_engine
     )
     st.session_state.thread_cache[cache_key] = {"timestamp": time.time(), "data": result}
     return result, 0.55
@@ -88,12 +89,20 @@ def update_progress(message, progress, source_type=None, details=None):
             message += f" (第 {details['current_thread']}/{details['total_threads']} 帖子)"
         elif "wait_time" in details:
             message += f" (等待速率限制 {details['wait_time']:.2f} 秒)"
-    status_text.write(f"正在處理：{message}")
+    status_text.text(f"正在處理：{message}")
     progress_bar.progress(min(max(progress, 0.0), 1.0))
 
 async def main():
     st.set_page_config(page_title="社交媒體聊天機器人", layout="centered")
     st.title("社交媒體聊天機器人")
+
+    try:
+        grok3_api_key = st.secrets["grok3key"]
+        github_token = st.secrets["github_token"]
+    except KeyError as e:
+        logger.error(f"缺少密鑰：{str(e)}")
+        st.error(f"缺少 API 密鑰：{str(e)}")
+        return
 
     for key, default in [
         ("chat_history", []), ("thread_cache", {}), ("awaiting_response", False),
@@ -117,6 +126,10 @@ async def main():
             "選擇數據來源", options=list(source_map.keys()), index=0, key="source_select",
             on_change=lambda: logger.info(f"來源變更為 {st.session_state.get('source_select', '未知來源')}")
         )
+        ai_engine = st.selectbox(
+            "選擇 AI 引擎", options=["Grok 3", "GitHub API"], index=0, key="ai_engine_select",
+            on_change=lambda: logger.info(f"AI 引擎變更為 {st.session_state.get('ai_engine_select', '未知引擎')}")
+        )
         source_type, source_id, selected_cat = get_source_info(selected_source, source_map)
     with col2:
         render_new_conversation_button()
@@ -133,7 +146,7 @@ async def main():
     else:
         logger.info(f"來源未變：{selected_source}")
 
-    st.write(f"當前數據來源：{selected_cat}")
+    st.write(f"當前數據來源：{selected_cat}，AI 引擎：{ai_engine}")
 
     for idx, chat in enumerate(st.session_state.chat_history):
         with st.chat_message("user"):
@@ -156,7 +169,7 @@ async def main():
         st.session_state.chat_history.append({"question": user_query, "answer": error_message})
         return
 
-    logger.info(f"用戶查詢：{user_query}，來源：{selected_source}，類型：{source_type}，ID：{source_id}")
+    logger.info(f"用戶查詢：{user_query}，來源：{selected_source}，類型：{source_type}，ID：{source_id}，AI 引擎：{ai_engine}")
     with st.chat_message("user"):
         st.markdown(user_query)
     st.session_state.awaiting_response = True
@@ -185,10 +198,10 @@ async def main():
         st.session_state.last_user_query = user_query
 
         update_progress("分析問題意圖", 0.15)
-        analysis = await analyze_and_screen(user_query, selected_cat, source_id, source_type, st.session_state.conversation_context)
+        analysis = await analyze_and_screen(user_query, selected_cat, source_id, source_type, st.session_state.conversation_context, ai_engine=ai_engine)
         logger.info(f"分析完成：意圖={[i['intent'] for i in analysis.get('intents', [])]}")
 
-        result, progress = await fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, st.session_state.conversation_context)
+        result, progress = await fetch_thread_data(user_query, selected_cat, source_id, source_type, analysis, st.session_state.conversation_context, ai_engine)
         update_progress("數據處理完成", progress, source_type)
 
         if result.get("rate_limit_until", 0) > time.time():
@@ -212,7 +225,7 @@ async def main():
             with col2:
                 copy_container = st.empty()
             update_progress("正在生成回應", 0.85)
-            logger.info(f"開始 stream_grok3_response，查詢：{user_query}")
+            logger.info(f"開始 stream_grok3_response，查詢：{user_query}，AI 引擎：{ai_engine}")
             async for chunk in stream_grok3_response(
                 user_query=user_query,
                 metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0} for item in result.get("thread_data", [])],
@@ -224,7 +237,8 @@ async def main():
                 reason=analysis.get("reason", ""),
                 filters=analysis.get("filters", {}),
                 source_id=source_id,
-                source_type=source_type
+                source_type=source_type,
+                ai_engine=ai_engine
             ):
                 response += chunk
                 grok_container.markdown(response)
