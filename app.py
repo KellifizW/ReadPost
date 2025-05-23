@@ -5,7 +5,7 @@ from datetime import datetime
 import pytz
 import nest_asyncio
 from streamlit.components.v1 import html
-from grok_processing import analyze_and_screen, stream_grok3_response, process_user_question, clean_cache
+from grok_processing import analyze_and_screen, stream_ai_response, process_user_question, clean_cache
 from logging_config import configure_logger
 
 HONG_KONG_TZ = pytz.timezone("Asia/Hong_Kong")
@@ -88,7 +88,7 @@ def update_progress(message, progress, source_type=None, details=None):
             message += f" (第 {details['current_thread']}/{details['total_threads']} 帖子)"
         elif "wait_time" in details:
             message += f" (等待速率限制 {details['wait_time']:.2f} 秒)"
-    status_text.write(f"正在處理：{message}")
+    status_text.text(f"正在處理：{message}")
     progress_bar.progress(min(max(progress, 0.0), 1.0))
 
 async def main():
@@ -102,6 +102,9 @@ async def main():
         if key not in st.session_state:
             st.session_state[key] = default
 
+    if "ai_engine" not in st.session_state:
+        st.session_state.ai_engine = "grok3"
+
     source_map = {
         "LIHKG - 吹水台": {"source": "lihkg", "cat_id": "1"}, "LIHKG - 熱門台": {"source": "lihkg", "cat_id": "2"},
         "LIHKG - 時事台": {"source": "lihkg", "cat_id": "5"}, "LIHKG - 上班台": {"source": "lihkg", "cat_id": "14"},
@@ -111,24 +114,20 @@ async def main():
         "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"}, "Reddit - options": {"source": "reddit", "subreddit": "options"}
     }
 
-        if "ai_engine" not in st.session_state:
-            st.session_state.ai_engine = "grok3"
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            selected_source = st.selectbox(
-                "選擇數據來源", options=list(source_map.keys()), index=0, key="source_select",
-                on_change=lambda: logger.info(f"來源變更為 {st.session_state.get('source_select', '未知來源')}")
-            )
-            source_type, source_id, selected_cat = get_source_info(selected_source, source_map)
-            # 添加 AI 引擎選擇
-            ai_engine = st.selectbox(
-                "選擇 AI 引擎", options=["Grok 3", "ChatAnywhere"], index=0, key="ai_engine_select",
-                on_change=lambda: logger.info(f"AI 引擎變更為 {st.session_state.get('ai_engine_select', '未知引擎')}")
-            )
-            st.session_state.ai_engine = "grok3" if ai_engine == "Grok 3" else "chatanywhere"
-        with col2:
-            render_new_conversation_button()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        selected_source = st.selectbox(
+            "選擇數據來源", options=list(source_map.keys()), index=0, key="source_select",
+            on_change=lambda: logger.info(f"來源變更為 {st.session_state.get('source_select', '未知來源')}")
+        )
+        source_type, source_id, selected_cat = get_source_info(selected_source, source_map)
+        ai_engine = st.selectbox(
+            "選擇 AI 引擎", options=["Grok 3", "ChatAnywhere"], index=0, key="ai_engine_select",
+            on_change=lambda: logger.info(f"AI 引擎變更為 {st.session_state.get('ai_engine_select', '未知引擎')}")
+        )
+        st.session_state.ai_engine = "grok3" if ai_engine == "Grok 3" else "chatanywhere"
+    with col2:
+        render_new_conversation_button()
 
     if st.session_state.last_selected_source != selected_source:
         if st.button("確認切換數據來源並清除歷史"):
@@ -217,12 +216,12 @@ async def main():
         with st.chat_message("assistant"):
             col1, col2 = st.columns([0.95, 0.05])
             with col1:
-                grok_container = st.empty()
+                ai_container = st.empty()
             with col2:
                 copy_container = st.empty()
             update_progress("正在生成回應", 0.85)
-            logger.info(f"開始 stream_grok3_response，查詢：{user_query}")
-            async for chunk in stream_grok3_response(
+            logger.info(f"開始 stream_ai_response，查詢：{user_query}")
+            async for chunk in stream_ai_response(
                 user_query=user_query,
                 metadata=[{"thread_id": item["thread_id"], "title": item["title"], "no_of_reply": item.get("no_of_reply", 0), "last_reply_time": item.get("last_reply_time", "0"), "like_count": item.get("like_count", 0), "dislike_count": item.get("dislike_count", 0) if source_type == "lihkg" else 0} for item in result.get("thread_data", [])],
                 thread_data={item["thread_id"]: item for item in result.get("thread_data", [])},
@@ -236,11 +235,11 @@ async def main():
                 source_type=source_type
             ):
                 response += chunk
-                grok_container.markdown(response)
+                ai_container.markdown(response)
             if not response:
                 logger.warning(f"查詢無回應：{user_query}")
                 response = "無法生成回應，請稍後重試。"
-                grok_container.markdown(response)
+                ai_container.markdown(response)
             copy_container.empty()
             render_copy_button(response, key=f"copy_new_{len(st.session_state.chat_history)}")
 
