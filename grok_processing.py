@@ -268,6 +268,7 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
     filters = filters or {"min_replies": 10, "min_likes": 0}
     selected_source = normalize_selected_source(selected_source, source_type)
     ai_engine = st.session_state.get("ai_engine", "grok3")
+    
     if not thread_data:
         error_msg = (
             f"在 {selected_source['source_name']} 中未找到符合條件的帖子。\n"
@@ -278,17 +279,20 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
         logger.warning(error_msg)
         yield error_msg
         return
+    
     try:
         api_key = st.secrets["grok3key"] if ai_engine == "grok3" else st.secrets["chatanywherekey"]
     except KeyError:
         logger.error(f"缺少 {ai_engine} API 密鑰")
         yield f"錯誤：缺少 {ai_engine} API 密鑰"
         return
+    
     intents_info = processing.get("analysis", {}).get("intents", [{"intent": "summarize_posts", "confidence": 0.7, "reason": "默認意圖"}])
     intents = [i["intent"] for i in intents_info if i["intent"] is not None]
     if not intents:
         intents = ["summarize_posts"]
         logger.warning(f"無有效意圖，回退到：{intents}, 引擎={ai_engine}")
+    
     primary_intent = max(intents_info, key=lambda x: x["confidence"])["intent"]
     intent_params = INTENT_CONFIG.get(primary_intent, INTENT_CONFIG["summarize_posts"]).get("processing", {}).copy()
     sort_override = intent_params.get("sort_override", {})
@@ -296,13 +300,16 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
         intent_params["sort"] = sort_override[source_type.lower()]
     if source_type.lower() == "lihkg" and intent_params.get("sort") == "confidence":
         intent_params["sort"] = "hot"
+    
     logger.info(f"開始生成回應：查詢={user_query}, 意圖={intents}, 來源={selected_source}, 引擎={ai_engine}")
+    
     total_min_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][0] / 0.8 for intent in intents)
     total_max_tokens = sum(INTENT_CONFIG.get(intent, INTENT_CONFIG["summarize_posts"])["word_range"][1] / 0.8 for intent in intents)
     prompt_length = len(json.dumps(thread_data, ensure_ascii=False)) + len(user_query) + 1000
     length_factor = min(prompt_length / GROK3_TOKEN_LIMIT, 1.0)
     max_tokens = min(int(total_min_tokens + (total_max_tokens - total_min_tokens) * length_factor) + 1000, 25000)
     max_replies_per_thread = intent_params.get("max_replies", 150)
+    
     thread_data_dict = {str(data["thread_id"]): data for data in thread_data} if isinstance(thread_data, list) else thread_data
     filtered_thread_data = {}
     total_replies_count = 0
@@ -328,10 +335,18 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
             "last_reply_time": unix_to_readable(data.get("last_reply_time", "0"), context=f"thread {tid}"),
             "no_of_reply": data.get("no_of_reply", 0),
         }
+    
     prompt = await build_dynamic_prompt(user_query, conversation_context, metadata, list(filtered_thread_data.values()), filters, primary_intent, selected_source, api_key)
     prompt_length = len(prompt)
     estimated_tokens = prompt_length // 4
+    
+    # 檢查提示長度是否可能超過 ChatAnywhere 的限制
+    chatanywhere_token_limit = 4096 if ai_engine == "chatanywhere" else GROK3_TOKEN_LIMIT // 4
+    if estimated_tokens > chatanywhere_token_limit * 0.9:
+        logger.warning(f"提示長度 {prompt_length} 字符（估計 {estimated_tokens} tokens）接近或超過 {ai_engine} 的限制 {chatanywhere_token_limit} tokens")
+    
     prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
+    
     if "prompt_stats" not in st.session_state:
         st.session_state.prompt_stats = {"lengths": [], "max_length": 0, "min_length": float("inf"), "count": 0}
     st.session_state.prompt_stats["lengths"].append(prompt_length)
@@ -339,10 +354,12 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
     st.session_state.prompt_stats["min_length"] = min(st.session_state.prompt_stats["min_length"], prompt_length)
     st.session_state.prompt_stats["count"] += 1
     avg_length = sum(st.session_state.prompt_stats["lengths"]) / st.session_state.prompt_stats["count"] if st.session_state.prompt_stats["count"] > 0 else 0
+    
     logger.info(
         f"提示長度統計：當前={prompt_length}, 平均={avg_length:.2f}, 最大={st.session_state.prompt_stats['max_length']}, "
         f"最小={st.session_state.prompt_stats['min_length']}, 總次數={st.session_state.prompt_stats['count']}, 引擎={ai_engine}"
     )
+    
     reduction_attempts = 0
     while prompt_length > GROK3_TOKEN_LIMIT * 0.95 and reduction_attempts < 2:
         max_replies_per_thread = max_replies_per_thread // 2 or 10
@@ -358,11 +375,14 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
         prompt_summary = prompt[:100] + "..." if prompt_length > 100 else prompt
         logger.info(f"提示縮減：嘗試={reduction_attempts + 1}, 新長度={prompt_length}, 保留帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, 引擎={ai_engine}")
         reduction_attempts += 1
+    
     if prompt_length > GROK3_TOKEN_LIMIT:
         logger.error(f"提示長度 {prompt_length} 超過限制 {GROK3_TOKEN_LIMIT}，無法進一步縮減，引擎={ai_engine}")
         yield f"錯誤：提示過大，請縮減查詢範圍或聯繫支持。"
         return
+    
     logger.info(f"生成提示：查詢={user_query}, 提示長度={prompt_length} 字符, 估計 token={estimated_tokens}, 帖子數={len(filtered_thread_data)}, 總回覆數={total_replies_count}, 意圖={intents}, 提示摘要={prompt_summary}, 引擎={ai_engine}")
+    
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     api_url = GROK3_API_URL if ai_engine == "grok3" else CHATANYWHERE_API_URL
     payload = {
@@ -379,15 +399,31 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
         "temperature": 0.7,
         "stream": True,
     }
+    
+    logger.debug(f"API 請求 payload：model={payload['model']}, messages_length={len(payload['messages'])}, max_tokens={max_tokens}, stream={payload['stream']}, 引擎={ai_engine}")
+    
     async with aiohttp.ClientSession() as session:
         for attempt in range(2):
             try:
                 async with session.post(api_url, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                     if response.status != 200:
-                        logger.error(f"API 失敗：狀態碼={response.status}, 嘗試={attempt + 1}, 引擎={ai_engine}")
+                        error_content = await response.text()
+                        logger.error(
+                            f"API 失敗：狀態碼={response.status}, 嘗試={attempt + 1}, 引擎={ai_engine}, "
+                            f"錯誤內容={error_content[:500]}, "
+                            f"提示長度={prompt_length}, 估計 tokens={estimated_tokens}"
+                        )
+                        if response.status == 403:
+                            logger.error(
+                                f"403 Forbidden 錯誤，可能是無效的 API 密鑰、配額限制或伺服器策略，"
+                                f"請檢查 chatanywherekey 或聯繫 ChatAnywhere 支持"
+                            )
+                            yield f"錯誤：API 請求被拒絕（403 Forbidden），請檢查 API 密鑰或配額限制。"
+                            return
                         if attempt < 1:
                             await asyncio.sleep(2)
                         continue
+                    
                     response_content = ""
                     prompt_tokens = 0
                     completion_tokens = 0
@@ -408,33 +444,64 @@ async def stream_ai_response(user_query, metadata, thread_data, processing, sele
                                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                                     completion_tokens = usage.get("completion_tokens", completion_tokens)
                                 except json.JSONDecodeError:
+                                    logger.warning(f"流式 API 數據塊 JSON 解碼失敗：{line_str[:200]}")
                                     continue
-                    logger.info(f"流式 API 成功：回應長度={len(response_content)}, 提示 token={prompt_tokens}, 完成 token={completion_tokens}, 引擎={ai_engine}")
+                    logger.info(
+                        f"流式 API 成功：回應長度={len(response_content)}, "
+                        f"提示 token={prompt_tokens}, 完成 token={completion_tokens}, 引擎={ai_engine}"
+                    )
                     return
+                
             except (aiohttp.ClientConnectionError, aiohttp.ClientResponseError, asyncio.TimeoutError) as e:
-                logger.error(f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}, 引擎={ai_engine}")
+                logger.error(
+                    f"流式 API 錯誤：{str(e)}, 嘗試={attempt + 1}, 引擎={ai_engine}, "
+                    f"提示長度={prompt_length}, 估計 tokens={estimated_tokens}"
+                )
                 if attempt < 1:
                     await asyncio.sleep(2)
                     continue
+                
                 logger.info(f"回退到非流式 API，max_tokens={max_tokens // 2}, 引擎={ai_engine}")
                 payload["stream"] = False
                 payload["max_tokens"] = max_tokens // 2
+                
                 try:
                     async with session.post(api_url, headers=headers, json=payload, timeout=API_TIMEOUT) as response:
                         if response.status != 200:
-                            logger.error(f"非流式 API 失敗：狀態碼={response.status}, 引擎={ai_engine}")
+                            error_content = await response.text()
+                            logger.error(
+                                f"非流式 API 失敗：狀態碼={response.status}, 引擎={ai_engine}, "
+                                f"錯誤內容={error_content[:500]}, "
+                                f"提示長度={prompt_length}, 估計 tokens={estimated_tokens}"
+                            )
+                            if response.status == 403:
+                                logger.error(
+                                    f"非流式 403 Forbidden 錯誤，可能是無效的 API 密鑰、配額限制或伺服器策略，"
+                                    f"請檢查 chatanywherekey 或聯繫 ChatAnywhere 支持"
+                                )
+                                yield f"錯誤：API 請求被拒絕（403 Forbidden），請檢查 API 密鑰或配額限制。"
+                                return
                             yield f"錯誤：生成回應失敗（狀態碼 {response.status}）。請稍後重試。"
                             return
+                        
                         data = await response.json()
                         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                         cleaned_content = clean_response(content)
-                        logger.info(f"非流式 API 成功：回應長度={len(cleaned_content)}, 提示 token={data.get('usage', {}).get('prompt_tokens', 0)}, 引擎={ai_engine}")
+                        logger.info(
+                            f"非流式 API 成功：回應長度={len(cleaned_content)}, "
+                            f"提示 token={data.get('usage', {}).get('prompt_tokens', 0)}, "
+                            f"引擎={ai_engine}"
+                        )
                         yield cleaned_content
                         return
                 except Exception as e:
-                    logger.error(f"非流式 API 錯誤：{str(e)}, 引擎={ai_engine}")
+                    logger.error(
+                        f"非流式 API 錯誤：{str(e)}, 引擎={ai_engine}, "
+                        f"提示長度={prompt_length}, 估計 tokens={estimated_tokens}"
+                    )
                     yield f"錯誤：生成回應失敗（{str(e)}）。請檢查網絡或聯繫支持。"
                     return
+        
         yield f"錯誤：生成回應失敗（多次嘗試失敗）。請檢查網絡或聯繫支持。"
 
 async def process_user_question(user_query, selected_source, source_id, source_type="lihkg", analysis=None, request_counter=0, last_reset=0, rate_limit_until=0, conversation_context=None, progress_callback=None):
