@@ -111,15 +111,24 @@ async def main():
         "Reddit - stocks": {"source": "reddit", "subreddit": "stocks"}, "Reddit - options": {"source": "reddit", "subreddit": "options"}
     }
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_source = st.selectbox(
-            "選擇數據來源", options=list(source_map.keys()), index=0, key="source_select",
-            on_change=lambda: logger.info(f"來源變更為 {st.session_state.get('source_select', '未知來源')}")
-        )
-        source_type, source_id, selected_cat = get_source_info(selected_source, source_map)
-    with col2:
-        render_new_conversation_button()
+        if "ai_engine" not in st.session_state:
+            st.session_state.ai_engine = "grok3"
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            selected_source = st.selectbox(
+                "選擇數據來源", options=list(source_map.keys()), index=0, key="source_select",
+                on_change=lambda: logger.info(f"來源變更為 {st.session_state.get('source_select', '未知來源')}")
+            )
+            source_type, source_id, selected_cat = get_source_info(selected_source, source_map)
+            # 添加 AI 引擎選擇
+            ai_engine = st.selectbox(
+                "選擇 AI 引擎", options=["Grok 3", "ChatAnywhere"], index=0, key="ai_engine_select",
+                on_change=lambda: logger.info(f"AI 引擎變更為 {st.session_state.get('ai_engine_select', '未知引擎')}")
+            )
+            st.session_state.ai_engine = "grok3" if ai_engine == "Grok 3" else "chatanywhere"
+        with col2:
+            render_new_conversation_button()
 
     if st.session_state.last_selected_source != selected_source:
         if st.button("確認切換數據來源並清除歷史"):
