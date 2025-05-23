@@ -237,8 +237,11 @@ CONFIG = {
     "intent_confidence_threshold": 0.75
 }
 
-async def call_grok3_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
-    """Unified Grok 3 API call handler with detailed logging and JSON fix."""
+async def call_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"], ai_engine: str = "Grok 3") -> Optional[Dict]:
+    """Unified API call handler with detailed logging and JSON fix."""
+    if ai_engine == "GitHub API":
+        return await call_github_api(payload, function_name, retries, timeout)
+    
     try:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {st.secrets['grok3key']}"}
     except KeyError:
@@ -277,7 +280,66 @@ async def call_grok3_api(payload: Dict, function_name: str = "unknown", retries:
     logger.warning(f"API call failed in {function_name} after {retries} attempts")
     return None
 
-async def determine_post_limit(query: str, keywords: List[str], intents: List[Dict], source_type: str, grok3_api_key: str) -> int:
+async def call_github_api(payload: Dict, function_name: str = "unknown", retries: int = CONFIG["max_parse_retries"], timeout: int = CONFIG["parse_timeout"]) -> Optional[Dict]:
+    """GitHub API call handler."""
+    from azure.ai.inference import ChatCompletionsClient
+    from azure.ai.inference.models import SystemMessage, UserMessage
+    from azure.core.credentials import AzureKeyCredential
+
+    try:
+        github_token = st.secrets["github_token"]
+    except KeyError:
+        logger.error(f"API call failed in {function_name}: Missing GitHub API token")
+        return None
+
+    client = ChatCompletionsClient(
+        endpoint="https://models.github.ai/inference",
+        credential=AzureKeyCredential(github_token),
+    )
+    messages = payload.get("messages", [])
+    azure_messages = []
+    for msg in messages:
+        if msg["role"] == "system":
+            azure_messages.append(SystemMessage(content=msg["content"]))
+        elif msg["role"] == "user":
+            azure_messages.append(UserMessage(content=msg["content"]))
+
+    for attempt in range(retries):
+        try:
+            response = await asyncio.wait_for(
+                client.complete(
+                    messages=azure_messages,
+                    temperature=payload.get("temperature", 0.7),
+                    top_p=1.0,
+                    model="xai/grok-3",
+                    max_tokens=payload.get("max_tokens", 500)
+                ),
+                timeout=timeout
+            )
+            result = {
+                "choices": [{
+                    "message": {
+                        "content": response.choices[0].message.content
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens
+                }
+            }
+            logger.info(
+                f"GitHub API call in {function_name}: prompt_tokens={result['usage']['prompt_tokens']}, "
+                f"completion_tokens={result['usage']['completion_tokens']}"
+            )
+            return result
+        except Exception as e:
+            logger.error(f"GitHub API call error in {function_name}: {str(e)}, attempt={attempt + 1}")
+            if attempt < retries - 1:
+                await asyncio.sleep(2)
+    logger.warning(f"GitHub API call failed in {function_name} after {retries} attempts")
+    return None
+
+async def determine_post_limit(query: str, keywords: List[str], intents: List[Dict], source_type: str, ai_engine: str) -> int:
     """Determine dynamic post limit (3-15) based on query specificity."""
     prompt = f"""
 Analyze query for optimal post count (3-15).
@@ -295,7 +357,7 @@ Output: {{"post_limit": number, "reason": "reason (max 70 chars)"}}
         "max_tokens": 100,
         "temperature": 0.5
     }
-    if api_response := await call_grok3_api(payload, "determine_post_limit"):
+    if api_response := await call_api(payload, "determine_post_limit", ai_engine=ai_engine):
         response_content = api_response["choices"][0]["message"]["content"]
         try:
             result = json.loads(response_content)
@@ -313,7 +375,7 @@ Output: {{"post_limit": number, "reason": "reason (max 70 chars)"}}
     logger.info(f"Fallback post_limit: 5, reason=API call failed")
     return 5
 
-async def parse_query(query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg") -> Dict:
+async def parse_query(query: str, conversation_context: List[Dict], source_type: str = "lihkg", ai_engine: str = "Grok 3") -> Dict:
     """Parse query to extract intents, keywords, thread IDs, post_limit, and context summary."""
     if not isinstance(query, str):
         logger.error(f"Invalid query type: {type(query)}")
@@ -343,7 +405,7 @@ Output: {{"summary": "brief summary (max 100 chars)", "reason": "summarization l
             "max_tokens": 150,
             "temperature": 0.5
         }
-        if api_response := await call_grok3_api(payload, "generate_context_summary"):
+        if api_response := await call_api(payload, "generate_context_summary", ai_engine=ai_engine):
             response_content = api_response["choices"][0]["message"]["content"]
             try:
                 result = json.loads(response_content)
@@ -353,7 +415,7 @@ Output: {{"summary": "brief summary (max 100 chars)", "reason": "summarization l
                 logger.warning(f"Failed to parse context summary: {response_content}")
                 context_summary = "Unable to summarize conversation history"
 
-    keyword_result = await extract_keywords(query, conversation_context, grok3_api_key, source_type)
+    keyword_result = await extract_keywords(query, conversation_context, source_type, ai_engine)
     keywords, time_sensitive = keyword_result.get("keywords", []), keyword_result.get("time_sensitive", False)
     intents, thread_ids, query_lower, reason = [], [], query.lower(), "Initial intent detection"
 
@@ -383,7 +445,7 @@ Output: {{"intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "re
             "max_tokens": 300,
             "temperature": 0.5
         }
-        if api_response := await call_grok3_api(payload, "parse_query"):
+        if api_response := await call_api(payload, "parse_query", ai_engine=ai_engine):
             response_content = api_response["choices"][0]["message"]["content"]
             try:
                 result = json.loads(response_content)
@@ -405,7 +467,7 @@ Output: {{"intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "re
     if not intents:
         intents = [{"intent": "summarize_posts", "confidence": 0.7, "reason": "Default to summarization"}]
 
-    post_limit = await determine_post_limit(query, keywords, intents, source_type, grok3_api_key)
+    post_limit = await determine_post_limit(query, keywords, intents, source_type, ai_engine)
     logger.info(f"Parsed query: intents={[i['intent'] for i in intents]}, keywords={keywords}, post_limit={post_limit}, context_summary={context_summary}")
     return {
         "intents": intents[:4],
@@ -419,7 +481,7 @@ Output: {{"intents": [{{"intent": "intent", "confidence": 0.0-1.0, "reason": "re
         "context_summary": context_summary
     }
 
-async def extract_keywords(query: str, conversation_context: List[Dict], grok3_api_key: str, source_type: str = "lihkg") -> Dict:
+async def extract_keywords(query: str, conversation_context: List[Dict], source_type: str = "lihkg", ai_engine: str = "Grok 3") -> Dict:
     """Extract semantic keywords and related terms."""
     generic_terms = ["post", "分享", "有咩", "什麼", "點樣", "如何", "係咩"]
     platform_terms = {"lihkg": ["吹水", "連登", "高登"], "reddit": ["subreddit", "YOLO", "DD"]}
@@ -438,7 +500,7 @@ Output: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 chars)",
         "max_tokens": 200,
         "temperature": 0.3
     }
-    if api_response := await call_grok3_api(payload, "extract_keywords"):
+    if api_response := await call_api(payload, "extract_keywords", ai_engine=ai_engine):
         try:
             result = json.loads(api_response["choices"][0]["message"]["content"])
             keywords = [kw for kw in result.get("keywords", []) if kw.lower() not in generic_terms]
@@ -452,19 +514,19 @@ Output: {{"keywords": [], "related_terms": [], "reason": "logic (max 70 chars)",
             logger.error(f"JSON decode error in extract_keywords: response={api_response['choices'][0]['message']['content']}")
     return {"keywords": [], "related_terms": [], "reason": "API call failed", "time_sensitive": False}
 
-async def extract_relevant_thread(conversation_context: List[Dict], query: str, grok3_api_key: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+async def extract_relevant_thread(conversation_context: List[Dict], query: str, ai_engine: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """Extract relevant thread ID from history."""
     if len(conversation_context) < 2:
         return None, None, None, "No conversation history"
 
-    query_keyword_result = await extract_keywords(query, conversation_context, grok3_api_key)
+    query_keyword_result = await extract_keywords(query, conversation_context, ai_engine=ai_engine)
     query_keywords = query_keyword_result["keywords"] + query_keyword_result["related_terms"]
 
     for message in reversed(conversation_context):
         if message["role"] == "assistant" and "帖子 ID" in message["content"]:
             matches = re.findall(r"\[帖子 ID: ([a-zA-Z0-9]+)\] ([^\n]+)", message["content"])
             for thread_id, title in matches:
-                title_keyword_result = await extract_keywords(title, conversation_context, grok3_api_key)
+                title_keyword_result = await extract_keywords(title, conversation_context, ai_engine=ai_engine)
                 title_keywords = title_keyword_result["keywords"] + title_keyword_result["related_terms"]
                 common_keywords = set(query_keywords).intersection(title_keywords)
                 if common_keywords or any(kw.lower() in message["content"].lower() for kw in query_keywords):
@@ -483,7 +545,7 @@ Output: {{"thread_id": "id", "title": "title", "reason": "reason"}}
         "max_tokens": 100,
         "temperature": 0.5
     }
-    if api_response := await call_grok3_api(payload, "extract_relevant_thread"):
+    if api_response := await call_api(payload, "extract_relevant_thread", ai_engine=ai_engine):
         try:
             result = json.loads(api_response["choices"][0]["message"]["content"])
             thread_id = result.get("thread_id")
@@ -509,7 +571,7 @@ def extract_thread_metadata(metadata: List[Dict]) -> List[Dict]:
         logger.error(f"Error extracting metadata: {str(e)}")
         return []
 
-async def build_dynamic_prompt(query: str, conversation_context: List[Dict], metadata: List[Dict], thread_data: List[Dict], filters: Dict, intent: str, selected_source: Dict, grok3_api_key: str) -> str:
+async def build_dynamic_prompt(query: str, conversation_context: List[Dict], metadata: List[Dict], thread_data: List[Dict], filters: Dict, intent: str, selected_source: Dict, ai_engine: str) -> str:
     """Build dynamic prompt based on intent and data, incorporating context summary."""
     if isinstance(selected_source, str):
         source_name = selected_source
